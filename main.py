@@ -263,6 +263,8 @@ class TaskApp(App[None]):
             else datetime.now(singularity.local_tz()).date()
         )
         self.tasks: list[Task] = []
+        # How many tasks the shown view withheld; only the inbox withholds.
+        self.filed_out = 0
         self.projects: dict[str, str] = {}
         self._busy = False
 
@@ -297,11 +299,11 @@ class TaskApp(App[None]):
                 self.client = SingularityClient()
             if not self.projects:
                 self.projects = self.client.project_names()
-            tasks = self.client.tasks_at(self.position)
+            listing = self.client.tasks_at(self.position)
         except SingularityError as exc:
             self.call_from_thread(self.set_status, str(exc), True)
             return
-        self.call_from_thread(self.show_tasks, tasks)
+        self.call_from_thread(self.show_tasks, listing)
 
     @work(exclusive=False, thread=True)
     def submit_write(self, label: str, func, *args: Any) -> None:
@@ -325,10 +327,12 @@ class TaskApp(App[None]):
             self._busy = False
         self.load()
 
-    def show_tasks(self, tasks: list[Task]) -> None:
+    def show_tasks(self, listing: singularity.Listing) -> None:
         table = self.query_one(DataTable)
         previous = table.cursor_row
+        tasks = listing.tasks
         self.tasks = tasks
+        self.filed_out = listing.filed_out
         table.clear()
         for task in tasks:
             table.add_row(*self.row_for(task))
@@ -373,7 +377,11 @@ class TaskApp(App[None]):
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
         if isinstance(self.position, Bucket):
-            bar.update(f"{self.position.label}  ·  no date")
+            parts = [self.position.label, "no date"]
+            if self.filed_out:
+                parts.append(f"{len(self.tasks)} shown")
+                parts.append(f"{self.filed_out} filed, hidden")
+            bar.update("  ·  ".join(parts))
             return
         today = datetime.now(self.tz).date()
         delta = (self.position - today).days
@@ -421,6 +429,9 @@ class TaskApp(App[None]):
 
     def _go(self, position: "date | Bucket") -> None:
         self.position = position
+        # The withheld count belongs to the view being left, so clear it
+        # before repainting; load() sets the new one.
+        self.filed_out = 0
         self.update_daybar()
         self.load()
 
@@ -519,6 +530,11 @@ class TaskApp(App[None]):
         # inbox, deferred in never, or on the shown day at midnight flagged
         # as all-day -- a time of day is set in the app itself.
         if isinstance(self.position, Bucket):
+            # No projectId, so a task added from the inbox lands in the inbox
+            # rather than being filtered straight back out of it.  The field
+            # is omitted rather than sent empty: the API rejects both "" and
+            # null with `Must start with one of: "P-"`, and a task created
+            # without it comes back unfiled, which is what is wanted.
             fields = {"deferred": self.position.deferred}
         else:
             fields = {
