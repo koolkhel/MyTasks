@@ -23,7 +23,6 @@ from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.widgets import (
     DataTable,
-    Footer,
     Header,
     Input,
     Label,
@@ -42,6 +41,88 @@ from singularity import (
 )
 
 MARKS = {EMPTY: "☐", CHECKED: "☑", CANCELLED: "☒"}
+
+
+class KeyBar(Static):
+    """Every binding the board advertises, wrapped over as many rows as it takes.
+
+    The built-in footer is one row and cannot wrap, so at any realistic width
+    it truncates -- the last entries, `? Help` among them, simply vanish.
+    This packs the same entries by measured width instead.
+
+    Entries come from the app's own bindings rather than a hand-written list,
+    so the bar cannot advertise a key that does nothing or omit one that
+    works.  It is a display only: `can_focus` stays false so the keys it
+    names keep reaching the app.
+    """
+
+    #: Textual's key names are not what a person presses.
+    KEY_NAMES = {
+        "full_stop": ".",
+        "question_mark": "?",
+        "space": "space",
+        "enter": "enter",
+    }
+    #: Kept so the existing route into Textual's palette survives the swap.
+    PALETTE_ENTRY = ("^p", "palette")
+
+    can_focus = False
+    can_focus_children = False
+
+    def entries(self) -> list[tuple[str, str]]:
+        """(key, description) for every shown binding, in binding order."""
+        out = []
+        for binding in self.app.BINDINGS:
+            if not binding.show or not binding.description:
+                continue
+            first = binding.key.split(",")[0].strip()
+            out.append((self.KEY_NAMES.get(first, first), binding.description))
+        out.append(self.PALETTE_ENTRY)
+        return out
+
+    @staticmethod
+    def pack(entries: list[tuple[str, str]], width: int) -> list[list[tuple[str, str]]]:
+        """Greedy left-to-right packing into rows that fit `width`.
+
+        Greedy rather than balanced: an even right edge would reorder the
+        entries away from the order they are learnt in, and reading order
+        matters more here than tidiness.  An entry wider than the whole
+        terminal still gets its own row rather than being dropped -- the
+        point of this widget is that nothing disappears.
+        """
+        rows: list[list[tuple[str, str]]] = []
+        row: list[tuple[str, str]] = []
+        used = 0
+        for key, desc in entries:
+            cost = len(key) + len(desc) + 1 + (2 if row else 0)
+            if row and used + cost > width:
+                rows.append(row)
+                row, used = [], 0
+                cost = len(key) + len(desc) + 1
+            row.append((key, desc))
+            used += cost
+        if row:
+            rows.append(row)
+        return rows
+
+    def rebuild(self) -> None:
+        width = max(self.size.width or self.app.size.width, 1)
+        rows = self.pack(self.entries(), width)
+        self.styles.height = len(rows)
+        self.update(
+            "\n".join(
+                "  ".join(f"[b]{k}[/b] [dim]{d}[/dim]" for k, d in row)
+                for row in rows
+            )
+        )
+
+    def on_mount(self) -> None:
+        self.rebuild()
+
+    def on_resize(self) -> None:
+        # Re-pack rather than measuring once: a bar packed for the startup
+        # width would clip again the moment the terminal narrowed.
+        self.rebuild()
 
 
 class TaskInput(ModalScreen[str]):
@@ -271,6 +352,7 @@ class TaskApp(App[None]):
     }
 
     #status { height: 1; padding: 0 1; color: $text-muted; }
+    #keybar { padding: 0 1; background: $panel; }
     #status.error { color: $error; }
 
     #dialog {
@@ -319,7 +401,7 @@ class TaskApp(App[None]):
         # forward-delete, so its Delete key arrives as backspace, while an
         # external keyboard sends delete.  A priority binding would take
         # backspace away from the text prompts, where it erases characters.
-        Binding("delete,backspace", "delete", "Delete"),
+        Binding("backspace,delete", "delete", "Delete"),
         Binding("question_mark", "help", "Help"),
     ]
 
@@ -352,7 +434,7 @@ class TaskApp(App[None]):
             yield DataTable(id="tasks", cursor_type="row", zebra_stripes=True)
             yield Static("", id="detail")
         yield Static("", id="status")
-        yield Footer()
+        yield KeyBar(id="keybar")
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
