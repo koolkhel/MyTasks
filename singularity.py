@@ -175,6 +175,11 @@ class Task:
         return bool(self.raw.get("isNote"))
 
     @property
+    def deferred(self) -> bool:
+        """The API's "someday" flag; always paired with no start date."""
+        return bool(self.raw.get("deferred"))
+
+    @property
     def recurring(self) -> bool:
         return bool(self.raw.get("recurrence"))
 
@@ -201,6 +206,42 @@ class Task:
             return "all-day"
         started = self.local_start(tz)
         return started.strftime("%H:%M") if started else "all-day"
+
+    def past_due_since(
+        self, now: datetime, tz: tzinfo | None = None
+    ) -> datetime | None:
+        """When this task first became late, or None if it is not.
+
+        Late means an unfinished task whose start day is already over, or
+        whose deadline has passed.  When both apply the earlier one wins:
+        that is the moment it first slipped, and it is what "how overdue"
+        should be measured from.
+
+        A deferred task is never late.  The never view exists to set a task
+        aside, and calling it overdue would drag it back into today.
+
+        Pure in `now` on purpose -- no clock is read here -- so the rule can
+        be checked against a fixed instant without touching the API.
+        """
+        if self.done or self.cancelled or self.deferred:
+            return None
+        tz = tz or local_tz()
+        triggers = []
+        started = self.start
+        if started is not None:
+            # The whole start day has to be over, so compare against the day
+            # after it: a task starting later today is not late yet.
+            day_after = datetime.combine(
+                started.astimezone(tz).date() + timedelta(days=1),
+                time.min,
+                tzinfo=tz,
+            )
+            if day_after <= now:
+                triggers.append(started)
+        deadline = self.deadline
+        if deadline is not None and deadline < now:
+            triggers.append(deadline)
+        return min(triggers) if triggers else None
 
     @property
     def note_text(self) -> str:
@@ -243,6 +284,16 @@ class Listing:
 
     tasks: list[Task]
     filed_out: int = 0
+    #: How many of `tasks` are past due; only today's view gathers any.
+    past_due: int = 0
+    #: The instant every past-due decision in this listing was made against,
+    #: so a caller styling a row asks the same question the counts answered.
+    reference: datetime | None = None
+
+    @property
+    def due_now(self) -> int:
+        """Rows that are not past due -- what the shown day itself holds."""
+        return len(self.tasks) - self.past_due
 
     def __iter__(self):
         return iter(self.tasks)
@@ -376,7 +427,8 @@ class SingularityClient:
         be on for them to show up at all -- without it a day you have already
         worked through comes back looking empty.
         """
-        day = day or datetime.now(self.tz).date()
+        now = datetime.now(self.tz)
+        day = day or now.date()
         lower, upper = day_bounds(day, self.tz)
         filters.setdefault("includeArchived", include_done)
         tasks = self.list_tasks(
@@ -384,7 +436,45 @@ class SingularityClient:
         )
         if not include_done:
             tasks = [t for t in tasks if not t.done and not t.cancelled]
-        return Listing(sort_for_display(tasks, self.tz))
+
+        if day != now.date():
+            # Only today gathers, counts, or marks what is past due.  On any
+            # other day the tasks shown are that day's own -- and yesterday's
+            # unfinished ones are late by definition, so carrying a reference
+            # instant here would repaint the whole view as overdue.
+            return Listing(sort_for_display(tasks, self.tz))
+
+        extra = [t for t in self._past_due_tasks(now, **filters)
+                 if t.id not in {x.id for x in tasks}]
+        tasks = tasks + extra
+        return Listing(
+            sort_for_display(tasks, self.tz, now),
+            past_due=sum(1 for t in tasks if t.past_due_since(now, self.tz)),
+            reference=now,
+        )
+
+    def _past_due_tasks(self, now: datetime, **filters: Any) -> list[Task]:
+        """Unfinished tasks whose start day is over or whose deadline passed.
+
+        Two requests, because the filters combine with AND: asking for a
+        passed start and a passed deadline in one call returns only tasks
+        with both, not either.  The union is taken here and de-duplicated by
+        id, since a task can qualify under both rules.
+        """
+        midnight = iso_z(datetime.combine(now.date(), time.min, tzinfo=self.tz))
+        # includeArchived=False is not the same as "unfinished": a task can
+        # be completed without being archived, and such tasks do come back
+        # from this query.  The completion check in `past_due_since` is what
+        # actually keeps them out, so it is not redundant.
+        shared = dict(filters, includeArchived=False, maxCount=MAX_PAGE)
+        by_start = self.list_tasks(**{"start.lt": midnight}, **shared)
+        by_deadline = self.list_tasks(**{"deadline.lt": iso_z(now)}, **shared)
+
+        found: dict[str, Task] = {}
+        for task in (*by_start, *by_deadline):
+            if task.past_due_since(now, self.tz):
+                found.setdefault(task.id, task)
+        return list(found.values())
 
     def tasks_in_bucket(self, bucket: Bucket, **filters: Any) -> Listing:
         """Unfinished dateless tasks, split by the `deferred` flag.
@@ -503,6 +593,17 @@ class SingularityClient:
         return names
 
 
+def overdue_label(since: datetime, now: datetime) -> str:
+    """How overdue, in at most 8 cells to fit the when-column.
+
+    Whole days elapsed, so something late this morning reads "1d ago" rather
+    than a count of hours.  "999d ago" is exactly 8 cells; anything older
+    saturates instead of widening the column or being clipped mid-number.
+    """
+    days = max(1, (now - since).days)
+    return "999d+" if days > 999 else f"{days}d ago"
+
+
 def decode_emoji(value: str | None) -> str:
     """Turn a project's stored emoji into a character.
 
@@ -536,14 +637,26 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def sort_for_display(tasks: list[Task], tz: tzinfo | None = None) -> list[Task]:
-    """Open before finished, timed before all-day, then by time and title."""
+def sort_for_display(
+    tasks: list[Task],
+    tz: tzinfo | None = None,
+    now: datetime | None = None,
+) -> list[Task]:
+    """Open before finished, past due before due today, then time and title.
+
+    Passing `now` enables the past-due dimension; without it the ordering is
+    exactly what it was, which is what every view other than today wants.
+    """
     tz = tz or local_tz()
 
     def key(task: Task):
         started = task.local_start(tz)
+        late = task.past_due_since(now, tz) if now else None
         return (
             task.done or task.cancelled,
+            late is None,
+            # Most overdue first within the past-due group; constant elsewhere.
+            late.timestamp() if late else 0.0,
             not task.pinned,
             not task.timed,
             started.timetuple()[3:5] if (started and task.timed) else (0, 0),

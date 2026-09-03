@@ -145,6 +145,54 @@ class DatePicker(ModalScreen[str]):
         self.dismiss(None)
 
 
+class TaskFocus(ModalScreen[None]):
+    """The selected task, shown in full and shown only.
+
+    The task list gives a title whatever width is left over, so a long one is
+    clipped there; this is the view that shows all of it.  Nothing here writes
+    -- the key that opens it deliberately does not tick, so a task cannot be
+    completed by looking at it.
+    """
+
+    BINDINGS = [Binding("escape,enter,q", "close", "Close")]
+
+    # Deliberately not `task` or `_task`: `Screen` exposes a read-only `task`
+    # property, and `_task` is the message-pump coroutine MessagePump sets in
+    # its own __init__ -- assigning over either breaks the screen.
+    def __init__(self, task: Task, when: str, project: str, tz):
+        super().__init__()
+        self.shown_task = task
+        self.shown_when = when
+        self.shown_project = project
+        self.shown_tz = tz
+
+    def compose(self) -> ComposeResult:
+        task = self.shown_task
+        with Vertical(id="dialog"):
+            yield Label("Now", id="dialog-title")
+            yield Static(task.title, id="focus-title")
+            # Only the lines the task actually has something for, so a bare
+            # task does not render empty labels or stray separators.
+            facts = [self.shown_when]
+            if self.shown_project:
+                facts.append(self.shown_project)
+            deadline = task.deadline
+            if deadline:
+                facts.append(f"deadline {deadline.astimezone(self.shown_tz):%a %d %b %H:%M}")
+            if task.recurring:
+                facts.append("recurring")
+            if task.pinned:
+                facts.append("pinned")
+            yield Static("  ·  ".join(facts), id="focus-facts")
+            note = task.note_text
+            if note:
+                yield Static(note, id="focus-note")
+            yield Label("esc to close", id="dialog-hint")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class Help(ModalScreen[None]):
     BINDINGS = [Binding("escape,question_mark,q", "close", "Close")]
 
@@ -157,14 +205,17 @@ class Help(ModalScreen[None]):
   n                  never — tasks set aside
   r                  reload from the server
 
+[b]Looking at a task[/b]
+  enter              show the selected task in full
+
 [b]Changing tasks[/b]
-  space or enter     tick / untick the selected task
+  space              tick / untick the selected task
   d                  set the date: today, tomorrow, a
                      given day, never, or cleared
   x                  cancel the task
   a                  add a task to the shown view
   e                  rename the selected task
-  delete             delete for good (asks first)
+  backspace          delete for good (asks first)
 
 [b]Other[/b]
   ?                  this help
@@ -231,6 +282,9 @@ class TaskApp(App[None]):
     #dialog-hint { color: $text-muted; }
     #help-body { padding: 1 0; }
     #picker-body { padding: 1 0; }
+    #focus-title { text-style: bold; padding: 1 0 0 0; }
+    #focus-facts { color: $text-muted; padding: 1 0 0 0; }
+    #focus-note { padding: 1 0 0 0; }
     ModalScreen { align: center middle; }
     """
 
@@ -244,12 +298,23 @@ class TaskApp(App[None]):
         Binding("i", "inbox", "Inbox"),
         Binding("n", "never", "Never"),
         Binding("r", "refresh", "Reload"),
-        Binding("space,enter", "toggle", "Tick"),
+        Binding("space", "toggle", "Tick"),
+        # Not priority: a priority binding fires ahead of every focused
+        # widget, including the Input inside the rename, add, and date
+        # prompts, which then can never be confirmed with enter.  On the
+        # board the focused DataTable turns enter into RowSelected, which
+        # `row_selected` below acts on; this entry names the key in the
+        # footer and covers the case where the table is not focused.
+        Binding("enter", "focus_task", "Focus"),
         Binding("a", "add", "Add"),
         Binding("e", "rename", "Rename"),
         Binding("x", "cancel_task", "Cancel"),
         Binding("d", "schedule", "Date"),
-        Binding("delete", "delete", "Delete"),
+        # Both keys, and deliberately NOT priority: a Mac laptop has no
+        # forward-delete, so its Delete key arrives as backspace, while an
+        # external keyboard sends delete.  A priority binding would take
+        # backspace away from the text prompts, where it erases characters.
+        Binding("delete,backspace", "delete", "Delete"),
         Binding("question_mark", "help", "Help"),
     ]
 
@@ -265,6 +330,11 @@ class TaskApp(App[None]):
         self.tasks: list[Task] = []
         # How many tasks the shown view withheld; only the inbox withholds.
         self.filed_out = 0
+        # How many rows are past due, and the instant that was decided
+        # against.  Only today's view gathers any, so elsewhere this is
+        # 0 / None and no row is marked.
+        self.past_due = 0
+        self.reference: datetime | None = None
         self.projects: dict[str, str] = {}
         self._busy = False
 
@@ -333,6 +403,8 @@ class TaskApp(App[None]):
         tasks = listing.tasks
         self.tasks = tasks
         self.filed_out = listing.filed_out
+        self.past_due = listing.past_due
+        self.reference = listing.reference
         table.clear()
         for task in tasks:
             table.add_row(*self.row_for(task))
@@ -341,7 +413,10 @@ class TaskApp(App[None]):
         self.update_daybar()
         self.update_detail()
         done = sum(1 for t in tasks if t.done)
-        self.set_status(f"{len(tasks)} task(s) · {done} done")
+        bits = [f"{len(tasks)} task(s)", f"{done} done"]
+        if self.past_due:
+            bits.insert(1, f"{self.past_due} past due")
+        self.set_status(" · ".join(bits))
 
     def row_for(self, task: Task) -> tuple[str, str, str, str]:
         title = task.title
@@ -349,15 +424,41 @@ class TaskApp(App[None]):
             title = f"↻ {title}"
         if task.is_note:
             title = f"≡ {title}"
+        late = task.past_due_since(self.reference, self.tz) if self.reference else None
+        when = (
+            singularity.overdue_label(late, self.reference)
+            if late
+            else task.start_label(self.tz)
+        )
         if task.done or task.cancelled:
             title = f"[strike dim]{title}[/]"
+        elif late:
+            title = f"[{self.late_colour}]{title}[/]"
         project = self.projects.get(task.project_id or "", "")
         return (
             MARKS[task.checked],
-            task.start_label(self.tz),
+            when,
             title,
             f"[dim]{project}[/dim]" if project else "",
         )
+
+    @property
+    def late_colour(self) -> str:
+        """The colour a past-due title is drawn in, resolved from the theme.
+
+        Table cells are rendered with Rich markup, which does not understand
+        Textual's `$name` variables, so the value has to be resolved here and
+        embedded literally.
+
+        `text-error` rather than `text-warning`: in the bundled themes
+        `warning` and `text-warning` are the *same values* as `accent` and
+        `text-accent`, and `accent` is the selected row's background, so a
+        warning-coloured title would be indistinguishable from the cursor.
+        The cursor style replaces a cell's colour outright on the selected
+        row -- for every row, not just these -- so a past-due row that is
+        selected is told apart by its age label instead.
+        """
+        return self.theme_variables.get("text-error", "#d17e92")
 
     @property
     def tz(self):
@@ -418,6 +519,11 @@ class TaskApp(App[None]):
     @on(DataTable.RowHighlighted)
     def row_changed(self) -> None:
         self.update_detail()
+
+    @on(DataTable.RowSelected)
+    def row_selected(self) -> None:
+        """Enter (or a click) on a row opens the focus card."""
+        self.action_focus_task()
 
     # -- actions -----------------------------------------------------------
 
@@ -571,6 +677,19 @@ class TaskApp(App[None]):
         if not ok:
             return
         self.submit_write("Deleting", self.client.delete_task, task.id)
+
+    def action_focus_task(self) -> None:
+        task = self.selected
+        if task is None:
+            return
+        self.push_screen(
+            TaskFocus(
+                task,
+                task.start_label(self.tz),
+                self.projects.get(task.project_id or "", ""),
+                self.tz,
+            )
+        )
 
     def action_help(self) -> None:
         self.push_screen(Help())
