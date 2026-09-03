@@ -1,0 +1,594 @@
+"""Client for the SingularityApp REST API v2.
+
+Docs: https://singularity-app.ru/wiki/api/
+Swagger: https://api.singularity-app.com/v2/api  (JSON at /v2/api-json)
+
+Quirks worth knowing, discovered against the live API:
+
+* The date filters reject date-only values ("2026-09-03") and reject numeric
+  UTC offsets ("...+03:00"), despite what the docs show.  Only full ISO
+  datetimes ending in "Z" are accepted, so every datetime is normalised to
+  UTC-Z before it goes out.  See `iso_z`.
+* `startDateFrom` / `startDateTo` are deprecated aliases for `start.gte` /
+  `start.lte`; this client uses the modern spelling.
+* All timestamps come back in UTC, so "today" is a window between two UTC
+  instants derived from local midnight, not a date string.  See `day_bounds`.
+* With `includeAllRecurrenceInstances=false` (the default) the server
+  post-filters after paging, so `count` can be under `maxCount` and offset
+  paging can skip rows.  `iter_tasks` therefore forces the flag on when it
+  pages.
+"""
+
+from __future__ import annotations
+
+import enum
+import os
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from typing import Any, Iterator
+
+import requests
+from dotenv import load_dotenv
+
+DEFAULT_BASE_URL = "https://api.singularity-app.com/v2"
+MAX_PAGE = 1000
+
+# `checked` values (per TaskCreateDto in the spec).
+EMPTY, CHECKED, CANCELLED = 0, 1, 2
+# `priority` values.
+HIGH, NORMAL, LOW = 0, 1, 2
+# `state` values.
+PINNED, UNPINNED = 0, 1
+
+PRIORITY_NAMES = {HIGH: "high", NORMAL: "normal", LOW: "low"}
+
+
+class Bucket(enum.Enum):
+    """The two places a task can sit when it has no date.
+
+    A board position is either a `datetime.date` or one of these, so callers
+    pass a single value instead of a date plus a pair of flags that could
+    contradict each other.  Both buckets are `start.isSet=false` upstream;
+    `deferred` is what separates them.
+    """
+
+    INBOX = "inbox"
+    NEVER = "never"
+
+    @property
+    def deferred(self) -> bool:
+        """Whether tasks in this bucket carry the API's `deferred` flag."""
+        return self is Bucket.NEVER
+
+    @property
+    def label(self) -> str:
+        return "Inbox" if self is Bucket.INBOX else "Never"
+
+
+#: A position the board can show: one calendar day, or one of the buckets.
+Position = "date | Bucket"
+
+
+class SingularityError(Exception):
+    """Any failure talking to the API."""
+
+
+class ApiError(SingularityError):
+    """The API answered with a non-2xx status."""
+
+    def __init__(self, status: int, message: str, payload: Any = None):
+        super().__init__(f"HTTP {status}: {message}")
+        self.status = status
+        self.message = message
+        self.payload = payload
+
+
+# --------------------------------------------------------------------------
+# time helpers
+# --------------------------------------------------------------------------
+
+def local_tz() -> tzinfo:
+    """The machine's local timezone, as a fixed-offset tzinfo."""
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def iso_z(moment: datetime) -> str:
+    """Format a datetime the one way the API's date filters accept.
+
+    Naive datetimes are read as local time.  The result always ends in "Z"
+    because numeric offsets are rejected by the server.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=local_tz())
+    return (
+        moment.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def parse_dt(value: str | None) -> datetime | None:
+    """Parse an API timestamp into an aware datetime (None passes through)."""
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def day_bounds(day: date, tz: tzinfo | None = None) -> tuple[str, str]:
+    """The half-open local day [00:00, 24:00) as two ISO-Z instants.
+
+    The upper bound is the last millisecond of the day rather than the next
+    midnight, because the API's `start.lte` filter is inclusive: using
+    midnight itself would pull in the following day's first task.
+    """
+    tz = tz or local_tz()
+    start = datetime.combine(day, time.min, tzinfo=tz)
+    end = datetime.combine(day, time.max, tzinfo=tz)
+    return iso_z(start), iso_z(end)
+
+
+# --------------------------------------------------------------------------
+# task model
+# --------------------------------------------------------------------------
+
+@dataclass
+class Task:
+    """A task, wrapping the raw API dict with the bits the UI cares about."""
+
+    raw: dict[str, Any] = field(repr=False)
+
+    @property
+    def id(self) -> str:
+        return self.raw["id"]
+
+    @property
+    def title(self) -> str:
+        return self.raw.get("title") or "(untitled)"
+
+    @property
+    def checked(self) -> int:
+        return self.raw.get("checked") or 0
+
+    @property
+    def done(self) -> bool:
+        return self.checked == CHECKED
+
+    @property
+    def cancelled(self) -> bool:
+        return self.checked == CANCELLED
+
+    @property
+    def priority(self) -> int:
+        p = self.raw.get("priority")
+        return NORMAL if p is None else p
+
+    @property
+    def pinned(self) -> bool:
+        return self.raw.get("state") == PINNED
+
+    @property
+    def project_id(self) -> str | None:
+        return self.raw.get("projectId") or None
+
+    @property
+    def is_note(self) -> bool:
+        return bool(self.raw.get("isNote"))
+
+    @property
+    def recurring(self) -> bool:
+        return bool(self.raw.get("recurrence"))
+
+    @property
+    def start(self) -> datetime | None:
+        return parse_dt(self.raw.get("start"))
+
+    @property
+    def deadline(self) -> datetime | None:
+        return parse_dt(self.raw.get("deadline"))
+
+    @property
+    def timed(self) -> bool:
+        """True when the start carries a meaningful time of day."""
+        return bool(self.raw.get("useTime"))
+
+    def local_start(self, tz: tzinfo | None = None) -> datetime | None:
+        started = self.start
+        return started.astimezone(tz or local_tz()) if started else None
+
+    def start_label(self, tz: tzinfo | None = None) -> str:
+        """"HH:MM" for timed tasks, "all-day" otherwise."""
+        if not self.timed:
+            return "all-day"
+        started = self.local_start(tz)
+        return started.strftime("%H:%M") if started else "all-day"
+
+    @property
+    def note_text(self) -> str:
+        """The note as plain text.
+
+        Notes are stored in Quill delta format -- a JSON array of
+        `{"insert": "..."}` ops -- but older tasks hold a plain string, so
+        handle both and fall back to the raw value.
+        """
+        note = self.raw.get("note")
+        if not note:
+            return ""
+        if isinstance(note, str):
+            stripped = note.strip()
+            if not stripped.startswith("["):
+                return note
+            import json
+
+            try:
+                note = json.loads(stripped)
+            except json.JSONDecodeError:
+                return note
+        if isinstance(note, list):
+            parts = []
+            for op in note:
+                if isinstance(op, dict) and isinstance(op.get("insert"), str):
+                    parts.append(op["insert"])
+            return "".join(parts).strip()
+        return str(note)
+
+
+@dataclass
+class Listing:
+    """The tasks a view shows, plus what it deliberately withheld.
+
+    `filed_out` is only ever non-zero for the inbox: it counts the unfinished
+    undated tasks kept out for already having a project, so the board can say
+    they exist without putting them in the triage queue.
+    """
+
+    tasks: list[Task]
+    filed_out: int = 0
+
+    def __iter__(self):
+        return iter(self.tasks)
+
+    def __len__(self) -> int:
+        return len(self.tasks)
+
+
+# --------------------------------------------------------------------------
+# client
+# --------------------------------------------------------------------------
+
+def load_token(env_path: str | os.PathLike[str] | None = None) -> str:
+    """Read SINGULARITY_TOKEN from the environment, loading .env first."""
+    load_dotenv(env_path, override=False)
+    token = os.getenv("SINGULARITY_TOKEN", "").strip()
+    if not token:
+        raise SingularityError(
+            "SINGULARITY_TOKEN is not set -- put it in .env or the environment"
+        )
+    return token
+
+
+class SingularityClient:
+    """Thin wrapper over the REST API.
+
+    Only the endpoints this app needs are spelled out; anything else in the
+    API is reachable through `request`.
+    """
+
+    def __init__(
+        self,
+        token: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = 20.0,
+        tz: tzinfo | None = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.tz = tz or local_tz()
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {token or load_token()}",
+                "Accept": "application/json",
+            }
+        )
+
+    # -- plumbing ----------------------------------------------------------
+
+    def request(self, method: str, path: str, **kwargs: Any) -> Any:
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        params = kwargs.pop("params", None)
+        if params:
+            params = _clean_params(params)
+        try:
+            response = self.session.request(
+                method, url, params=params, timeout=self.timeout, **kwargs
+            )
+        except requests.RequestException as exc:
+            raise SingularityError(f"{method} {url} failed: {exc}") from exc
+
+        payload: Any = None
+        if response.content:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = response.text
+
+        if not response.ok:
+            message = response.reason
+            if isinstance(payload, dict):
+                detail = payload.get("message") or payload.get("error")
+                if isinstance(detail, list):
+                    detail = "; ".join(str(d) for d in detail)
+                message = detail or message
+            elif isinstance(payload, str) and payload:
+                message = payload[:200]
+            raise ApiError(response.status_code, str(message), payload)
+        return payload
+
+    def get(self, path: str, **params: Any) -> Any:
+        return self.request("GET", path, params=params)
+
+    def post(self, path: str, body: dict[str, Any] | None = None, **params: Any) -> Any:
+        return self.request("POST", path, json=body or {}, params=params)
+
+    def patch(self, path: str, body: dict[str, Any]) -> Any:
+        return self.request("PATCH", path, json=body)
+
+    def delete(self, path: str, **params: Any) -> Any:
+        return self.request("DELETE", path, params=params)
+
+    # -- tasks -------------------------------------------------------------
+
+    def list_tasks(self, **filters: Any) -> list[Task]:
+        """One page of tasks (server default ordering)."""
+        payload = self.get("/task", **filters)
+        return [Task(row) for row in payload.get("tasks", [])]
+
+    def iter_tasks(self, page_size: int = MAX_PAGE, **filters: Any) -> Iterator[Task]:
+        """Every matching task, paging until the server runs out.
+
+        Recurrence instances are forced on: with them off the server
+        post-filters each page and offset paging can silently skip rows.
+        """
+        filters = dict(filters, includeAllRecurrenceInstances=True)
+        offset = 0
+        while True:
+            payload = self.get(
+                "/task", maxCount=page_size, offset=offset, paginationData=True, **filters
+            )
+            rows = payload.get("tasks", [])
+            for row in rows:
+                yield Task(row)
+            page = payload.get("pagination") or {}
+            total = page.get("total")
+            offset += len(rows)
+            if not rows or (total is not None and offset >= total):
+                return
+
+    def tasks_for_day(
+        self,
+        day: date | None = None,
+        include_done: bool = True,
+        **filters: Any,
+    ) -> Listing:
+        """Tasks starting on a local calendar day, ordered for display.
+
+        Completed tasks are archived by the app, so `includeArchived` has to
+        be on for them to show up at all -- without it a day you have already
+        worked through comes back looking empty.
+        """
+        day = day or datetime.now(self.tz).date()
+        lower, upper = day_bounds(day, self.tz)
+        filters.setdefault("includeArchived", include_done)
+        tasks = self.list_tasks(
+            **{"start.gte": lower, "start.lte": upper, "maxCount": MAX_PAGE}, **filters
+        )
+        if not include_done:
+            tasks = [t for t in tasks if not t.done and not t.cancelled]
+        return Listing(sort_for_display(tasks, self.tz))
+
+    def tasks_in_bucket(self, bucket: Bucket, **filters: Any) -> Listing:
+        """Unfinished dateless tasks, split by the `deferred` flag.
+
+        Finished tasks are left out on purpose, and this is the one place the
+        dateless views diverge from `tasks_for_day`: undated tasks number a
+        few dozen while open but a couple of thousand once archived ones are
+        counted, so including them would bury whatever is awaiting triage.
+
+        The inbox additionally drops tasks that already have a project -- a
+        filed task has been sorted, so it is not awaiting triage -- and
+        reports how many it dropped.  The split happens here rather than in
+        the query so one request yields both numbers.  The never view keeps
+        filed tasks: something set aside deliberately stays visible whether
+        or not it has been filed.
+        """
+        tasks = self.list_tasks(
+            **{
+                "start.isSet": False,
+                "deferred.eq": bucket.deferred,
+                "maxCount": MAX_PAGE,
+            },
+            **filters,
+        )
+        tasks = [t for t in tasks if not t.done and not t.cancelled]
+        filed_out = 0
+        if bucket is Bucket.INBOX:
+            unfiled = [t for t in tasks if not t.project_id]
+            filed_out = len(tasks) - len(unfiled)
+            tasks = unfiled
+        return Listing(sort_for_display(tasks, self.tz), filed_out)
+
+    def tasks_at(self, position: "date | Bucket", **filters: Any) -> Listing:
+        """Tasks for whichever position the board is showing."""
+        if isinstance(position, Bucket):
+            return self.tasks_in_bucket(position, **filters)
+        return self.tasks_for_day(position, **filters)
+
+    def get_task(self, task_id: str) -> Task:
+        payload = self.get(f"/task/{task_id}")
+        return Task(payload.get("task", payload))
+
+    def create_task(self, title: str, **fields: Any) -> Task:
+        payload = self.post("/task", {"title": title, **fields})
+        return Task(payload.get("task", payload))
+
+    def update_task(self, task_id: str, **fields: Any) -> Task:
+        payload = self.patch(f"/task/{task_id}", fields)
+        return Task(payload.get("task", payload))
+
+    def set_schedule(
+        self,
+        task_id: str,
+        position: "date | Bucket",
+        use_time: bool = False,
+    ) -> Task:
+        """Move a task to a day, to never, or back to the inbox.
+
+        `start` and `deferred` go out in one request because they are two
+        halves of one fact and the server will not reconcile them: setting a
+        date on a deferred task leaves `deferred` true unless it is cleared
+        explicitly, a dated-and-deferred state that no real task is in and
+        that no view would show consistently.  Sending both together is what
+        makes that state unreachable.
+
+        Clearing a date is the same operation as moving to the inbox, so it
+        has no separate method.
+        """
+        if isinstance(position, Bucket):
+            fields: dict[str, Any] = {"start": None, "deferred": position.deferred}
+        else:
+            fields = {
+                "start": iso_z(datetime.combine(position, time.min, tzinfo=self.tz)),
+                "useTime": use_time,
+                "deferred": False,
+            }
+        return self.update_task(task_id, **fields)
+
+    def delete_task(self, task_id: str) -> Any:
+        return self.delete(f"/task/{task_id}")
+
+    def complete_task(self, task_id: str) -> Any:
+        return self.post(f"/task/{task_id}/complete")
+
+    def uncomplete_task(self, task_id: str) -> Any:
+        return self.post(f"/task/{task_id}/uncomplete")
+
+    def complete_today(self, task_id: str) -> Any:
+        """Tick off one occurrence of a recurring task, keeping the series."""
+        return self.post(f"/task/{task_id}/complete-today")
+
+    def cancel_task(self, task_id: str) -> Any:
+        return self.post(f"/task/{task_id}/cancel")
+
+    def set_done(self, task: Task, done: bool) -> Any:
+        """Flip a task's completion, picking the right endpoint for it."""
+        if not done:
+            return self.uncomplete_task(task.id)
+        if task.recurring:
+            return self.complete_today(task.id)
+        return self.complete_task(task.id)
+
+    # -- projects ----------------------------------------------------------
+
+    def list_projects(self, **filters: Any) -> list[dict[str, Any]]:
+        payload = self.get("/project", maxCount=MAX_PAGE, **filters)
+        return payload.get("projects", [])
+
+    def project_names(self, **filters: Any) -> dict[str, str]:
+        """Map project id -> display title, for labelling tasks."""
+        names = {}
+        for project in self.list_projects(**filters):
+            title = project.get("title") or ""
+            emoji = decode_emoji(project.get("emoji"))
+            names[project["id"]] = f"{emoji} {title}".strip() if emoji else title
+        return names
+
+
+def decode_emoji(value: str | None) -> str:
+    """Turn a project's stored emoji into a character.
+
+    Projects hold the emoji as hyphen-separated hex codepoints ("1f525", or
+    "1f1f7-1f1fa" for a sequence), not as the character itself.  Anything that
+    is not codepoints -- including an already-decoded emoji -- is handed back
+    untouched.
+    """
+    if not value:
+        return ""
+    parts = value.split("-")
+    try:
+        return "".join(chr(int(part, 16)) for part in parts)
+    except (ValueError, OverflowError):
+        return value
+
+
+def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Drop None values and render booleans the way the API expects."""
+    out = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        elif isinstance(value, datetime):
+            value = iso_z(value)
+        elif isinstance(value, (list, tuple)):
+            value = ",".join(str(v) for v in value)
+        out[key] = value
+    return out
+
+
+def sort_for_display(tasks: list[Task], tz: tzinfo | None = None) -> list[Task]:
+    """Open before finished, timed before all-day, then by time and title."""
+    tz = tz or local_tz()
+
+    def key(task: Task):
+        started = task.local_start(tz)
+        return (
+            task.done or task.cancelled,
+            not task.pinned,
+            not task.timed,
+            started.timetuple()[3:5] if (started and task.timed) else (0, 0),
+            task.title.casefold(),
+        )
+
+    return sorted(tasks, key=key)
+
+
+# --------------------------------------------------------------------------
+# CLI -- `python singularity.py [--date YYYY-MM-DD] [--json] [--open]`
+# --------------------------------------------------------------------------
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="List SingularityApp tasks for a day.")
+    parser.add_argument("--date", help="day to list, YYYY-MM-DD (default: today)")
+    parser.add_argument("--open", action="store_true", help="hide finished tasks")
+    parser.add_argument("--json", action="store_true", help="dump raw JSON")
+    args = parser.parse_args(argv)
+
+    day = date.fromisoformat(args.date) if args.date else None
+    try:
+        client = SingularityClient()
+        tasks = client.tasks_for_day(day, include_done=not args.open).tasks
+        projects = client.project_names() if not args.json else {}
+    except SingularityError as exc:
+        print(f"error: {exc}")
+        return 1
+
+    if args.json:
+        print(json.dumps([t.raw for t in tasks], ensure_ascii=False, indent=2))
+        return 0
+
+    day = day or datetime.now(client.tz).date()
+    print(f"{day:%A %d %B %Y} -- {len(tasks)} task(s)")
+    for task in tasks:
+        mark = {EMPTY: "[ ]", CHECKED: "[x]", CANCELLED: "[-]"}[task.checked]
+        project = projects.get(task.project_id or "", "")
+        suffix = f"  ({project})" if project else ""
+        print(f"  {mark} {task.start_label(client.tz):>7}  {task.title}{suffix}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
