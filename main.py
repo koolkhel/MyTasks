@@ -19,6 +19,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -251,7 +252,7 @@ class TaskFocus(ModalScreen[None]):
         task = self.shown_task
         with Vertical(id="dialog"):
             yield Label("Now", id="dialog-title")
-            yield Static(task.title, id="focus-title")
+            yield Static(escape(task.display_title), id="focus-title")
             # Only the lines the task actually has something for, so a bare
             # task does not render empty labels or stray separators.
             facts = [self.shown_when]
@@ -299,6 +300,7 @@ class Help(ModalScreen[None]):
   x                  cancel the task
   a                  add a task to the shown view
   e                  rename the selected task
+  o                  open the task's link in a browser
   backspace          delete for good (asks first)
 
 [b]Other[/b]
@@ -397,6 +399,7 @@ class TaskApp(App[None]):
         Binding("e", "rename", "Rename"),
         Binding("x", "cancel_task", "Cancel"),
         Binding("d", "schedule", "Date"),
+        Binding("o", "open_link", "Link"),
         # Both keys, and deliberately NOT priority: a Mac laptop has no
         # forward-delete, so its Delete key arrives as backspace, while an
         # external keyboard sends delete.  A priority binding would take
@@ -505,8 +508,29 @@ class TaskApp(App[None]):
             bits.insert(1, f"{self.past_due} past due")
         self.set_status(" · ".join(bits))
 
+    @staticmethod
+    def _markup_title(task: Task) -> str:
+        """The task's title as markup: its own characters escaped, link marked.
+
+        Escaping happens before anything is added, and only to the task's own
+        text.  The other order would neuter the span just inserted, and
+        neither order would let a title's own brackets survive -- titles are
+        already rendered as markup, so `Plan [urgent] thing` would otherwise
+        lose the bracketed part.
+
+        The address is quoted because Textual requires it: `[link=https://x]`
+        raises a markup error, `[link='https://x']` does not.
+        """
+        text = escape(task.display_title)
+        url, shown = task.link, task.link_text
+        if url and shown:
+            marked = escape(shown)
+            if marked in text:
+                text = text.replace(marked, f"[link='{url}']{marked}[/link]", 1)
+        return text
+
     def row_for(self, task: Task) -> tuple[str, str, str, str]:
-        title = task.title
+        title = self._markup_title(task)
         if task.recurring:
             title = f"↻ {title}"
         if task.is_note:
@@ -787,6 +811,24 @@ class TaskApp(App[None]):
                 self.tz,
             )
         )
+
+    def action_open_link(self) -> None:
+        """Hand the selected task's address to the operating system.
+
+        Routed through the app's own opener rather than the standard library
+        so a test can intercept it and assert the address without launching
+        a browser -- which is what makes this, rather than the clickable
+        span, the path that ships verified.
+        """
+        task = self.selected
+        if task is None:
+            return
+        url = task.link
+        if not url:
+            self.set_status("That task has no link")
+            return
+        self.open_url(url)
+        self.set_status(f"Opening {url}")
 
     def action_help(self) -> None:
         self.push_screen(Help())

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any, Iterator
@@ -211,6 +212,56 @@ class Task:
             return "all-day"
         started = self.local_start(tz)
         return started.strftime("%H:%M") if started else "all-day"
+
+    @property
+    def display_title(self) -> str:
+        """The title as words, with any stored link markup unwrapped.
+
+        Titles arrive from a browser capture as `<a href="...">text</a>`
+        embedded in ordinary words, which the board would otherwise print
+        verbatim.  The anchor's visible text is what a person wrote, so that
+        is what is shown; the target is what `link` opens.  They happen to be
+        identical in every stored link today, but that is a coincidence of
+        the capture, not a rule.
+        """
+        title = self.raw.get("title") or ""
+        return _ANCHOR.sub(lambda m: m.group(2).strip() or m.group(1), title).strip()
+
+    @property
+    def link_text(self) -> str | None:
+        """The words in the display title that stand for the link.
+
+        An anchor's visible text, or the address itself when it was written
+        plainly.  Needed because the two are not always the same: wrapping
+        the address would find nothing to wrap in a title that reads
+        "the article" and links elsewhere.
+        """
+        title = self.raw.get("title") or ""
+        for href, text in _ANCHOR.findall(title):
+            if openable_url(href):
+                return (text.strip() or href)
+        for found in _BARE_URL.findall(_ANCHOR.sub(" ", title)):
+            if openable_url(found):
+                return found
+        return None
+
+    @property
+    def link(self) -> str | None:
+        """The first openable address in the title, or None.
+
+        Anchors are considered before plain addresses, and the first match
+        wins; every address stays visible in the title either way.
+        """
+        title = self.raw.get("title") or ""
+        for href, _text in _ANCHOR.findall(title):
+            url = openable_url(href)
+            if url:
+                return url
+        for found in _BARE_URL.findall(_ANCHOR.sub(" ", title)):
+            url = openable_url(found)
+            if url:
+                return url
+        return None
 
     def past_due_since(
         self, now: datetime, tz: tzinfo | None = None
@@ -626,6 +677,35 @@ class SingularityClient:
             emoji = decode_emoji(project.get("emoji"))
             names[project["id"]] = f"{emoji} {title}".strip() if emoji else title
         return names
+
+
+#: Only these may be handed to the operating system's opener.  An allowlist
+#: rather than a blocklist: a title is text a person typed or a browser
+#: extension wrote, and the handler will launch whatever it is given.
+OPENABLE_SCHEMES = ("http", "https")
+
+#: `<a href="...">text</a>` as SingularityApp's browser capture stores it.
+_ANCHOR = re.compile(r"<a\s[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+#: A plain address written into a title.
+_BARE_URL = re.compile(r"https?://[^\s<>\"')\]]+")
+#: Something with no scheme that still looks like a host, e.g. `academia.edu`.
+_BARE_HOST = re.compile(r"^[\w-]+(?:\.[\w-]+)+(?:/\S*)?$")
+
+
+def openable_url(value: str | None) -> str | None:
+    """The address to hand over, or None if it must not be opened.
+
+    A value with no scheme is read as `https` when it looks like a host --
+    one of the stored links is just `academia.edu` and would otherwise never
+    open.  Anything whose scheme is not in `OPENABLE_SCHEMES` is refused.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if "://" not in value:
+        return f"https://{value}" if _BARE_HOST.match(value) else None
+    scheme = value.split("://", 1)[0].lower()
+    return value if scheme in OPENABLE_SCHEMES else None
 
 
 def overdue_label(since: datetime, now: datetime) -> str:
