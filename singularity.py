@@ -50,19 +50,24 @@ class Bucket(enum.Enum):
     pass a single value instead of a date plus a pair of flags that could
     contradict each other.  Both buckets are `start.isSet=false` upstream;
     `deferred` is what separates them.
+
+    SOMEDAY is named after what SingularityApp itself calls this state: a
+    task set to Someday there comes back as `start=None, deferred=true`,
+    which is exactly this bucket.  `deferred` is the only dateless flag the
+    API has, so there is no separate "never".
     """
 
     INBOX = "inbox"
-    NEVER = "never"
+    SOMEDAY = "someday"
 
     @property
     def deferred(self) -> bool:
         """Whether tasks in this bucket carry the API's `deferred` flag."""
-        return self is Bucket.NEVER
+        return self is Bucket.SOMEDAY
 
     @property
     def label(self) -> str:
-        return "Inbox" if self is Bucket.INBOX else "Never"
+        return "Inbox" if self is Bucket.INBOX else "Someday"
 
 
 #: A position the board can show: one calendar day, or one of the buckets.
@@ -217,7 +222,7 @@ class Task:
         that is the moment it first slipped, and it is what "how overdue"
         should be measured from.
 
-        A deferred task is never late.  The never view exists to set a task
+        A deferred task is never late.  The someday view exists to put a task
         aside, and calling it overdue would drag it back into today.
 
         Pure in `now` on purpose -- no clock is read here -- so the rule can
@@ -487,7 +492,7 @@ class SingularityClient:
         The inbox additionally drops tasks that already have a project -- a
         filed task has been sorted, so it is not awaiting triage -- and
         reports how many it dropped.  The split happens here rather than in
-        the query so one request yields both numbers.  The never view keeps
+        the query so one request yields both numbers.  The someday view keeps
         filed tasks: something set aside deliberately stays visible whether
         or not it has been filed.
         """
@@ -531,7 +536,7 @@ class SingularityClient:
         position: "date | Bucket",
         use_time: bool = False,
     ) -> Task:
-        """Move a task to a day, to never, or back to the inbox.
+        """Move a task to a day, to someday, or back to the inbox.
 
         `start` and `deferred` go out in one request because they are two
         halves of one fact and the server will not reconcile them: setting a
@@ -570,12 +575,42 @@ class SingularityClient:
         return self.post(f"/task/{task_id}/cancel")
 
     def set_done(self, task: Task, done: bool) -> Any:
-        """Flip a task's completion, picking the right endpoint for it."""
+        """Flip a task's completion.  Finishing means finishing, for any task.
+
+        This deliberately does not route recurring tasks to `complete-today`.
+        That endpoint means "worked on it today", which is a different
+        intention and belongs to `done_for_today`; and it refuses any task
+        not dated today, so the old routing failed outright for a recurring
+        task shown on its own day.
+        """
         if not done:
             return self.uncomplete_task(task.id)
-        if task.recurring:
-            return self.complete_today(task.id)
         return self.complete_task(task.id)
+
+    def done_for_today(self, task: Task) -> Task:
+        """Record today's work on a task and put it up again tomorrow.
+
+        The record has to be attempted before the date moves: the API takes
+        `complete-today` only for a task dated today, so rescheduling first
+        would make the record impossible.
+
+        A task dated any other day -- every past-due one -- and an undated
+        task are refused with 422.  That is an expected outcome for them, not
+        a failure, so it is absorbed; every other error propagates, because
+        swallowing them all would hide an expired token behind a task that
+        looks rescheduled but was never recorded.
+
+        Rescheduling goes through `set_schedule` so an undated deferred task
+        loses its deferred flag as it gains a date, keeping "dated or
+        deferred, never both" enforced in one place.
+        """
+        try:
+            self.complete_today(task.id)
+        except ApiError as exc:
+            if exc.status != 422:
+                raise
+        tomorrow = datetime.now(self.tz).date() + timedelta(days=1)
+        return self.set_schedule(task.id, tomorrow)
 
     # -- projects ----------------------------------------------------------
 

@@ -111,7 +111,7 @@ class DatePicker(ModalScreen[str]):
         ("t", "today", "Today"),
         ("m", "tomorrow", "Tomorrow"),
         ("p", "pick", "Pick a date…"),
-        ("n", "never", "Never"),
+        ("s", "someday", "Someday"),
         ("c", "clear", "Clear date (back to inbox)"),
     ]
 
@@ -202,7 +202,7 @@ class Help(ModalScreen[None]):
   ← / → or h / l     previous / next day
   t                  jump to today
   i                  inbox — tasks with no date
-  n                  never — tasks set aside
+  s                  someday — tasks put off
   r                  reload from the server
 
 [b]Looking at a task[/b]
@@ -210,8 +210,11 @@ class Help(ModalScreen[None]):
 
 [b]Changing tasks[/b]
   space              tick / untick the selected task
+  .                  done for today — records the work
+                     and moves the task to tomorrow,
+                     leaving it unfinished
   d                  set the date: today, tomorrow, a
-                     given day, never, or cleared
+                     given day, someday, or cleared
   x                  cancel the task
   a                  add a task to the shown view
   e                  rename the selected task
@@ -222,7 +225,7 @@ class Help(ModalScreen[None]):
   q                  quit
 
 Giving a task a date takes it out of the inbox. Days do
-not apply in the inbox or never, so h / l do nothing
+not apply in the inbox or someday, so h / l do nothing
 there — press t to get back to the calendar.
 
 Recurring tasks are ticked for the shown day only, so the
@@ -296,9 +299,11 @@ class TaskApp(App[None]):
         Binding("l,right", "next_day", "Next day"),
         Binding("t", "today", "Today"),
         Binding("i", "inbox", "Inbox"),
-        Binding("n", "never", "Never"),
+        Binding("s", "someday", "Someday"),
         Binding("r", "refresh", "Reload"),
         Binding("space", "toggle", "Tick"),
+        # Its own key, never shared with tick: "." mirrors the app's cmd+.
+        Binding("full_stop", "done_for_today", "Did today"),
         # Not priority: a priority binding fires ahead of every focused
         # widget, including the Input inside the rename, add, and date
         # prompts, which then can never be confirmed with enter.  On the
@@ -565,8 +570,8 @@ class TaskApp(App[None]):
     def action_inbox(self) -> None:
         self._go(Bucket.INBOX)
 
-    def action_never(self) -> None:
-        self._go(Bucket.NEVER)
+    def action_someday(self) -> None:
+        self._go(Bucket.SOMEDAY)
 
     def action_refresh(self) -> None:
         self.projects = {}
@@ -579,6 +584,16 @@ class TaskApp(App[None]):
         want_done = not task.done
         label = "Ticking" if want_done else "Unticking"
         self.submit_write(label, self.client.set_done, task, want_done)
+
+    def action_done_for_today(self) -> None:
+        """Record today's work on the selected task and move it to tomorrow.
+
+        Distinct from ticking on purpose: this leaves the task open.
+        """
+        task = self.selected
+        if task is None or self.client is None:
+            return
+        self.submit_write("Done for today", self.client.done_for_today, task)
 
     def action_cancel_task(self) -> None:
         task = self.selected
@@ -601,8 +616,8 @@ class TaskApp(App[None]):
             target: "date | Bucket" = today
         elif choice == "tomorrow":
             target = today + timedelta(days=1)
-        elif choice == "never":
-            target = Bucket.NEVER
+        elif choice == "someday":
+            target = Bucket.SOMEDAY
         elif choice == "clear":
             target = Bucket.INBOX
         else:
@@ -633,7 +648,7 @@ class TaskApp(App[None]):
         if not title or self.client is None:
             return
         # The new task belongs to whatever is on screen: undated in the
-        # inbox, deferred in never, or on the shown day at midnight flagged
+        # inbox, deferred in someday, or on the shown day at midnight flagged
         # as all-day -- a time of day is set in the app itself.
         if isinstance(self.position, Bucket):
             # No projectId, so a task added from the inbox lands in the inbox

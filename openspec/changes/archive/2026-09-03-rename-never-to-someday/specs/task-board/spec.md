@@ -1,76 +1,32 @@
-# task-board Specification
+## REMOVED Requirements
 
-## Purpose
-The day-at-a-time terminal view of a person's tasks: it shows the tasks starting on one calendar day, lets them move between days, and lets them act on the selected task. It deliberately exposes a small subset of the upstream task model, leaving richer editing to the SingularityApp clients.
+### Requirement: Never view
 
-## Requirements
+**Reason**: The board's "never" mislabelled the API's `deferred` flag, which SingularityApp itself presents as "Someday". Replaced by `Someday view`, which carries the same rules under the name the app uses.
+**Migration**: None. A someday task is `start=None, deferred=true`, exactly as a never task was, so no stored task changes and nothing needs rewriting.
 
-### Requirement: Task row presentation
+## ADDED Requirements
 
-Each task in the shown day SHALL be presented as a row carrying its completion mark, its start time, its title, and its project name. A past-due task SHALL instead show how overdue it is in place of its start time, and SHALL have its title rendered in a colour that sets it apart from the tasks due today. Title emphasis SHALL otherwise convey completion state only. The board SHALL NOT vary a title's weight, dimming, or colour according to the task's priority.
+### Requirement: Someday view
 
-#### Scenario: An open task is shown plainly
+The board SHALL offer a someday view listing every unfinished task that has no date and is deferred, reachable directly rather than by walking the calendar. Finished tasks SHALL be excluded, for the same reason as the inbox. Unlike the inbox, this view SHALL NOT exclude tasks that have a project: a task set aside deliberately stays visible whether or not it has been filed.
 
-- **WHEN** the day contains an open task
-- **THEN** its title is rendered without emphasis, regardless of the priority stored on that task
+#### Scenario: Reaching someday
 
-#### Scenario: A finished task is struck through
+- **WHEN** a person asks for the someday view
+- **THEN** the board lists the unfinished undated tasks that are deferred, and nothing else
 
-- **WHEN** a task in the day is completed or cancelled
-- **THEN** its title is rendered struck through and dimmed
+#### Scenario: Someday is not a position on the calendar
 
-#### Scenario: Two tasks differing only in priority look identical
+- **WHEN** a person moves between calendar days
+- **THEN** they never arrive at the someday view by doing so
 
-- **WHEN** the day contains two open tasks whose stored priorities differ
-- **THEN** neither row is emphasised relative to the other
+#### Scenario: A filed task still appears in someday
 
-#### Scenario: A past-due row is set apart
+- **WHEN** an undated deferred task has a project
+- **THEN** it appears in the someday view, even though the same task without the deferred flag would be absent from the inbox
 
-- **WHEN** today's view holds both a past-due task and a task due today
-- **THEN** the past-due row shows how overdue it is where the other shows a time, and its title is coloured while the other's is not
-
-### Requirement: Ordering of tasks within a day
-
-The board SHALL order a day's tasks by, in turn: unfinished before finished, past due before due today, pinned before unpinned, timed before all-day, earlier start time before later, and finally title. Past-due tasks SHALL be ordered among themselves by how overdue they are, the most overdue first. Priority SHALL NOT influence the order.
-
-#### Scenario: Timed tasks lead all-day tasks
-
-- **WHEN** a day holds both timed and all-day tasks
-- **THEN** every timed task is listed above every all-day task, and the timed ones run in ascending start time
-
-#### Scenario: A tie is broken by title, not priority
-
-- **WHEN** two tasks in the day share a completion state, pinned state, and start slot, and carry different priorities
-- **THEN** they are ordered by title
-
-#### Scenario: Finished tasks sink
-
-- **WHEN** a day holds a mix of open and completed tasks
-- **THEN** the completed ones appear after all open ones
-
-#### Scenario: Past-due tasks lead today's own
-
-- **WHEN** today's view holds both past-due tasks and tasks due today
-- **THEN** every past-due task is listed above every task due today
-
-#### Scenario: The most overdue comes first
-
-- **WHEN** today's view holds several past-due tasks
-- **THEN** they are ordered with the longest overdue at the top
-
-### Requirement: Detail of the selected task
-
-The board SHALL show, for the currently selected task, whether it recurs, whether it is pinned, its deadline when it has one, and its note when it has one. The detail SHALL NOT report the task's priority.
-
-#### Scenario: A recurring task with a note
-
-- **WHEN** the selected task recurs and carries a note
-- **THEN** the detail area reports that it is recurring and shows the note text, with no mention of priority
-
-#### Scenario: A plain task
-
-- **WHEN** the selected task does not recur, is not pinned, and has neither deadline nor note
-- **THEN** the detail area shows no priority line
+## MODIFIED Requirements
 
 ### Requirement: Actions available on the selected task
 
@@ -90,29 +46,6 @@ The board SHALL let a person add a task to the shown view, tick and untick the s
 
 - **WHEN** a task is selected in the inbox or in the someday view
 - **THEN** the same actions offered in a day view are offered there, date assignment included
-
-### Requirement: Help lists the available keys
-
-The board SHALL offer an in-app help overlay listing the keys it responds to. The overlay SHALL list only keys the board actually binds, and SHALL NOT advertise a priority action.
-
-#### Scenario: Opening help
-
-- **WHEN** a person opens the help overlay
-- **THEN** it lists the movement, day-navigation, and task actions the board supports, with no priority entry
-
-### Requirement: The board does not write priority
-
-The board SHALL NOT send a priority value in any task it creates or updates, leaving each task's stored priority as whatever other SingularityApp clients set.
-
-#### Scenario: Adding a task
-
-- **WHEN** a person adds a task to the shown day
-- **THEN** the created task carries the title and the day's start, and no priority is specified
-
-#### Scenario: Renaming a task
-
-- **WHEN** a person renames the selected task
-- **THEN** only the title is submitted, and the task's stored priority is unchanged afterwards
 
 ### Requirement: Inbox view
 
@@ -306,25 +239,6 @@ The board SHALL offer a focus view of the selected task, showing its title in fu
 - **WHEN** a person asks for the focus view while the shown view holds no tasks
 - **THEN** no focus view opens and the board is left as it was
 
-### Requirement: The focus view changes nothing
-
-Opening, viewing, or dismissing the focus view SHALL leave the task exactly as it was, and SHALL send no request that modifies anything. In particular the key that opens the focus view SHALL NOT also tick the task, so a task cannot be completed by looking at it.
-
-#### Scenario: Opening the focus view does not complete the task
-
-- **WHEN** a person opens the focus view on an unfinished task and dismisses it
-- **THEN** the task is still unfinished
-
-#### Scenario: No request is sent
-
-- **WHEN** a person opens and dismisses the focus view
-- **THEN** the board sends no request that creates, updates, or deletes anything
-
-#### Scenario: Ticking still has its own way in
-
-- **WHEN** a person wants to tick the selected task
-- **THEN** an action distinct from the one that opens the focus view does it
-
 ### Requirement: Today shows what is past due
 
 Today's view SHALL list, in addition to the tasks that start today, every unfinished task that is past due: one whose start is before today, or whose deadline has already passed. A task that qualifies under both rules SHALL appear once. Deferred tasks SHALL NOT be included, because the someday view exists to set a task aside and returning it to today would defeat that. No limit SHALL be placed on how far back a past-due task may come from.
@@ -363,36 +277,3 @@ Today's view SHALL list, in addition to the tasks that start today, every unfini
 
 - **WHEN** the inbox or the someday view is displayed
 - **THEN** its contents are exactly as they were before, with no past-due tasks added
-
-### Requirement: How overdue a task is
-
-For a past-due task the board SHALL report how long it has been past due, measured from the earliest of its passed start and its passed deadline — the moment it first became late.
-
-#### Scenario: Measured from the start it missed
-
-- **WHEN** a task's start was three days ago and it carries no deadline
-- **THEN** the board reports it as three days past due
-
-#### Scenario: Measured from whichever came first
-
-- **WHEN** a task's deadline passed before its start did
-- **THEN** the board measures from the deadline, as the earlier of the two
-
-### Requirement: Someday view
-
-The board SHALL offer a someday view listing every unfinished task that has no date and is deferred, reachable directly rather than by walking the calendar. Finished tasks SHALL be excluded, for the same reason as the inbox. Unlike the inbox, this view SHALL NOT exclude tasks that have a project: a task set aside deliberately stays visible whether or not it has been filed.
-
-#### Scenario: Reaching someday
-
-- **WHEN** a person asks for the someday view
-- **THEN** the board lists the unfinished undated tasks that are deferred, and nothing else
-
-#### Scenario: Someday is not a position on the calendar
-
-- **WHEN** a person moves between calendar days
-- **THEN** they never arrive at the someday view by doing so
-
-#### Scenario: A filed task still appears in someday
-
-- **WHEN** an undated deferred task has a project
-- **THEN** it appears in the someday view, even though the same task without the deferred flag would be absent from the inbox
