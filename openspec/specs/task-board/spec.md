@@ -61,6 +61,11 @@ The board SHALL order a day's tasks by, in turn: unfinished before finished, pas
 - **WHEN** a day holds a mix of open and completed tasks
 - **THEN** the completed ones appear after all open ones
 
+#### Scenario: Past-due tasks lead today's own
+
+- **WHEN** today's view holds both past-due tasks and tasks due today
+- **THEN** every past-due task is listed above every task due today
+
 ### Requirement: The manual order is the last ordering key
 
 The order a person has set by hand SHALL be the last key and never override an earlier one: it decides the sequence among tasks the other keys leave equal, and cannot lift a task above a group it does not belong to. A day's timed tasks therefore stay in ascending start time however they are moved.
@@ -75,14 +80,9 @@ The order a person has set by hand SHALL be the last key and never override an e
 - **WHEN** a day holds two timed tasks at different times, whatever manual order they carry
 - **THEN** the earlier one is listed first
 
-### Requirement: Ordering of past-due tasks in today's view
+### Requirement: Past-due tasks are ordered by how overdue they are
 
-Past-due tasks SHALL lead the tasks due today, and SHALL be ordered among themselves by how overdue they are, the most overdue first, whatever manual order they carry.
-
-#### Scenario: Past-due tasks lead today's own
-
-- **WHEN** today's view holds both past-due tasks and tasks due today
-- **THEN** every past-due task is listed above every task due today
+Past-due tasks SHALL be ordered among themselves by how overdue they are, the most overdue first, whatever manual order they carry. Where they sit relative to the tasks due today is decided by the day's ordering keys, not here.
 
 #### Scenario: The most overdue comes first
 
