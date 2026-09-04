@@ -22,6 +22,7 @@ from textual.containers import Horizontal, Vertical
 from textual.markup import escape
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import (
     DataTable,
     Header,
@@ -42,6 +43,66 @@ from singularity import (
 )
 
 MARKS = {EMPTY: "☐", CHECKED: "☑", CANCELLED: "☒"}
+
+# The Turbo C++ editor theme, in the two moods it ships: near-black and the
+# classic Borland blue.  Every value below is the one that theme's own files
+# declare -- the DOS 16-colour set -- so "looks like Turbo C++" is checkable
+# rather than a matter of taste.  The two share their text, selection, error
+# and link colours and differ only in the ground and the chrome, which is
+# how the source has it.
+_TURBO_YELLOW = "#FFFF55"   # editor.foreground -- all ordinary text
+_TURBO_CYAN = "#00AAAA"     # the selection bar; the theme's signature
+_TURBO_BRIGHT_CYAN = "#55FFFF"  # textLink.foreground
+_TURBO_RED = "#FF5555"      # errorForeground
+_TURBO_GREEN = "#00AA00"
+_TURBO_MAGENTA = "#FF55FF"
+_TURBO_GREY = "#AAAAAA"
+_TURBO_WHITE = "#FFFFFF"    # list.activeSelectionForeground
+
+TURBO_DARK = Theme(
+    name="turbo-cpp-dark",
+    dark=True,
+    # Pure black rather than the editor theme's #0C0C0C: a deliberate
+    # departure, chosen because it blends with a black terminal and widens
+    # the gap to the #141414 chrome from 8 to 20 points of luminance, so the
+    # day header and key bar read as separate from the list.
+    background="#000000",
+    surface="#1A1A1A",      # input.background
+    panel="#141414",        # statusBar.background
+    foreground=_TURBO_YELLOW,
+    accent=_TURBO_CYAN,
+    primary=_TURBO_BRIGHT_CYAN,
+    secondary=_TURBO_MAGENTA,
+    error=_TURBO_RED,
+    warning=_TURBO_YELLOW,
+    success=_TURBO_GREEN,
+    variables={
+        "text-muted": _TURBO_GREY,          # sideBar.foreground
+        "block-cursor-foreground": _TURBO_WHITE,
+    },
+)
+
+TURBO_BLUE = Theme(
+    name="turbo-cpp-blue",
+    dark=True,
+    background="#0000AA",   # editor.background -- the Borland blue
+    surface="#0000CC",      # the theme's raised blue
+    panel=_TURBO_GREY,      # statusBar.background -- a light grey bar
+    foreground=_TURBO_YELLOW,
+    accent=_TURBO_CYAN,
+    primary=_TURBO_BRIGHT_CYAN,
+    secondary=_TURBO_MAGENTA,
+    error=_TURBO_RED,
+    warning=_TURBO_YELLOW,
+    success=_TURBO_GREEN,
+    variables={
+        # Stated rather than derived: this theme's own muted colour is the
+        # same value as its foreground, so deriving would leave muted text
+        # indistinguishable from an ordinary title.
+        "text-muted": "#BFBF80",
+        "block-cursor-foreground": _TURBO_WHITE,
+    },
+)
 
 
 class KeyBar(Static):
@@ -338,11 +399,21 @@ class TaskApp(App[None]):
     #daybar {
         height: 1;
         background: $panel;
-        color: $text;
+        /* `auto`, not a fixed colour: this bar is near-black under one Turbo
+           theme and light grey under the other, and `auto` resolves to white
+           or black to suit.  A fixed value would be unreadable in one. */
+        color: auto;
         padding: 0 1;
     }
 
-    DataTable { height: 1fr; }
+    DataTable {
+        height: 1fr;
+        /* The list sits on the ground, not on $surface: a DataTable defaults
+           to the raised surface colour and then blends 5% of the foreground
+           over it, which together turned a black ground into #25251C. */
+        background: $background;
+        background-tint: transparent;
+    }
     DataTable > .datatable--cursor { background: $accent; color: $text; }
 
     #detail {
@@ -354,7 +425,7 @@ class TaskApp(App[None]):
     }
 
     #status { height: 1; padding: 0 1; color: $text-muted; }
-    #keybar { padding: 0 1; background: $panel; }
+    #keybar { padding: 0 1; background: $panel; color: auto; }
     #status.error { color: $error; }
 
     #dialog {
@@ -434,12 +505,23 @@ class TaskApp(App[None]):
         yield Header()
         with Vertical(id="body"):
             yield Static("", id="daybar")
-            yield DataTable(id="tasks", cursor_type="row", zebra_stripes=True)
+            # No zebra striping: it paints every other row a lighter shade,
+            # which stops the ground being the ground.  Turbo C++ had no
+            # alternating rows either.
+            yield DataTable(id="tasks", cursor_type="row")
             yield Static("", id="detail")
         yield Static("", id="status")
         yield KeyBar(id="keybar")
 
     def on_mount(self) -> None:
+        for theme in (TURBO_DARK, TURBO_BLUE):
+            self.register_theme(theme)
+        # Assigned here rather than as a class attribute: the class default
+        # is read before these are registered, and assigning the same name
+        # twice would not fire the watcher that recomputes the palette.
+        # Registering also puts both in the command palette's theme picker,
+        # so switching needs no binding of its own.
+        self.theme = TURBO_DARK.name
         table = self.query_one(DataTable)
         table.add_column("", key="mark", width=2)
         table.add_column("When", key="when", width=8)
