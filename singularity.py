@@ -24,9 +24,11 @@ from __future__ import annotations
 import enum
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
-from typing import Any, Iterator
+from itertools import chain
+from typing import Any, Iterable, Iterator
 
 import requests
 from dotenv import load_dotenv
@@ -487,20 +489,39 @@ class SingularityClient:
         day = day or now.date()
         lower, upper = day_bounds(day, self.tz)
         filters.setdefault("includeArchived", include_done)
-        tasks = self.list_tasks(
-            **{"start.gte": lower, "start.lte": upper, "maxCount": MAX_PAGE}, **filters
-        )
-        if not include_done:
-            tasks = [t for t in tasks if not t.done and not t.cancelled]
+
+        def day_query() -> list[Task]:
+            return self.list_tasks(
+                **{"start.gte": lower, "start.lte": upper, "maxCount": MAX_PAGE},
+                **filters,
+            )
 
         if day != now.date():
             # Only today gathers, counts, or marks what is past due.  On any
             # other day the tasks shown are that day's own -- and yesterday's
             # unfinished ones are late by definition, so carrying a reference
             # instant here would repaint the whole view as overdue.
+            tasks = day_query()
+            if not include_done:
+                tasks = [t for t in tasks if not t.done and not t.cancelled]
             return Listing(sort_for_display(tasks, self.tz))
 
-        extra = [t for t in self._past_due_tasks(now, **filters)
+        # Today costs three queries, so they go out together rather than one
+        # after another: the day itself plus the two that find what is past
+        # due.  Results are collected in a fixed order, never in the order
+        # they happen to arrive, so the view does not depend on the timing.
+        queries = (day_query, *self._past_due_queries(now, **filters))
+        with ThreadPoolExecutor(len(queries)) as pool:
+            futures = [pool.submit(q) for q in queries]
+            # Reading a future re-raises whatever it raised, so a failure in
+            # any one query fails the whole load instead of yielding a day
+            # quietly missing some of its tasks.
+            tasks, *late = (f.result() for f in futures)
+
+        if not include_done:
+            tasks = [t for t in tasks if not t.done and not t.cancelled]
+
+        extra = [t for t in self._combine_past_due(now, late)
                  if t.id not in {x.id for x in tasks}]
         tasks = tasks + extra
         return Listing(
@@ -509,13 +530,13 @@ class SingularityClient:
             reference=now,
         )
 
-    def _past_due_tasks(self, now: datetime, **filters: Any) -> list[Task]:
-        """Unfinished tasks whose start day is over or whose deadline passed.
+    def _past_due_queries(self, now: datetime, **filters: Any):
+        """The two queries whose union is what is past due.
 
-        Two requests, because the filters combine with AND: asking for a
+        Two of them, because the filters combine with AND: asking for a
         passed start and a passed deadline in one call returns only tasks
-        with both, not either.  The union is taken here and de-duplicated by
-        id, since a task can qualify under both rules.
+        with both, not either.  They are handed back unrun so a caller can
+        issue them alongside its own.
         """
         midnight = iso_z(datetime.combine(now.date(), time.min, tzinfo=self.tz))
         # includeArchived=False is not the same as "unfinished": a task can
@@ -523,14 +544,32 @@ class SingularityClient:
         # from this query.  The completion check in `past_due_since` is what
         # actually keeps them out, so it is not redundant.
         shared = dict(filters, includeArchived=False, maxCount=MAX_PAGE)
-        by_start = self.list_tasks(**{"start.lt": midnight}, **shared)
-        by_deadline = self.list_tasks(**{"deadline.lt": iso_z(now)}, **shared)
+        return (
+            lambda: self.list_tasks(**{"start.lt": midnight}, **shared),
+            lambda: self.list_tasks(**{"deadline.lt": iso_z(now)}, **shared),
+        )
 
+    def _combine_past_due(
+        self, now: datetime, results: "Iterable[list[Task]]"
+    ) -> list[Task]:
+        """The union of the past-due queries, de-duplicated by id.
+
+        A task can qualify under both rules, so the first copy seen wins.
+        Callers pass results in a fixed order, which is what keeps the union
+        the same however the queries were scheduled.
+        """
         found: dict[str, Task] = {}
-        for task in (*by_start, *by_deadline):
+        for task in chain(*results):
             if task.past_due_since(now, self.tz):
                 found.setdefault(task.id, task)
         return list(found.values())
+
+    def _past_due_tasks(self, now: datetime, **filters: Any) -> list[Task]:
+        """Unfinished tasks whose start day is over or whose deadline passed."""
+        queries = self._past_due_queries(now, **filters)
+        with ThreadPoolExecutor(len(queries)) as pool:
+            futures = [pool.submit(q) for q in queries]
+            return self._combine_past_due(now, [f.result() for f in futures])
 
     def tasks_in_bucket(self, bucket: Bucket, **filters: Any) -> Listing:
         """Unfinished dateless tasks, split by the `deferred` flag.

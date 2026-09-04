@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import uuid
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -386,6 +389,34 @@ series keeps going.\
         self.dismiss(None)
 
 
+@dataclass
+class Pending:
+    """One write applied to the board before the API has confirmed it.
+
+    `patch` holds the raw task keys the write expects to change and
+    `previous` their values beforehand, so the outcome can be shown at once
+    and taken back should the API refuse it.  The patch is kept beside the
+    fetched task rather than written into it: that is what lets a fetch land
+    mid-write without discarding the change, and what leaves something to
+    restore when a write fails.
+    """
+
+    task_id: str
+    label: str
+    # Takes the id to write to rather than closing over it: a task created
+    # here is queued under a placeholder id, and whatever is queued behind
+    # its creation must go to the real id the server hands back.
+    run: Callable[[str], Any]
+    patch: dict[str, Any] = field(default_factory=dict)
+    previous: dict[str, Any] = field(default_factory=dict)
+    # Deleting is a change of existence, not of fields, so no patch can
+    # express it -- there is no value of any key that means "gone".
+    removes: bool = False
+    # Creating is the other way round: the row exists only because this
+    # write is pending, and confirming it settles the task's real id.
+    creates: bool = False
+
+
 class TaskApp(App[None]):
     """Day-at-a-time view of your tasks."""
 
@@ -497,7 +528,22 @@ class TaskApp(App[None]):
         self.past_due = 0
         self.reference: datetime | None = None
         self.projects: dict[str, str] = {}
-        self._busy = False
+        # What the last fetch reported, kept apart from the pending writes
+        # layered over it so a refresh can replace one without disturbing
+        # the other.  `tasks` is what is on screen: the two combined.
+        self._base: list[Task] = []
+        # Writes awaiting the API, queued per task.  Per task rather than
+        # globally so writes to different tasks go out together while one
+        # task's own writes stay in the order they were performed.
+        self._pending: dict[str, deque[Pending]] = {}
+        self._draining: set[str] = set()
+        # The selected task's id, so the cursor can follow the task through
+        # the reordering a write causes instead of holding a row number.
+        self._selected_id: str | None = None
+        # A refusal to keep on the status line.  Repainting would otherwise
+        # replace it with the view's counts the moment another write
+        # confirms, leaving the failure effectively unreported.
+        self._error: str | None = None
 
     # -- layout ------------------------------------------------------------
 
@@ -547,48 +593,290 @@ class TaskApp(App[None]):
             return
         self.call_from_thread(self.show_tasks, listing)
 
-    @work(exclusive=False, thread=True)
-    def submit_write(self, label: str, func, *args: Any) -> None:
-        """Run one write against the API, then reload the day.
+    # -- writes ------------------------------------------------------------
 
-        Writes are serialised behind `_busy` so a burst of keypresses cannot
-        fire overlapping requests for the same task.  Not named `run_action`:
-        that is Textual's own binding dispatcher, and shadowing it silently
-        breaks every key in the app.
+    def submit_write(
+        self,
+        label: str,
+        task: Task,
+        run: Callable[[str], Any],
+        patch: dict[str, Any] | None = None,
+        removes: bool = False,
+        creates: bool = False,
+        select: str | None = None,
+    ) -> None:
+        """Show a write's outcome at once, then queue it for the API.
+
+        Nothing waits on the network: the patch goes on, the board repaints,
+        and the request follows behind.  Not named `run_action`: that is
+        Textual's own binding dispatcher, and shadowing it silently breaks
+        every key in the app.
         """
-        if self._busy:
-            return
-        self._busy = True
-        self.call_from_thread(self.set_status, f"{label}…")
+        patch = patch or {}
+        # Acting again supersedes the last refusal, so it stops being shown.
+        self._error = None
+        pending = Pending(
+            task_id=task.id,
+            label=label,
+            run=run,
+            patch=patch,
+            previous={key: task.raw.get(key) for key in patch},
+            removes=removes,
+            creates=creates,
+        )
+        self._pending.setdefault(task.id, deque()).append(pending)
+        if select is not None:
+            self._selected_id = select
+        self.repaint()
+        if task.id not in self._draining:
+            self._draining.add(task.id)
+            self.drain(task.id)
+
+    def next_open_after(self, task: Task) -> str | None:
+        """The unfinished task to move to once `task` is ticked off.
+
+        The one after it in the order now on screen, or the one before it
+        when it was last.  Chosen by identity from the list the person can
+        see, so the selection lands where they were looking rather than on
+        whatever the reordering brings into a row.
+        """
         try:
-            func(*args)
-        except SingularityError as exc:
-            self.call_from_thread(self.set_status, str(exc), True)
-            return
-        finally:
-            self._busy = False
-        self.load()
+            here = next(
+                i for i, t in enumerate(self.tasks) if t.id == task.id
+            )
+        except StopIteration:
+            return None
+        rest = self.tasks[here + 1:]
+        earlier = list(reversed(self.tasks[:here]))
+        for candidate in (*rest, *earlier):
+            if not candidate.done and not candidate.cancelled:
+                return candidate.id
+        return None
+
+    def _next_write(self, task_id: str) -> "Pending | None":
+        """Hand a drain its next write, or release it.  UI thread only.
+
+        Emptiness is decided here, on the thread that also enqueues, so a
+        keypress arriving exactly as a queue runs dry cannot find both no
+        drain running and no drain about to start.
+        """
+        queue = self._pending.get(task_id)
+        if queue:
+            return queue[0]
+        self._pending.pop(task_id, None)
+        self._draining.discard(task_id)
+        return None
+
+    @work(exclusive=False, thread=True)
+    def drain(self, task_id: str) -> None:
+        """Send one task's queued writes, in order, until it runs dry.
+
+        The key can change under this loop exactly once: when the first
+        write was a creation, confirming it trades the placeholder id for
+        the real one, and everything queued behind it goes to that.
+        """
+        key = task_id
+        while True:
+            pending = self.call_from_thread(self._next_write, key)
+            if pending is None:
+                return
+            try:
+                result = pending.run(key)
+            except SingularityError as exc:
+                self.call_from_thread(self._write_failed, key, pending, str(exc))
+                return
+            key = self.call_from_thread(self._write_done, key, pending, result)
+
+    def _write_done(self, key: str, pending: Pending, result: Any) -> str:
+        """Fold a confirmed write into the base and drop its patch.
+
+        Committing the patch rather than refetching is what keeps a
+        successful write from costing a round trip: the board already
+        showed this outcome, and the server has now agreed to it.
+
+        Returns the key the task's remaining writes should use.
+        """
+        queue = self._pending.get(key)
+        if queue and queue[0] is pending:
+            queue.popleft()
+        if pending.creates:
+            return self._adopt_created(key, result)
+        if pending.removes:
+            self._base = [t for t in self._base if t.id != key]
+        else:
+            for task in self._base:
+                if task.id == key:
+                    task.raw.update(pending.patch)
+        self.repaint()
+        return key
+
+    def _adopt_created(self, key: str, result: Any) -> str:
+        """Trade a placeholder id for the real one the server assigned.
+
+        The queue, the drain and the selection are all filed under the
+        placeholder, so each moves across together -- otherwise a write
+        queued behind the creation would be sent to an id that never
+        existed.
+        """
+        if not isinstance(result, Task):
+            self.repaint()
+            return key
+        new = result.id
+        self._base = [result if t.id == key else t for t in self._base]
+        queue = self._pending.pop(key, None)
+        if queue:
+            self._pending[new] = queue
+            for pending in queue:
+                pending.task_id = new
+        self._draining.discard(key)
+        self._draining.add(new)
+        if self._selected_id == key:
+            self._selected_id = new
+        self.repaint()
+        return new
+
+    def _write_failed(self, key: str, pending: Pending, message: str) -> None:
+        """Take back a refused write and say so.
+
+        Whatever was queued behind it for the same task goes too: those
+        writes were chosen against a state that never came about, so
+        sending them would apply them to something else.  Other tasks'
+        writes are untouched.
+        """
+        queue = self._pending.pop(key, None)
+        self._draining.discard(key)
+        abandoned = max(len(queue) - 1, 0) if queue else 0
+        if pending.creates:
+            # The task never came into being, so its row goes with it.
+            self._base = [t for t in self._base if t.id != key]
+        also = f" · {abandoned} more dropped" if abandoned else ""
+        self._error = f"{pending.label} failed: {message}{also}"
+        self.repaint()
+
+    # -- rendering ---------------------------------------------------------
 
     def show_tasks(self, listing: singularity.Listing) -> None:
-        table = self.query_one(DataTable)
-        previous = table.cursor_row
-        tasks = listing.tasks
-        self.tasks = tasks
+        """Adopt a fetched view as the base, keeping pending writes on top.
+
+        The fetch replaces what the server told us and nothing else, so a
+        refresh landing while a write is still in flight cannot put the
+        server's older copy of that task back on screen.
+        """
+        # A task created here and not yet confirmed stays on screen: this
+        # board's own pending write is what will make the server aware of
+        # it, so a fetch that predates it is not evidence it is gone.
+        unborn = [
+            t for t in self._base
+            if any(p.creates for p in self._pending.get(t.id, ()))
+        ]
+        known = {t.id for t in listing.tasks}
+        self._base = listing.tasks + [t for t in unborn if t.id not in known]
         self.filed_out = listing.filed_out
-        self.past_due = listing.past_due
+        # A fresh view supersedes whatever failed against the old one.
+        self._error = None
         self.reference = listing.reference
+        self.repaint()
+
+    def patched(self) -> list[Task]:
+        """The fetched tasks with every pending write applied on top.
+
+        Rows come only from what the last fetch reported, so a pending
+        write is never itself a reason for a row to exist -- an orphan
+        patch, for a task the fetch no longer knows about, shows nothing.
+        """
+        out: list[Task] = []
+        for task in self._base:
+            queue = self._pending.get(task.id)
+            if not queue:
+                out.append(task)
+                continue
+            if any(p.removes for p in queue):
+                continue
+            raw = dict(task.raw)
+            for pending in queue:
+                raw.update(pending.patch)
+            out.append(Task(raw))
+        return out
+
+    def belongs(self, task: Task) -> bool:
+        """Whether a task belongs in the shown view, by that view's own rule.
+
+        Asked of the task rather than assumed from the action that changed
+        it, so moving today's task to today keeps it where it was, and a
+        past-due task moved further into the past stays in today's view
+        because today's past-due rule still claims it.
+        """
+        position = self.position
+        if isinstance(position, Bucket):
+            if task.done or task.cancelled or task.start is not None:
+                return False
+            if task.deferred != position.deferred:
+                return False
+            # A filed task has been sorted, so the inbox does not want it.
+            return not (position is Bucket.INBOX and task.project_id)
+        started = task.local_start(self.tz)
+        if started is not None and started.date() == position:
+            return True
+        # `reference` is set for today alone, so only today keeps what is
+        # past due; elsewhere a task that is not the day's own is not shown.
+        return bool(
+            self.reference and task.past_due_since(self.reference, self.tz)
+        )
+
+    def repaint(self) -> None:
+        """Rebuild the table from the fetched tasks and the pending writes.
+
+        Everything derived is recomputed rather than adjusted -- the
+        ordering, what is past due, the counts -- and by the same functions
+        the fetched path uses, so an optimistic view and a fetched one
+        cannot come to disagree.
+        """
+        table = next(iter(self.query(DataTable)), None)
+        if table is None:
+            # Confirming a write can land as the app is shutting down, by
+            # which time there is nothing left to paint.
+            return
+        previous = table.cursor_row
+        keep = self._selected_id
+        tasks = singularity.sort_for_display(
+            [t for t in self.patched() if self.belongs(t)], self.tz, self.reference
+        )
+        self.tasks = tasks
+        self.past_due = (
+            sum(1 for t in tasks if t.past_due_since(self.reference, self.tz))
+            if self.reference
+            else 0
+        )
         table.clear()
         for task in tasks:
             table.add_row(*self.row_for(task))
         if tasks:
-            table.move_cursor(row=min(previous, len(tasks) - 1))
+            index = next(
+                (i for i, t in enumerate(tasks) if t.id == keep), None
+            )
+            if index is None:
+                # The task is gone.  Take the nearest surviving position
+                # rather than whatever has moved into the old row.
+                index = min(max(previous, 0), len(tasks) - 1)
+            table.move_cursor(row=index)
+            self._selected_id = tasks[index].id
+        else:
+            self._selected_id = None
         self.update_daybar()
         self.update_detail()
         done = sum(1 for t in tasks if t.done)
         bits = [f"{len(tasks)} task(s)", f"{done} done"]
         if self.past_due:
             bits.insert(1, f"{self.past_due} past due")
-        self.set_status(" · ".join(bits))
+        in_flight = sum(len(q) for q in self._pending.values())
+        if in_flight:
+            bits.append(f"{in_flight} saving")
+        # A refusal outranks the counts until the person acts again or the
+        # view is fetched afresh.
+        if self._error:
+            self.set_status(self._error, True)
+        else:
+            self.set_status(" · ".join(bits))
 
     @staticmethod
     def _markup_title(task: Task) -> str:
@@ -659,8 +947,11 @@ class TaskApp(App[None]):
 
     @property
     def selected(self) -> Task | None:
-        table = self.query_one(DataTable)
-        if not self.tasks or table.cursor_row < 0:
+        # Queried tolerantly rather than with `query_one`: repainting moves
+        # the cursor, and the message that causes can still be delivered
+        # after the table has gone during shutdown.
+        table = next(iter(self.query(DataTable)), None)
+        if table is None or not self.tasks or table.cursor_row < 0:
             return None
         if table.cursor_row >= len(self.tasks):
             return None
@@ -710,8 +1001,18 @@ class TaskApp(App[None]):
         status.update(message)
 
     @on(DataTable.RowHighlighted)
-    def row_changed(self) -> None:
-        self.update_detail()
+    def row_changed(self, event: DataTable.RowHighlighted) -> None:
+        """Follow the cursor: remember which task it is on, not which row.
+
+        Moving the cursor is the only way the selection changes that does
+        not go through `repaint`, so between them the remembered id is
+        always the task the person can see is selected.
+        """
+        row = event.cursor_row
+        if 0 <= row < len(self.tasks):
+            self._selected_id = self.tasks[row].id
+        if self.query("#detail"):
+            self.update_detail()
 
     @on(DataTable.RowSelected)
     def row_selected(self) -> None:
@@ -771,7 +1072,17 @@ class TaskApp(App[None]):
             return
         want_done = not task.done
         label = "Ticking" if want_done else "Unticking"
-        self.submit_write(label, self.client.set_done, task, want_done)
+        client = self.client
+        # Ticking moves on to the next unfinished task, so a list can be
+        # worked down with one key.  Unticking stays where it is: the task
+        # has just come back, and that is what is being looked at.
+        self.submit_write(
+            label,
+            task,
+            lambda tid: client.set_done(task, want_done),
+            {"checked": CHECKED if want_done else EMPTY},
+            select=self.next_open_after(task) if want_done else None,
+        )
 
     def action_done_for_today(self) -> None:
         """Record today's work on the selected task and move it to tomorrow.
@@ -781,13 +1092,34 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
-        self.submit_write("Done for today", self.client.done_for_today, task)
+        client = self.client
+        # Where it lands: tomorrow, all-day, and no longer set aside -- the
+        # same schedule `done_for_today` applies once the record is in.
+        tomorrow = datetime.now(self.tz).date() + timedelta(days=1)
+        self.submit_write(
+            "Done for today",
+            task,
+            lambda tid: client.done_for_today(task),
+            {
+                "start": singularity.iso_z(
+                    datetime.combine(tomorrow, time.min, tzinfo=self.tz)
+                ),
+                "useTime": False,
+                "deferred": False,
+            },
+        )
 
     def action_cancel_task(self) -> None:
         task = self.selected
         if task is None or self.client is None:
             return
-        self.submit_write("Cancelling", self.client.cancel_task, task.id)
+        client = self.client
+        self.submit_write(
+            "Cancelling",
+            task,
+            lambda tid: client.cancel_task(tid),
+            {"checked": CANCELLED},
+        )
 
     @work
     async def action_schedule(self) -> None:
@@ -820,9 +1152,24 @@ class TaskApp(App[None]):
                 self.set_status(f"“{typed}” is not a YYYY-MM-DD date", True)
                 return
         label = target.label if isinstance(target, Bucket) else f"{target:%d %b}"
+        client = self.client
+        # Mirrors what `set_schedule` sends: start and deferred are two
+        # halves of one fact, so the patch moves both together.
+        if isinstance(target, Bucket):
+            patch: dict[str, Any] = {"start": None, "deferred": target.deferred}
+        else:
+            patch = {
+                "start": singularity.iso_z(
+                    datetime.combine(target, time.min, tzinfo=self.tz)
+                ),
+                "useTime": False,
+                "deferred": False,
+            }
         self.submit_write(
             f"Moving to {label}",
-            lambda: self.client.set_schedule(task.id, target),
+            task,
+            lambda tid: client.set_schedule(tid, target),
+            patch,
         )
 
     @work
@@ -852,9 +1199,19 @@ class TaskApp(App[None]):
                 ),
                 "useTime": False,
             }
+        client = self.client
+        # The row appears at once under a placeholder id; confirming the
+        # creation trades it for the real one.  The placeholder carries the
+        # same fields the creation sends, so the view sorts and filters it
+        # exactly as it will once the server has it.
+        placeholder = Task({"id": f"tmp:{uuid.uuid4()}", "title": title, **fields})
+        self._base = self._base + [placeholder]
+        self._selected_id = placeholder.id
         self.submit_write(
             "Adding",
-            lambda: self.client.create_task(title, **fields),
+            placeholder,
+            lambda tid: client.create_task(title, **fields),
+            creates=True,
         )
 
     @work
@@ -865,7 +1222,13 @@ class TaskApp(App[None]):
         title = await self.push_screen_wait(TaskInput("Rename task", task.title))
         if not title or title == task.title:
             return
-        self.submit_write("Renaming", lambda: self.client.update_task(task.id, title=title))
+        client = self.client
+        self.submit_write(
+            "Renaming",
+            task,
+            lambda tid: client.update_task(tid, title=title),
+            {"title": title},
+        )
 
     @work
     async def action_delete(self) -> None:
@@ -879,7 +1242,13 @@ class TaskApp(App[None]):
         )
         if not ok:
             return
-        self.submit_write("Deleting", self.client.delete_task, task.id)
+        client = self.client
+        self.submit_write(
+            "Deleting",
+            task,
+            lambda tid: client.delete_task(tid),
+            removes=True,
+        )
 
     def action_focus_task(self) -> None:
         task = self.selected
