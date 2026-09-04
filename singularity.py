@@ -35,6 +35,10 @@ from dotenv import load_dotenv
 
 DEFAULT_BASE_URL = "https://api.singularity-app.com/v2"
 MAX_PAGE = 1000
+# How far apart a fresh run of hand-set orders is spaced, and how far past a
+# neighbour a task goes when nothing bounds it on that side.  Wide enough
+# that many later moves fit between two rows without respacing them.
+ORDER_STEP = 1000
 
 # `checked` values (per TaskCreateDto in the spec).
 EMPTY, CHECKED, CANCELLED = 0, 1, 2
@@ -181,6 +185,16 @@ class Task:
     @property
     def is_note(self) -> bool:
         return bool(self.raw.get("isNote"))
+
+    @property
+    def schedule_order(self) -> int:
+        """The task's place in a hand-set sequence.
+
+        The API stores this as an integer and hands 0 to anything created
+        without one, so a missing key and a stored 0 mean the same thing:
+        the very start of the order.
+        """
+        return self.raw.get("scheduleOrder") or 0
 
     @property
     def deferred(self) -> bool:
@@ -504,7 +518,7 @@ class SingularityClient:
             tasks = day_query()
             if not include_done:
                 tasks = [t for t in tasks if not t.done and not t.cancelled]
-            return Listing(sort_for_display(tasks, self.tz))
+            return Listing(sort_for_display(tasks, self.tz, manual=True))
 
         # Today costs three queries, so they go out together rather than one
         # after another: the day itself plus the two that find what is past
@@ -525,7 +539,7 @@ class SingularityClient:
                  if t.id not in {x.id for x in tasks}]
         tasks = tasks + extra
         return Listing(
-            sort_for_display(tasks, self.tz, now),
+            sort_for_display(tasks, self.tz, now, manual=True),
             past_due=sum(1 for t in tasks if t.past_due_since(now, self.tz)),
             reference=now,
         )
@@ -619,6 +633,16 @@ class SingularityClient:
     def update_task(self, task_id: str, **fields: Any) -> Task:
         payload = self.patch(f"/task/{task_id}", fields)
         return Task(payload.get("task", payload))
+
+    def set_schedule_order(self, task_id: str, order: int) -> Task:
+        """Put a task at a given place in a hand-set sequence.
+
+        One write against one task, which is what makes a move impossible to
+        half-apply: the alternative, exchanging two tasks' values, needs two
+        writes, and `/v2/batch` executes its operations independently rather
+        than as one transaction.
+        """
+        return self.update_task(task_id, scheduleOrder=order)
 
     def set_schedule(
         self,
@@ -791,33 +815,91 @@ def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def sort_key(
+    task: Task,
+    tz: tzinfo | None = None,
+    now: datetime | None = None,
+    manual: bool = False,
+) -> tuple:
+    """How one task orders against another within a view.
+
+    The last two entries are the hand-set order and the title; everything
+    before them is the task's group, which a manual sequence may not
+    cross.  `group_key` takes exactly that prefix, so the two cannot come
+    to disagree about where a group ends.
+    """
+    tz = tz or local_tz()
+    started = task.local_start(tz)
+    late = task.past_due_since(now, tz) if now else None
+    return (
+        task.done or task.cancelled,
+        late is None,
+        # Most overdue first within the past-due group; constant elsewhere.
+        late.timestamp() if late else 0.0,
+        not task.pinned,
+        not task.timed,
+        started.timetuple()[3:5] if (started and task.timed) else (0, 0),
+        task.schedule_order if manual else 0,
+        task.title.casefold(),
+    )
+
+
+def group_key(
+    task: Task, tz: tzinfo | None = None, now: datetime | None = None
+) -> tuple:
+    """Everything `sort_for_display` decides before the hand-set order.
+
+    Two tasks sharing this are the ones a manual sequence can arrange: a
+    move may only carry a task past a neighbour it matches here, or it would
+    be lifting the task out of its group and lying about the day.
+
+    Derived from the same expression the sort uses rather than restating the
+    conditions, so that adding an ordering key above the manual one keeps
+    this honest without a second edit.
+    """
+    return sort_key(task, tz, now)[:-2]
+
+
+def order_between(lower: int | None, upper: int | None) -> int | None:
+    """A stored order strictly between two others, or None if there is none.
+
+    `None` for either side means nothing bounds the task there, so it goes a
+    step beyond the other.  The field is an integer upstream -- a fractional
+    value sent to it is truncated -- so two adjacent values have nothing
+    between them and the caller has to make room instead.
+    """
+    if lower is None and upper is None:
+        return 0
+    if lower is None:
+        return upper - ORDER_STEP
+    if upper is None:
+        return lower + ORDER_STEP
+    if upper - lower < 2:
+        return None
+    return (lower + upper) // 2
+
+
 def sort_for_display(
     tasks: list[Task],
     tz: tzinfo | None = None,
     now: datetime | None = None,
+    manual: bool = False,
 ) -> list[Task]:
-    """Open before finished, past due before due today, then time and title.
+    """Open before finished, past due before due today, then time and order.
 
     Passing `now` enables the past-due dimension; without it the ordering is
     exactly what it was, which is what every view other than today wants.
+
+    Passing `manual` makes a hand-set sequence the last key, with the title
+    breaking a tie in it.  Only the calendar days pass it: the dateless
+    views are queues rather than sequences of work, and almost every task
+    in them carries the same stored order, so ordering by it there would
+    shuffle the rows without sequencing anything.  It is deliberately the
+    last key and so can never lift a task out of its group -- a day's timed
+    tasks stay in ascending start time however they are moved.
     """
     tz = tz or local_tz()
-
-    def key(task: Task):
-        started = task.local_start(tz)
-        late = task.past_due_since(now, tz) if now else None
-        return (
-            task.done or task.cancelled,
-            late is None,
-            # Most overdue first within the past-due group; constant elsewhere.
-            late.timestamp() if late else 0.0,
-            not task.pinned,
-            not task.timed,
-            started.timetuple()[3:5] if (started and task.timed) else (0, 0),
-            task.title.casefold(),
-        )
-
-    return sorted(tasks, key=key)
+    return sorted(tasks, key=lambda t: sort_key(t, tz, now, manual))
 
 
 # --------------------------------------------------------------------------

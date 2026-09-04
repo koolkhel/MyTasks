@@ -345,6 +345,10 @@ class Help(ModalScreen[None]):
     TEXT = """\
 [b]Moving around[/b]
   ↑ / ↓ or k / j     select task
+  K / J              move the selected task up / down
+                     in the day's order — calendar
+                     days only, and never past a task
+                     the day orders differently
   ← / → or h / l     previous / next day
   t                  jump to today
   i                  inbox — tasks with no date
@@ -481,6 +485,12 @@ class TaskApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("j,down", "cursor_down", "Down", show=False),
         Binding("k,up", "cursor_up", "Up", show=False),
+        # Uppercase moves the task, lowercase the cursor: the same gesture
+        # with more force.  Plain characters, so no terminal can swallow
+        # them -- cmd+arrow cannot work at all, since Textual has no super
+        # modifier and macOS does not forward Cmd to the terminal.
+        Binding("K", "move_up", "Move up"),
+        Binding("J", "move_down", "Move down"),
         Binding("h,left", "prev_day", "Prev day"),
         Binding("l,right", "next_day", "Next day"),
         Binding("t", "today", "Today"),
@@ -798,6 +808,79 @@ class TaskApp(App[None]):
             out.append(Task(raw))
         return out
 
+    @property
+    def orders_manually(self) -> bool:
+        """Whether the shown view carries a sequence a person has set.
+
+        Calendar days do; the inbox and someday view are queues awaiting
+        triage rather than sequences of work, and are ordered by title.
+        This is the one place that decides, so the fetched view and the
+        repainted one cannot disagree about it.
+        """
+        return not isinstance(self.position, Bucket)
+
+    def next_order(self) -> int:
+        """A stored order past every task in the shown day."""
+        if not self.tasks:
+            return singularity.ORDER_STEP
+        return (
+            max(t.schedule_order for t in self.tasks) + singularity.ORDER_STEP
+        )
+
+    def group_of(self, task: Task) -> tuple:
+        """The task's ordering group in the shown view.
+
+        Tasks sharing it are the ones a hand-set sequence can arrange; a
+        move may not carry a task past one that differs here.
+        """
+        return singularity.group_key(task, self.tz, self.reference)
+
+    def neighbour_to_pass(self, task: Task, step: int) -> "Task | None":
+        """The task a move would carry the selected one past, if any.
+
+        `step` is -1 to move up and 1 to move down.  Answers None at the
+        edge of the group, whether because the view ends there or because
+        the adjacent task is ordered by a key above the manual one and so
+        cannot be traded with.
+        """
+        try:
+            here = next(i for i, t in enumerate(self.tasks) if t.id == task.id)
+        except StopIteration:
+            return None
+        there = here + step
+        if not 0 <= there < len(self.tasks):
+            return None
+        other = self.tasks[there]
+        if self.group_of(other) != self.group_of(task):
+            return None
+        return other
+
+    def order_for_move(self, task: Task, step: int) -> "int | None":
+        """The stored order that puts `task` on the far side of its neighbour.
+
+        The moved task lands between the neighbour it passes and whatever
+        lies beyond that neighbour in its own group -- so only this one task
+        is written, and a move can never be half applied.
+
+        Answers None when there is no room, which is the caller's signal to
+        make some by respacing the run first.
+        """
+        other = self.neighbour_to_pass(task, step)
+        if other is None:
+            return None
+        beyond = self.neighbour_to_pass(other, step)
+        near = other.schedule_order
+        far = beyond.schedule_order if beyond is not None else None
+        # Moving down, the task ends above `near`; moving up, below it.
+        if step > 0:
+            return singularity.order_between(near, far)
+        return singularity.order_between(far, near)
+
+    def run_around(self, task: Task) -> list[Task]:
+        """The task's whole ordering group, in the sequence now shown."""
+        mine = self.group_of(task)
+        return [t for t in self.tasks if self.group_of(t) == mine]
+
     def belongs(self, task: Task) -> bool:
         """Whether a task belongs in the shown view, by that view's own rule.
 
@@ -839,7 +922,10 @@ class TaskApp(App[None]):
         previous = table.cursor_row
         keep = self._selected_id
         tasks = singularity.sort_for_display(
-            [t for t in self.patched() if self.belongs(t)], self.tz, self.reference
+            [t for t in self.patched() if self.belongs(t)],
+            self.tz,
+            self.reference,
+            manual=self.orders_manually,
         )
         self.tasks = tasks
         self.past_due = (
@@ -1109,6 +1195,77 @@ class TaskApp(App[None]):
             },
         )
 
+    def move_task(self, step: int, label: str) -> None:
+        """Carry the selected task past its neighbour and store where it lands.
+
+        Only the moved task is written.  Its new order sits between the
+        neighbour it passes and whatever lies beyond that neighbour, so one
+        write is the whole move and it cannot be left half applied.
+        """
+        task = self.selected
+        if task is None or self.client is None:
+            return
+        if not self.orders_manually:
+            self.set_status(
+                f"{self.position.label} is ordered by title · "
+                "reordering applies to calendar days",
+                True,
+            )
+            return
+        if self.neighbour_to_pass(task, step) is None:
+            self.set_status(f"“{task.title}” cannot move {label} from here", True)
+            return
+
+        order = self.order_for_move(task, step)
+        if order is None:
+            # Nothing fits between the destination and the task beyond it.
+            # Respace the run into values the day does not use, which is
+            # safe to apply in pieces, then place the task in the room made.
+            if not self.respace(task):
+                return
+            order = self.order_for_move(task, step)
+            if order is None:
+                self.set_status(f"“{task.title}” cannot move {label} from here", True)
+                return
+
+        client = self.client
+        self.submit_write(
+            f"Moving {label}",
+            task,
+            lambda tid: client.set_schedule_order(tid, order),
+            {"scheduleOrder": order},
+        )
+
+    def respace(self, task: Task) -> bool:
+        """Spread the task's ordering group out so a move has somewhere to go.
+
+        The new values sit past everything the day uses, which is what lets
+        a partly-applied respacing still leave every order distinct.  It is
+        one write per task in the run, so it goes as its own pending write
+        rather than through the single-task path.
+        """
+        run = self.run_around(task)
+        if len(run) < 2:
+            return False
+        base = max(t.schedule_order for t in self.tasks) + singularity.ORDER_STEP
+        client = self.client
+        fresh = {t.id: base + i * singularity.ORDER_STEP for i, t in enumerate(run)}
+        for item in run:
+            self.submit_write(
+                "Respacing",
+                item,
+                (lambda tid, value=fresh[item.id]:
+                 client.set_schedule_order(tid, value)),
+                {"scheduleOrder": fresh[item.id]},
+            )
+        return True
+
+    def action_move_up(self) -> None:
+        self.move_task(-1, "up")
+
+    def action_move_down(self) -> None:
+        self.move_task(1, "down")
+
     def action_cancel_task(self) -> None:
         task = self.selected
         if task is None or self.client is None:
@@ -1198,6 +1355,13 @@ class TaskApp(App[None]):
                     datetime.combine(self.position, time.min, tzinfo=self.tz)
                 ),
                 "useTime": False,
+                # Past everything the day holds, so a new task joins the end
+                # of a sequence rather than disturbing it.  The order has to
+                # be sent: the API's own default is 0, the lowest value
+                # there is, which would put every added task at the head of
+                # its group and tie it with every other one added here.
+                # Taken from the day already on screen, so no extra request.
+                "scheduleOrder": self.next_order(),
             }
         client = self.client
         # The row appears at once under a placeholder id; confirming the
