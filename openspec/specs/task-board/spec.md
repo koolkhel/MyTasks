@@ -7,7 +7,7 @@ The day-at-a-time terminal view of a person's tasks: it shows the tasks starting
 
 ### Requirement: Task row presentation
 
-Each task in the shown day SHALL be presented as a row carrying its completion mark, its start time, its title, and its project name. The title SHALL be shown as readable text: any link markup stored in it is rendered as the address it points to rather than displayed raw, and any character that the display treats as styling is shown as written. A past-due task SHALL instead show how overdue it is in place of its start time, and SHALL have its title rendered in a colour that sets it apart from the tasks due today. Title emphasis SHALL otherwise convey completion state only. The board SHALL NOT vary a title's weight, dimming, or colour according to the task's priority.
+Each task in the shown day SHALL be presented as a row carrying its completion mark, its start time, its title, and its project name. Title emphasis SHALL convey completion state only. The board SHALL NOT vary a title's weight, dimming, or colour according to the task's priority.
 
 #### Scenario: An open task is shown plainly
 
@@ -24,21 +24,27 @@ Each task in the shown day SHALL be presented as a row carrying its completion m
 - **WHEN** the day contains two open tasks whose stored priorities differ
 - **THEN** neither row is emphasised relative to the other
 
-#### Scenario: A past-due row is set apart
+### Requirement: A title is shown as readable text
 
-- **WHEN** today's view holds both a past-due task and a task due today
-- **THEN** the past-due row shows how overdue it is where the other shows a time, and its title is coloured while the other's is not
+A task's title SHALL be shown as readable text: any link markup stored in it is rendered as the address it points to rather than displayed raw, and any character that the display treats as styling is shown as written.
 
 #### Scenario: A row never shows stored markup
 
 - **WHEN** a task's title holds an HTML anchor
 - **THEN** the row shows the readable address and none of the surrounding tags
 
+### Requirement: A past-due row is marked out
+
+A past-due task SHALL show how overdue it is in place of its start time, and SHALL have its title rendered in a colour that sets it apart from the tasks due today.
+
+#### Scenario: A past-due row is set apart
+
+- **WHEN** today's view holds both a past-due task and a task due today
+- **THEN** the past-due row shows how overdue it is where the other shows a time, and its title is coloured while the other's is not
+
 ### Requirement: Ordering of tasks within a day
 
-The board SHALL order a day's tasks by, in turn: unfinished before finished, past due before due today, pinned before unpinned, timed before all-day, earlier start time before later, and finally the order a person has set by hand. Where two tasks share even that, they SHALL be ordered by title. Past-due tasks SHALL be ordered among themselves by how overdue they are, the most overdue first. Priority SHALL NOT influence the order.
-
-The manual order SHALL be the last key and never override an earlier one: it decides the sequence among tasks the other keys leave equal, and cannot lift a task above a group it does not belong to. A day's timed tasks therefore stay in ascending start time however they are moved, and past-due tasks stay in most-overdue-first order.
+The board SHALL order a day's tasks by, in turn: unfinished before finished, past due before due today, pinned before unpinned, timed before all-day, earlier start time before later, and finally the order a person has set by hand. Where two tasks share even that, they SHALL be ordered by title. Priority SHALL NOT influence the order.
 
 #### Scenario: Timed tasks lead all-day tasks
 
@@ -50,6 +56,15 @@ The manual order SHALL be the last key and never override an earlier one: it dec
 - **WHEN** two tasks in the day share a completion state, pinned state, and start slot, and the same manual order, and carry different priorities
 - **THEN** they are ordered by title, so the sequence is never arbitrary between them, and their priorities are not consulted
 
+#### Scenario: Finished tasks sink
+
+- **WHEN** a day holds a mix of open and completed tasks
+- **THEN** the completed ones appear after all open ones
+
+### Requirement: The manual order is the last ordering key
+
+The order a person has set by hand SHALL be the last key and never override an earlier one: it decides the sequence among tasks the other keys leave equal, and cannot lift a task above a group it does not belong to. A day's timed tasks therefore stay in ascending start time however they are moved.
+
 #### Scenario: The manual order is what decides between otherwise equal tasks
 
 - **WHEN** two tasks in the day share a completion state, pinned state, and start slot but carry different manual orders
@@ -60,10 +75,9 @@ The manual order SHALL be the last key and never override an earlier one: it dec
 - **WHEN** a day holds two timed tasks at different times, whatever manual order they carry
 - **THEN** the earlier one is listed first
 
-#### Scenario: Finished tasks sink
+### Requirement: Ordering of past-due tasks in today's view
 
-- **WHEN** a day holds a mix of open and completed tasks
-- **THEN** the completed ones appear after all open ones
+Past-due tasks SHALL lead the tasks due today, and SHALL be ordered among themselves by how overdue they are, the most overdue first, whatever manual order they carry.
 
 #### Scenario: Past-due tasks lead today's own
 
@@ -356,14 +370,6 @@ Opening, viewing, or dismissing the focus view SHALL leave the task exactly as i
 
 Today's view SHALL list, in addition to the tasks that start today, every unfinished task that is past due: one whose start is before today, or whose deadline has already passed. A task that qualifies under both rules SHALL appear once. Deferred tasks SHALL NOT be included, because the someday view exists to set a task aside and returning it to today would defeat that. No limit SHALL be placed on how far back a past-due task may come from.
 
-Gathering these tasks requires more than one query of the API, because the
-conditions combine conjunctively and asking for both in one query would return
-only the tasks meeting both. Those queries SHALL be allowed to run at the same
-time as each other and as the query for the day itself, and the view they
-produce SHALL NOT depend on the order in which their results arrive. Where any
-of them fails, the load SHALL be reported as failed rather than presented as a
-day with some of its tasks missing.
-
 #### Scenario: A task left over from an earlier day
 
 - **WHEN** an unfinished task's start is before today
@@ -398,6 +404,10 @@ day with some of its tasks missing.
 
 - **WHEN** the inbox or the someday view is displayed
 - **THEN** its contents are exactly as they were before, with no past-due tasks added
+
+### Requirement: Gathering what is past due takes more than one query
+
+Gathering these tasks requires more than one query of the API, because the conditions combine conjunctively and asking for both in one query would return only the tasks meeting both. Those queries SHALL be allowed to run at the same time as each other and as the query for the day itself, and the view they produce SHALL NOT depend on the order in which their results arrive. Where any of them fails, the load SHALL be reported as failed rather than presented as a day with some of its tasks missing.
 
 #### Scenario: The order results arrive in does not matter
 
@@ -446,17 +456,10 @@ The board SHALL offer a someday view listing every unfinished task that has no d
 
 The board SHALL let a person mark the selected task as done for today, meaning work happened on it today and it should come up again tomorrow. This SHALL record the day's work against the task wherever the API accepts such a record, and SHALL then schedule the task for tomorrow. It SHALL NOT mark the task finished: a task done for today is still an open task.
 
-The record SHALL be attempted before the task is rescheduled, because the API accepts it only for a task whose start is not in the future and moving the date forward would make the record impossible. Where the API refuses the record — a task with no date, or one already dated far enough ahead — the task SHALL still be scheduled for tomorrow, and the refusal SHALL NOT be reported as a failure.
-
 #### Scenario: A task being worked on today
 
 - **WHEN** a person marks a task dated today as done for today
 - **THEN** the day's work is recorded against the task, the task is scheduled for tomorrow, and it remains unfinished
-
-#### Scenario: A task carried over from an earlier day
-
-- **WHEN** a person marks a past-due task as done for today
-- **THEN** the day's work is recorded against it as well, the task is scheduled for tomorrow, and it remains unfinished
 
 #### Scenario: It does not finish the task
 
@@ -472,6 +475,15 @@ The record SHALL be attempted before the task is rescheduled, because the API ac
 
 - **WHEN** a person finishes a task
 - **THEN** an action other than the one that marks it done for today does it, and neither key performs the other's work
+
+### Requirement: The day's work is recorded before the task is rescheduled
+
+The record SHALL be attempted before the task is rescheduled, because the API accepts it only for a task whose start is not in the future and moving the date forward would make the record impossible. Where the API refuses the record — a task with no date, or one already dated far enough ahead — the task SHALL still be scheduled for tomorrow, and the refusal SHALL NOT be reported as a failure.
+
+#### Scenario: A task carried over from an earlier day
+
+- **WHEN** a person marks a past-due task as done for today
+- **THEN** the day's work is recorded against it as well, the task is scheduled for tomorrow, and it remains unfinished
 
 ### Requirement: The key bar shows every key without clipping
 
@@ -545,8 +557,6 @@ The board SHALL recognise a link written in a task's title, whether stored as an
 
 The board SHALL let a person open the selected task's link, handing the address to the operating system. This SHALL work without a mouse and without depending on the terminal's own capabilities. The board SHALL additionally present the address so that a terminal able to make hyperlinks clickable can do so, but SHALL NOT rely on that for the link to be reachable.
 
-Only `http` and `https` addresses SHALL be opened. A title is ordinary text that happens to be passed to the system opener, so no other scheme may be launched through it.
-
 #### Scenario: Opening the link of the selected task
 
 - **WHEN** a person asks to open the link of a task that has one
@@ -562,11 +572,6 @@ Only `http` and `https` addresses SHALL be opened. A title is ordinary text that
 - **WHEN** a person asks to open a link while the shown view holds no tasks
 - **THEN** nothing is opened and the board is left as it was
 
-#### Scenario: An address of another kind is refused
-
-- **WHEN** a task's title contains an address whose scheme is neither `http` nor `https`
-- **THEN** it is not opened
-
 #### Scenario: Opening a link changes nothing
 
 - **WHEN** a person opens a task's link
@@ -576,6 +581,15 @@ Only `http` and `https` addresses SHALL be opened. A title is ordinary text that
 
 - **WHEN** a task with a link is selected in the inbox or in the someday view
 - **THEN** its link can be opened just as from a day
+
+### Requirement: Only web addresses are opened
+
+Only `http` and `https` addresses SHALL be opened. A title is ordinary text that happens to be passed to the system opener, so no other scheme may be launched through it.
+
+#### Scenario: An address of another kind is refused
+
+- **WHEN** a task's title contains an address whose scheme is neither `http` nor `https`
+- **THEN** it is not opened
 
 ### Requirement: The board offers the Turbo C++ themes
 
@@ -637,16 +651,7 @@ Whatever theme is active, the board SHALL keep apart the things its other requir
 
 ### Requirement: A write shows its outcome before the server confirms it
 
-When a person performs an action that changes a task, the board SHALL apply
-the expected outcome to the view and repaint it without waiting for the API,
-then send the request in the background. The board SHALL NOT refetch the view
-in order to display a write it performed itself: the outcome it already
-applied stands, reconciled against the server's answer when that arrives.
-
-The repainted view SHALL be the view the person would have seen had the write
-completed instantly, including every consequence the board derives for itself
-— a task's position in the ordering, whether it is still shown at all, and the
-counts the board reports for the view.
+When a person performs an action that changes a task, the board SHALL apply the expected outcome to the view and repaint it without waiting for the API, then send the request in the background. The board SHALL NOT refetch the view in order to display a write it performed itself: the outcome it already applied stands, reconciled against the server's answer when that arrives.
 
 #### Scenario: Ticking a task
 
@@ -658,6 +663,15 @@ counts the board reports for the view.
 - **WHEN** a write succeeds
 - **THEN** the board does not re-request the view's tasks in order to show the change
 
+#### Scenario: A slow write is still instant on screen
+
+- **WHEN** a write takes seconds for the API to complete
+- **THEN** the screen has already shown the outcome, and the person is not made to wait for it
+
+### Requirement: An applied write carries every consequence the board derives
+
+The repainted view SHALL be the view the person would have seen had the write completed instantly, including every consequence the board derives for itself — a task's position in the ordering, whether it is still shown at all, and the counts the board reports for the view.
+
 #### Scenario: A write that removes a task from the view
 
 - **WHEN** a person assigns another day to a task, marks it done for today, or deletes it
@@ -667,11 +681,6 @@ counts the board reports for the view.
 
 - **WHEN** an optimistic write changes whether a shown task is past due
 - **THEN** the board re-derives that from the task it now holds, and the past-due count it reports agrees with the rows on screen
-
-#### Scenario: A slow write is still instant on screen
-
-- **WHEN** a write takes seconds for the API to complete
-- **THEN** the screen has already shown the outcome, and the person is not made to wait for it
 
 ### Requirement: A rejected write is undone
 
@@ -700,19 +709,28 @@ not undo anything.
 
 ### Requirement: The cursor never lands on a task by accident
 
-When a write reorders the view, the selection SHALL be decided by which task
-it belongs on, never by the row number it previously occupied. Where the
-selected task has left the view, the selection SHALL move to a task adjacent
-to where it was.
+When a write reorders the view, the selection SHALL be decided by which task it belongs on, never by the row number it previously occupied. Where the selected task has left the view, the selection SHALL move to a task adjacent to where it was.
 
-This matters because completion is the first ordering key, so ticking a task
-moves it: a selection that stayed on the row index would land on an unrelated
-task, and the next keypress would act on that task instead.
+This matters because completion is the first ordering key, so ticking a task moves it: a selection that stayed on the row index would land on an unrelated task, and the next keypress would act on that task instead.
 
-Ticking a task off SHALL move the selection to the next unfinished task, so
-that a list can be worked down with one key. Every other write SHALL leave
-the selection on the task it changed, unticking included — a task brought
-back is what the person is then looking at.
+#### Scenario: A write other than ticking
+
+- **WHEN** a person renames the selected task, or moves it to a day it is already on
+- **THEN** the selection is still on that task afterwards
+
+#### Scenario: The selected task leaves the view
+
+- **WHEN** the selected task is deleted, or assigned to another day
+- **THEN** the selection moves to a task adjacent to where it was
+
+#### Scenario: The view becomes empty
+
+- **WHEN** the last task in the view leaves it
+- **THEN** nothing is selected and the board reports the view as empty
+
+### Requirement: Ticking a task moves the selection on
+
+Ticking a task off SHALL move the selection to the next unfinished task, so that a list can be worked down with one key. Every other write SHALL leave the selection on the task it changed, unticking included — a task brought back is what the person is then looking at.
 
 #### Scenario: Ticking moves on to the next unfinished task
 
@@ -733,21 +751,6 @@ back is what the person is then looking at.
 
 - **WHEN** a person unticks a task
 - **THEN** the selection stays on that task as it moves back among the unfinished ones
-
-#### Scenario: A write other than ticking
-
-- **WHEN** a person renames the selected task, or moves it to a day it is already on
-- **THEN** the selection is still on that task afterwards
-
-#### Scenario: The selected task leaves the view
-
-- **WHEN** the selected task is deleted, or assigned to another day
-- **THEN** the selection moves to a task adjacent to where it was
-
-#### Scenario: The view becomes empty
-
-- **WHEN** the last task in the view leaves it
-- **THEN** nothing is selected and the board reports the view as empty
 
 ### Requirement: Keypresses during a write are not lost
 
@@ -792,48 +795,44 @@ performed SHALL remain visible until it is confirmed or refused.
 
 ### Requirement: Setting the order of a day's tasks by hand
 
-The board SHALL let a person move the selected task up or down within a
-calendar day, and SHALL store the resulting position on the task so that it
-survives a reload and is the same order other SingularityApp clients show.
-
-Moving SHALL change the stored order of the moved task alone, to a value
-that places it on the far side of its neighbour and that no other task in
-the day holds. No other task's stored order SHALL change, so that a move
-is a single write and cannot be left half applied.
-
-No two tasks in a day SHALL be left sharing a stored order. Where there is
-no value available between the moved task's destination and the task beyond
-it, the board SHALL first move that run of tasks into a range of values no
-task in the day holds, so that the destination exists; such a renumbering
-SHALL preserve the order of the tasks it renumbers, and SHALL leave every
-stored order distinct even if only some of its writes are applied.
-
-Moving SHALL only exchange the task with a neighbour the day's other ordering
-keys allow it to trade with — one that is equally finished, equally past due,
-equally pinned, and equally timed at the same start. Where the neighbour in
-that direction is not such a task, or there is none, the board SHALL report
-why the task cannot move there and SHALL leave every task's stored order
-untouched.
-
-Reordering SHALL be offered on calendar days only. In the inbox and the
-someday view the board SHALL report that reordering applies to days rather
-than silently doing nothing, because those views are not sequences of work
-and are ordered by title.
+The board SHALL let a person move the selected task up or down within a calendar day, and SHALL store the resulting position on the task so that it survives a reload and is the same order other SingularityApp clients show.
 
 #### Scenario: Moving a task up
 
 - **WHEN** a person moves the selected task up, and the task above it is one the day's other ordering keys allow it to trade with
 - **THEN** the two appear in the opposite sequence, every other task stays where it was, only the moved task's stored order changed, and the selection is still on the moved task
 
+#### Scenario: Moving down
+
+- **WHEN** a person moves the selected task down
+- **THEN** it comes to sit after the task below it, under the same rules that govern moving up
+
 #### Scenario: The new position is remembered
 
 - **WHEN** a person moves a task and then reloads the view, or leaves the day and comes back
 - **THEN** the task is still in the position they moved it to
 
-#### Scenario: Moving down
+### Requirement: A move writes one task and no other
 
-- **WHEN** a person moves the selected task down
-- **THEN** it comes to sit after the task below it, under the same rules that govern moving up
+Moving SHALL change the stored order of the moved task alone, to a value that places it on the far side of its neighbour and that no other task in the day holds. No other task's stored order SHALL change, so that a move is a single write and cannot be left half applied.
+
+#### Scenario: A failed move changes nothing
+
+- **WHEN** the write that moves a task fails
+- **THEN** no task's stored order has changed, because the move was a single write
+
+### Requirement: No two tasks in a day share a stored order
+
+No two tasks in a day SHALL be left sharing a stored order. Where there is no value available between the moved task's destination and the task beyond it, the board SHALL first move that run of tasks into a range of values no task in the day holds, so that the destination exists; such a respacing SHALL preserve the order of the tasks it moves, and SHALL leave every stored order distinct even if only some of its writes are applied.
+
+#### Scenario: No room between the destination and the task beyond it
+
+- **WHEN** a person moves a task to a place where the two tasks it must sit between hold adjacent values with nothing available in between
+- **THEN** the move still happens, the tasks keep the sequence they were in apart from the one moved, and every stored order in the day is still distinct
+
+### Requirement: A move may not cross an ordering group
+
+Moving SHALL only carry the task past a neighbour the day's other ordering keys allow it to trade with — one that is equally finished, equally past due, equally pinned, and equally timed at the same start. Where the neighbour in that direction is not such a task, or there is none, the board SHALL report why the task cannot move there and SHALL leave every task's stored order untouched.
 
 #### Scenario: Already at the edge of its group
 
@@ -845,25 +844,19 @@ and are ordered by title.
 - **WHEN** the selected all-day task is the first of the all-day tasks and a timed task sits above it
 - **THEN** moving up reports that it cannot pass the timed tasks, and the order is unchanged
 
-#### Scenario: A failed move changes nothing
+#### Scenario: Sequencing a past-due task
 
-- **WHEN** the write that moves a task fails
-- **THEN** no task's stored order has changed, because the move was a single write
+- **WHEN** a person wants a past-due task in a particular place in today's sequence and dates it to today
+- **THEN** it joins the tasks due today and can be moved among them
 
-#### Scenario: No room between the destination and the task beyond it
+### Requirement: Reordering is offered on calendar days only
 
-- **WHEN** a person moves a task to a place where the two tasks it must sit between hold adjacent values with nothing available in between
-- **THEN** the move still happens, the tasks keep the sequence they were in apart from the one moved, and every stored order in the day is still distinct
+Reordering SHALL be offered on calendar days only. In the inbox and the someday view the board SHALL report that reordering applies to days rather than silently doing nothing, because those views are not sequences of work and are ordered by title.
 
 #### Scenario: Not offered in the dateless views
 
 - **WHEN** a person tries to move a task in the inbox or the someday view
 - **THEN** the board reports that reordering applies to calendar days, and no task's stored order changes
-
-#### Scenario: Sequencing a past-due task
-
-- **WHEN** a person wants a past-due task in a particular place in today's sequence and dates it to today
-- **THEN** it joins the tasks due today and can be moved among them
 
 ### Requirement: Where a newly added task lands in a day's order
 
