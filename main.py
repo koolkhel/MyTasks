@@ -47,6 +47,53 @@ from singularity import (
 
 MARKS = {EMPTY: "☐", CHECKED: "☑", CANCELLED: "☒"}
 
+# Every printable key, paired with what the same physical key types on a
+# Russian keyboard.  A binding lists both, so the key a person presses is the
+# one printed on the keycap whichever layout is active -- otherwise a Russian
+# title costs two layout switches, one to type it and one to reach any action
+# afterwards.
+#
+# The whole layout is recorded, not just the keys bound today, because this
+# describes the keyboard rather than this app: a binding added later gets its
+# twin without anyone having to remember that this table exists.
+#
+# Letters are keyed by their character, which is what Textual delivers for
+# them in either alphabet.  Punctuation is keyed by Textual's own name for it,
+# because that is what a binding on it has to say -- pressing "." arrives as
+# `full_stop`, never as ".".
+_LETTERS = dict(zip("qwertyuiopasdfghjklzxcvbnm",
+                    "йцукенгшщзфывапролдячсмить"))
+KEY_TWINS: dict[str, str] = dict(_LETTERS)
+KEY_TWINS.update({k.upper(): v.upper() for k, v in _LETTERS.items()})
+KEY_TWINS.update({
+    "left_square_bracket": "х",
+    "right_square_bracket": "ъ",
+    "semicolon": "ж",
+    "apostrophe": "э",
+    "comma": "б",
+    "full_stop": "ю",
+    # A Russian layout types "." on the key that carries "/", and Textual
+    # calls that arriving character `full_stop`.
+    "slash": "full_stop",
+    # The one key that is not a letter-for-letter swap: a Russian layout puts
+    # the comma where the question mark is.
+    "question_mark": "comma",
+})
+
+
+def keys(spec: str) -> str:
+    """A binding's keys, followed by the Russian twin of each that has one.
+
+    `"a"` becomes `"a,ф"` and `"j,down"` becomes `"j,down,о"`.  Twins go at
+    the end so the keys a person reads first are the ones the board is
+    written in, and so the key bar -- which shows the first key of a binding
+    -- goes on naming the English one.  A key with no twin, such as `escape`
+    or an arrow, is left exactly as it was.
+    """
+    parts = [k.strip() for k in spec.split(",")]
+    twins = [KEY_TWINS[k] for k in parts if k in KEY_TWINS]
+    return ",".join(parts + twins)
+
 # The Turbo C++ editor theme, in the two moods it ships: near-black and the
 # classic Borland blue.  Every value below is the one that theme's own files
 # declare -- the DOS 16-colour set -- so "looks like Turbo C++" is checkable
@@ -225,8 +272,8 @@ class Confirm(ModalScreen[bool]):
     """Yes/no gate for the destructive actions."""
 
     BINDINGS = [
-        Binding("escape,n", "no", "No"),
-        Binding("y", "yes", "Yes"),
+        Binding(keys("escape,n"), "no", "No"),
+        Binding(keys("y"), "yes", "Yes"),
     ]
 
     def __init__(self, question: str):
@@ -262,7 +309,7 @@ class DatePicker(ModalScreen[str]):
     ]
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")] + [
-        Binding(key, f"choose('{name}')", label) for key, name, label in CHOICES
+        Binding(keys(key), f"choose('{name}')", label) for key, name, label in CHOICES
     ]
 
     def __init__(self, title: str, today: date):
@@ -300,7 +347,7 @@ class TaskFocus(ModalScreen[None]):
     completed by looking at it.
     """
 
-    BINDINGS = [Binding("escape,enter,q", "close", "Close")]
+    BINDINGS = [Binding(keys("escape,enter,q"), "close", "Close")]
 
     # Deliberately not `task` or `_task`: `Screen` exposes a read-only `task`
     # property, and `_task` is the message-pump coroutine MessagePump sets in
@@ -340,7 +387,7 @@ class TaskFocus(ModalScreen[None]):
 
 
 class Help(ModalScreen[None]):
-    BINDINGS = [Binding("escape,question_mark,q", "close", "Close")]
+    BINDINGS = [Binding(keys("escape,question_mark,q"), "close", "Close")]
 
     TEXT = """\
 [b]Moving around[/b]
@@ -374,6 +421,9 @@ class Help(ModalScreen[None]):
 [b]Other[/b]
   ?                  this help
   q                  quit
+
+The keys above work whichever keyboard layout is active: press the key
+where it sits on the keyboard, and it does the same thing.
 
 Giving a task a date takes it out of the inbox. Days do
 not apply in the inbox or someday, so h / l do nothing
@@ -482,24 +532,24 @@ class TaskApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("j,down", "cursor_down", "Down", show=False),
-        Binding("k,up", "cursor_up", "Up", show=False),
+        Binding(keys("q"), "quit", "Quit"),
+        Binding(keys("j,down"), "cursor_down", "Down", show=False),
+        Binding(keys("k,up"), "cursor_up", "Up", show=False),
         # Uppercase moves the task, lowercase the cursor: the same gesture
         # with more force.  Plain characters, so no terminal can swallow
         # them -- cmd+arrow cannot work at all, since Textual has no super
         # modifier and macOS does not forward Cmd to the terminal.
-        Binding("K", "move_up", "Move up"),
-        Binding("J", "move_down", "Move down"),
-        Binding("h,left", "prev_day", "Prev day"),
-        Binding("l,right", "next_day", "Next day"),
-        Binding("t", "today", "Today"),
-        Binding("i", "inbox", "Inbox"),
-        Binding("s", "someday", "Someday"),
-        Binding("r", "refresh", "Reload"),
+        Binding(keys("K"), "move_up", "Move up"),
+        Binding(keys("J"), "move_down", "Move down"),
+        Binding(keys("h,left"), "prev_day", "Prev day"),
+        Binding(keys("l,right"), "next_day", "Next day"),
+        Binding(keys("t"), "today", "Today"),
+        Binding(keys("i"), "inbox", "Inbox"),
+        Binding(keys("s"), "someday", "Someday"),
+        Binding(keys("r"), "refresh", "Reload"),
         Binding("space", "toggle", "Tick"),
         # Its own key, never shared with tick: "." mirrors the app's cmd+.
-        Binding("full_stop", "done_for_today", "Did today"),
+        Binding(keys("full_stop"), "done_for_today", "Did today"),
         # Not priority: a priority binding fires ahead of every focused
         # widget, including the Input inside the rename, add, and date
         # prompts, which then can never be confirmed with enter.  On the
@@ -507,17 +557,17 @@ class TaskApp(App[None]):
         # `row_selected` below acts on; this entry names the key in the
         # footer and covers the case where the table is not focused.
         Binding("enter", "focus_task", "Focus"),
-        Binding("a", "add", "Add"),
-        Binding("e", "rename", "Rename"),
-        Binding("x", "cancel_task", "Cancel"),
-        Binding("d", "schedule", "Date"),
-        Binding("o", "open_link", "Link"),
+        Binding(keys("a"), "add", "Add"),
+        Binding(keys("e"), "rename", "Rename"),
+        Binding(keys("x"), "cancel_task", "Cancel"),
+        Binding(keys("d"), "schedule", "Date"),
+        Binding(keys("o"), "open_link", "Link"),
         # Both keys, and deliberately NOT priority: a Mac laptop has no
         # forward-delete, so its Delete key arrives as backspace, while an
         # external keyboard sends delete.  A priority binding would take
         # backspace away from the text prompts, where it erases characters.
         Binding("backspace,delete", "delete", "Delete"),
-        Binding("question_mark", "help", "Help"),
+        Binding(keys("question_mark"), "help", "Help"),
     ]
 
     def __init__(self, position: "date | Bucket | None" = None):
