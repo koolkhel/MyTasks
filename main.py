@@ -451,6 +451,9 @@ class Help(ModalScreen[None]):
   r                  reload from the server
   w                  hide the work project's tasks,
                      and press again to bring them back
+  u                  undo the last change, then the one
+                     before it — says what it undid;
+                     never deletes anything
 
 [b]Looking at a task[/b]
   enter              show the selected task in full
@@ -522,6 +525,45 @@ class Pending:
     # Creating is the other way round: the row exists only because this
     # write is pending, and confirming it settles the task's real id.
     creates: bool = False
+    # Which action this write belongs to.  Several writes can share one, so
+    # that a single keypress is a single undo however many requests it took.
+    group: str = ""
+
+
+@dataclass
+class Undoable:
+    """What one action changed, kept so it can be put back.
+
+    `previous` maps a task id to the values its fields held before the
+    action, which is what `Pending` already records to roll a refused write
+    back -- undo is that record played forward again after the write stuck.
+
+    One entry covers one action, not one request: moving a task can write
+    every task in its run, and a person who pressed one key expects one
+    press to reverse it.
+
+    An entry that cannot be reversed is still kept, carrying `reason`, so
+    that pressing undo after a deletion says so rather than silently
+    reversing something older that the person was not asking about.
+    """
+
+    group: str
+    label: str
+    subject: str
+    previous: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The tasks themselves, so an undo can reach a task that is not in the
+    # view any more -- the board writes what it wrote, wherever the person
+    # has navigated to since.
+    tasks: dict[str, Task] = field(default_factory=dict)
+    #: How many of this action's writes the API has accepted.  An action
+    #: can take several, and one of them failing does not unhappen the rest.
+    applied: int = 0
+    reason: str = ""
+    note: str = ""
+
+    @property
+    def reversible(self) -> bool:
+        return not self.reason
 
 
 class TaskApp(App[None]):
@@ -603,6 +645,7 @@ class TaskApp(App[None]):
         Binding(keys("s"), "someday", "Someday"),
         Binding(keys("r"), "refresh", "Reload"),
         Binding(keys("w"), "toggle_work", "Hide work"),
+        Binding(keys("u"), "undo", "Undo"),
         Binding("space", "toggle", "Tick"),
         # Its own key, never shared with tick: "." mirrors the app's cmd+.
         Binding(keys("full_stop"), "done_for_today", "Did today"),
@@ -659,15 +702,20 @@ class TaskApp(App[None]):
         # The selected task's id, so the cursor can follow the task through
         # the reordering a write causes instead of holding a row number.
         self._selected_id: str | None = None
-        # A refusal to keep on the status line.  Repainting would otherwise
-        # replace it with the view's counts the moment another write
-        # confirms, leaving the failure effectively unreported.
-        self._error: str | None = None
+        # Something to keep on the status line until the person acts again.
+        # Repainting rewrites the status from the view's counts, so anything
+        # said once is gone the moment the next write confirms -- which is
+        # exactly when a refusal or an "undid this" most needs to still be
+        # readable.  Held as (message, is_error).
+        self._notice: tuple[str, bool] | None = None
         # Whether the work project's tasks are being hidden.  A mode over
         # the views rather than part of what a view holds, so `belongs` goes
         # on answering only where a task lives.  It lasts as long as the
         # board is open and writes nothing.
         self.hiding_work = False
+        # What this session has written, most recent last, so the undo key
+        # can walk back through it.  Session-long: nothing is kept on disk.
+        self._undo: list[Undoable] = []
         self.work_project: str | None = singularity.load_work_project()
 
     # -- layout ------------------------------------------------------------
@@ -729,6 +777,11 @@ class TaskApp(App[None]):
         removes: bool = False,
         creates: bool = False,
         select: str | None = None,
+        group: str | None = None,
+        subject: str | None = None,
+        undo_reason: str | None = None,
+        undo_note: str = "",
+        record: bool = True,
     ) -> None:
         """Show a write's outcome at once, then queue it for the API.
 
@@ -738,8 +791,15 @@ class TaskApp(App[None]):
         every key in the app.
         """
         patch = patch or {}
-        # Acting again supersedes the last refusal, so it stops being shown.
-        self._error = None
+        # Acting again supersedes whatever was last said, so it stops
+        # being shown.
+        self._notice = None
+        group = group or str(uuid.uuid4())
+        if record:
+            self.remember(
+                group, label, subject or task.title, task, patch,
+                undo_reason, undo_note,
+            )
         pending = Pending(
             task_id=task.id,
             label=label,
@@ -748,6 +808,7 @@ class TaskApp(App[None]):
             previous={key: task.raw.get(key) for key in patch},
             removes=removes,
             creates=creates,
+            group=group,
         )
         self._pending.setdefault(task.id, deque()).append(pending)
         if select is not None:
@@ -777,6 +838,52 @@ class TaskApp(App[None]):
             if not candidate.done and not candidate.cancelled:
                 return candidate.id
         return None
+
+    def remember(
+        self,
+        group: str,
+        label: str,
+        subject: str,
+        task: Task,
+        patch: dict[str, Any],
+        reason: str | None,
+        note: str,
+    ) -> None:
+        """Note what a write is about to replace, so it can be put back.
+
+        Writes sharing a group join one entry rather than making their own,
+        which is what keeps a move that respaced its whole run to a single
+        press of the undo key.
+        """
+        for entry in reversed(self._undo):
+            if entry.group == group:
+                break
+        else:
+            entry = Undoable(group=group, label=label, subject=subject,
+                             reason=reason or "", note=note)
+            self._undo.append(entry)
+        if reason:
+            # Nothing to put back; the entry exists only to say so.
+            return
+        entry.previous.setdefault(task.id, {}).update(
+            {key: task.raw.get(key) for key in patch}
+        )
+        entry.tasks[task.id] = task
+
+    def forget(self, group: str) -> None:
+        """Drop an entry whose action left nothing behind.
+
+        A refused write is not something to undo, because it never
+        happened.  But an action can take several writes -- a move that
+        respaces its run takes one per task -- and one of them failing does
+        not unhappen the others: this API refuses a write now and then and
+        succeeds on a retry, so a single refusal among five would otherwise
+        throw away the ability to undo the four that landed.  The entry goes
+        only when nothing of it was applied.
+        """
+        self._undo = [
+            e for e in self._undo if e.group != group or e.applied
+        ]
 
     def _next_write(self, task_id: str) -> "Pending | None":
         """Hand a drain its next write, or release it.  UI thread only.
@@ -824,6 +931,10 @@ class TaskApp(App[None]):
         queue = self._pending.get(key)
         if queue and queue[0] is pending:
             queue.popleft()
+        for entry in self._undo:
+            if entry.group == pending.group:
+                entry.applied += 1
+                break
         if pending.creates:
             return self._adopt_created(key, result)
         if pending.removes:
@@ -871,11 +982,12 @@ class TaskApp(App[None]):
         queue = self._pending.pop(key, None)
         self._draining.discard(key)
         abandoned = max(len(queue) - 1, 0) if queue else 0
+        self.forget(pending.group)
         if pending.creates:
             # The task never came into being, so its row goes with it.
             self._base = [t for t in self._base if t.id != key]
         also = f" · {abandoned} more dropped" if abandoned else ""
-        self._error = f"{pending.label} failed: {message}{also}"
+        self._notice = (f"{pending.label} failed: {message}{also}", True)
         self.repaint()
 
     # -- rendering ---------------------------------------------------------
@@ -897,8 +1009,8 @@ class TaskApp(App[None]):
         known = {t.id for t in listing.tasks}
         self._base = listing.tasks + [t for t in unborn if t.id not in known]
         self.filed_out = listing.filed_out
-        # A fresh view supersedes whatever failed against the old one.
-        self._error = None
+        # A fresh view supersedes whatever was said about the old one.
+        self._notice = None
         self.reference = listing.reference
         self.repaint()
 
@@ -1085,10 +1197,10 @@ class TaskApp(App[None]):
         in_flight = sum(len(q) for q in self._pending.values())
         if in_flight:
             bits.append(f"{in_flight} saving")
-        # A refusal outranks the counts until the person acts again or the
+        # A notice outranks the counts until the person acts again or the
         # view is fetched afresh.
-        if self._error:
-            self.set_status(self._error, True)
+        if self._notice:
+            self.set_status(*self._notice)
         else:
             self.set_status(" · ".join(bits))
 
@@ -1225,6 +1337,16 @@ class TaskApp(App[None]):
         sections = [part for part in ("  ·  ".join(bits), note) if part]
         detail.update("\n".join(sections))
 
+    def notice(self, message: str, error: bool = False) -> None:
+        """Say something that survives the next repaint.
+
+        Repainting rewrites the status from the view's counts, so anything
+        worth reading after the next write confirms has to be held rather
+        than simply shown.
+        """
+        self._notice = (message, error)
+        self.set_status(message, error)
+
     def set_status(self, message: str, error: bool = False) -> None:
         status = self.query_one("#status", Static)
         status.set_class(error, "error")
@@ -1337,6 +1459,10 @@ class TaskApp(App[None]):
                 "useTime": False,
                 "deferred": False,
             },
+            undo_note=(
+                "the date came back, but the record of the day's work "
+                "cannot be withdrawn"
+            ),
         )
 
     def move_task(self, step: int, label: str) -> None:
@@ -1360,12 +1486,15 @@ class TaskApp(App[None]):
             self.set_status(f"“{task.title}” cannot move {label} from here", True)
             return
 
+        # One keypress is one undo, so any respacing this needs and the
+        # move it serves share a group and become a single entry.
+        group = str(uuid.uuid4())
         order = self.order_for_move(task, step)
         if order is None:
             # Nothing fits between the destination and the task beyond it.
             # Respace the run into values the day does not use, which is
             # safe to apply in pieces, then place the task in the room made.
-            if not self.respace(task):
+            if not self.respace(task, group):
                 return
             order = self.order_for_move(task, step)
             if order is None:
@@ -1378,9 +1507,10 @@ class TaskApp(App[None]):
             task,
             lambda tid: client.set_schedule_order(tid, order),
             {"scheduleOrder": order},
+            group=group,
         )
 
-    def respace(self, task: Task) -> bool:
+    def respace(self, task: Task, group: str | None = None) -> bool:
         """Spread the task's ordering group out so a move has somewhere to go.
 
         The new values sit past everything the day uses, which is what lets
@@ -1401,6 +1531,8 @@ class TaskApp(App[None]):
                 (lambda tid, value=fresh[item.id]:
                  client.set_schedule_order(tid, value)),
                 {"scheduleOrder": fresh[item.id]},
+                group=group,
+                subject=task.title,
             )
         return True
 
@@ -1409,6 +1541,55 @@ class TaskApp(App[None]):
 
     def action_move_down(self) -> None:
         self.move_task(1, "down")
+
+    def action_undo(self) -> None:
+        """Reverse the most recent write, then the one before it.
+
+        Needs no task selected and no particular view: it acts on what the
+        board wrote, wherever that task is now, and names what it reversed
+        -- a person pressing this key does not necessarily know what
+        happened, and being told is most of what they came for.
+        """
+        if not self._undo:
+            self.set_status("Nothing left to undo")
+            return
+        entry = self._undo.pop()
+        if not entry.reversible:
+            self.set_status(entry.reason, True)
+            return
+        if self.client is None:
+            return
+        client = self.client
+        # The shown view's copy where there is one, the remembered copy
+        # otherwise: an undo reaches the task it wrote even after the person
+        # has navigated somewhere that does not hold it.
+        known = {t.id: t for t in self._base}
+        restored = 0
+        for task_id, fields in entry.previous.items():
+            task = known.get(task_id) or entry.tasks.get(task_id)
+            if task is None:
+                continue
+            self.submit_write(
+                f"Undoing {entry.label.lower()}",
+                task,
+                (lambda tid, values=dict(fields): client.restore(tid, values)),
+                dict(fields),
+                # An undo is not itself something to undo: pressing the key
+                # again reaches further back rather than turning round.
+                record=False,
+            )
+            restored += 1
+        if not restored:
+            self.set_status(
+                f"“{entry.subject}” no longer exists · nothing to undo there", True
+            )
+            return
+        note = f" · {entry.note}" if entry.note else ""
+        gone = ""
+        # A notice rather than a plain status: the writes this just queued
+        # will repaint as they confirm, and the counts would otherwise
+        # replace the one thing the person pressed the key to find out.
+        self.notice(f"Undid: {entry.label.lower()} “{entry.subject}”{note}{gone}")
 
     def action_toggle_work(self) -> None:
         """Hide the work project's tasks, or bring them back.
@@ -1543,6 +1724,10 @@ class TaskApp(App[None]):
             placeholder,
             lambda tid: client.create_task(title, **fields),
             creates=True,
+            undo_reason=(
+                "adding cannot be undone · delete the task with backspace "
+                "if you meant to"
+            ),
         )
 
     @work
@@ -1582,6 +1767,14 @@ class TaskApp(App[None]):
             task,
             lambda tid: client.set_project(tid, chosen),
             {"projectId": chosen},
+            # A task that had no project cannot be returned to having none:
+            # the API refuses every value that would.  Moving between
+            # projects is ordinary, because a project to go back to exists.
+            undo_reason=(
+                "filing a task that had no project cannot be undone · "
+                "the API cannot return it to having none"
+                if task.project_id is None else None
+            ),
         )
 
     @work
@@ -1618,6 +1811,7 @@ class TaskApp(App[None]):
             task,
             lambda tid: client.delete_task(tid),
             removes=True,
+            undo_reason="a deletion cannot be undone · the task is gone for good",
         )
 
     def action_focus_task(self) -> None:

@@ -668,6 +668,24 @@ class SingularityClient:
         """
         return self.post(f"/task/{task_id}/move", {"projectId": project_id})
 
+    def restore(self, task_id: str, fields: dict[str, Any]) -> Any:
+        """Put a task's fields back to given values.
+
+        An ordinary update carries all of them but one: a project has to go
+        through `/move`, because a task filed into one also holds a group
+        belonging to it and a plain `projectId` update is refused.  That is
+        the only field with a route of its own, and knowing it here is what
+        keeps undo from needing an inverse per action.
+        """
+        fields = dict(fields)
+        project = fields.pop("projectId", None)
+        result: Any = None
+        if fields:
+            result = self.update_task(task_id, **fields)
+        if project is not None:
+            result = self.set_project(task_id, project)
+        return result
+
     def set_schedule_order(self, task_id: str, order: int) -> Task:
         """Put a task at a given place in a hand-set sequence.
 
