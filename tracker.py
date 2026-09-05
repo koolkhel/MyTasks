@@ -10,7 +10,7 @@ this same tracker; its roster validation and per-member grouping are not
 carried over, because that reports on a team and this reports on one person.
 
 Everything identifying -- where the tracker is, who to ask about, which
-projects, which state -- comes from the environment.  None of it is written
+projects, which states -- comes from the environment.  None of it is written
 here.
 """
 
@@ -50,15 +50,23 @@ class Config:
     token: str
     assignee: str
     projects: tuple[str, ...]
-    state: str
+    #: The states whose issues are shown, in the order they should appear.
+    #: Their order is the block's order, so whoever configures them has
+    #: already said which matters most by writing it first.
+    states: tuple[str, ...]
 
     @property
     def query(self) -> str:
         """The single query that selects the issues to show."""
-        parts = [f"Assignee: {self.assignee}", f"State: {{{self.state}}}"]
+        wanted = ", ".join(f"{{{state}}}" for state in self.states)
+        parts = [f"Assignee: {self.assignee}", f"State: {wanted}"]
         if self.projects:
             parts.append(f"project: {', '.join(self.projects)}")
         return " ".join(parts)
+
+    def rank(self, state: str) -> int:
+        """Where a state sits in the configured order, for sorting."""
+        return self.states.index(state) if state in self.states else len(self.states)
 
 
 @dataclass(frozen=True)
@@ -86,7 +94,7 @@ def load_config(env_path: str | os.PathLike[str] | None = None) -> Config | None
 
     An absent address, token or assignee means no tracker is configured,
     which is an ordinary board rather than a broken one -- so this answers
-    None rather than raising.  The projects and the state have defaults
+    None rather than raising.  The projects and the states have defaults
     because they only narrow what is asked for.
     """
     load_dotenv(env_path, override=False)
@@ -98,8 +106,10 @@ def load_config(env_path: str | os.PathLike[str] | None = None) -> Config | None
     projects = tuple(
         p.strip() for p in os.getenv("YOUTRACK_PROJECTS", "").split(",") if p.strip()
     )
-    state = os.getenv("YOUTRACK_STATE", "").strip() or "In progress"
-    return Config(base_url, token, assignee, projects, state)
+    states = tuple(
+        s.strip() for s in os.getenv("YOUTRACK_STATES", "").split(",") if s.strip()
+    ) or ("In progress",)
+    return Config(base_url, token, assignee, projects, states)
 
 
 def _host(base_url: str) -> str:
@@ -121,8 +131,9 @@ def parse(payload: Any, config: Config) -> list[Issue]:
 
     The selection is re-checked here rather than trusted to the query, so a
     change to how the query is built can never quietly widen what the board
-    shows.  Ordered by key, which is stable: the block is not sorted with the
-    day and should not shuffle between fetches.
+    shows.  Ordered by the configured position of an issue's state and then by
+    key: the block is not sorted with the day, so it should neither shuffle
+    between fetches nor mix the states together.
     """
     if not isinstance(payload, list):
         raise TrackerUnreachable("the tracker returned an unexpected response")
@@ -135,7 +146,7 @@ def parse(payload: Any, config: Config) -> list[Issue]:
         project = (raw.get("project") or {}).get("shortName") or ""
         if assignee != config.assignee:
             continue
-        if state != config.state:
+        if state not in config.states:
             continue
         if allowed and project not in allowed:
             continue
@@ -149,7 +160,7 @@ def parse(payload: Any, config: Config) -> list[Issue]:
                 base_url=config.base_url,
             )
         )
-    return sorted(issues, key=lambda i: i.key)
+    return sorted(issues, key=lambda i: (config.rank(i.state), i.key))
 
 
 def fetch(config: Config, session=None) -> list[Issue]:

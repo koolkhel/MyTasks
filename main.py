@@ -55,11 +55,25 @@ MARKS = {EMPTY: "☐", CHECKED: "☑", CANCELLED: "☒"}
 TRACKER_MARK = "_tracker"
 TRACKER_URL = "_tracker_url"
 TRACKER_PROJECT = "_tracker_project"
+TRACKER_STATE = "_tracker_state"
 #: Prefixes a tracker row's id so it can never collide with a task's.
 TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
 #: that read-only is visible rather than discovered by pressing a key.
 TRACKER_ROW_MARK = "▸"
+#: How wide the column carrying a tracker row's state is.
+_STATE_WIDTH = 8
+
+
+def _state_label(state: str) -> str:
+    """A tracker state, narrowed to fit the column that shows it.
+
+    The leading "In " is dropped because the column only ever holds a state,
+    which makes "In progress" fit exactly where it otherwise would not.
+    Anything still too wide is cut rather than allowed to overflow.
+    """
+    label = state[3:] if state.startswith("In ") else state
+    return label[:_STATE_WIDTH]
 
 # Every printable key, paired with what the same physical key types on a
 # Russian keyboard.  A binding lists both, so the key a person presses is the
@@ -487,13 +501,14 @@ class Help(ModalScreen[None]):
                      or a tracker issue's page
   backspace          delete for good (asks first)
 
-[b]Issues in progress[/b]
-  Today also lists the issues assigned to you and
-  in progress in the tracker, below your own tasks.
-  They are read-only here: open one with o, work on
-  it in the tracker. They count as work, so w hides
-  them. Without a VPN the board says so and carries
-  on without them.
+[b]Issues from the tracker[/b]
+  Today lists the issues assigned to you in the
+  states you configure — in progress, in review —
+  above your own tasks, each showing which state
+  it is in. They are read-only here: open one with
+  o, work on it in the tracker. They count as work,
+  so w hides them. Without a VPN the board says so
+  and carries on without them.
 
 [b]Other[/b]
   ?                  this help
@@ -1249,6 +1264,7 @@ class TaskApp(App[None]):
                 TRACKER_MARK: True,
                 TRACKER_URL: issue.url,
                 TRACKER_PROJECT: issue.project,
+                TRACKER_STATE: issue.state,
             }))
         return rows
 
@@ -1305,10 +1321,12 @@ class TaskApp(App[None]):
         tasks = singularity.sort_for_display(
             shown, self.tz, self.reference, manual=self.orders_manually
         )
-        # The tracker's rows join after the ordering, never during it: an
+        # The tracker's rows join outside the ordering, never during it: an
         # issue has no date, so the day's own membership rule would reject
-        # it anyway, and appending is the same fact as "not part of the
-        # day's order" seen from the other side.
+        # it anyway, and joining afterwards is the same fact as "not part of
+        # the day's order" seen from the other side.  They go in front,
+        # because they are what is being worked on now and the foot of the
+        # list -- past the finished tasks -- is where a person stops looking.
         issues = self.tracker_rows()
         self.shown_issues = len(issues)
         # The filter is applied to both, because appending afterwards would
@@ -1322,7 +1340,7 @@ class TaskApp(App[None]):
             tasks = [t for t in tasks if not self.is_work(t)]
             issues = [t for t in issues if not self.is_work(t)]
             self.shown_issues = len(issues)
-        tasks = tasks + issues
+        tasks = issues + tasks
         self.tasks = tasks
         self.past_due = (
             sum(1 for t in tasks if t.past_due_since(self.reference, self.tz))
@@ -1352,7 +1370,9 @@ class TaskApp(App[None]):
         # beside it, never folded into it.
         bits = [f"{len(own)} task(s)", f"{done} done"]
         if self.shown_issues:
-            bits.append(f"{self.shown_issues} in progress")
+            # Not named for any one state: more than one may be shown, and
+            # which state each issue is in is on its own row.
+            bits.append(f"{self.shown_issues} tracked")
         if self.past_due:
             bits.insert(1, f"{self.past_due} past due")
         if self.hidden_work:
@@ -1399,7 +1419,7 @@ class TaskApp(App[None]):
             # issue to a person.
             return (
                 TRACKER_ROW_MARK,
-                "tracker",
+                _state_label(task.raw.get(TRACKER_STATE) or ""),
                 escape(task.raw.get("title") or ""),
                 f"[dim]{escape(task.raw.get(TRACKER_PROJECT) or '')}[/dim]",
             )
