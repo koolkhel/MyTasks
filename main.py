@@ -31,8 +31,10 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    OptionList,
     Static,
 )
+from textual.widgets.option_list import Option
 
 import singularity
 from singularity import (
@@ -338,6 +340,52 @@ class DatePicker(ModalScreen[str]):
         self.dismiss(None)
 
 
+class ProjectPicker(ModalScreen[str]):
+    """Pick a project for a task, or leave it where it is.
+
+    Every project is listed rather than a keyed handful: the board cannot
+    know how many there are, and a list that quietly stopped at nine would
+    hide the rest.  Movement is the list's own -- arrows or the keys it
+    binds -- so no key has to be found for each project.
+    """
+
+    BINDINGS = [Binding(keys("escape,q"), "cancel", "Cancel")]
+
+    def __init__(self, title: str, projects: dict[str, str], current: str | None):
+        super().__init__()
+        self.title_text = title
+        self.projects = projects
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self.title_text, id="dialog-title")
+            here = self.projects.get(self.current) if self.current else None
+            yield Label(
+                f"now in: {here}" if here else "now in: no project",
+                id="dialog-where",
+            )
+            options = [
+                # The task's own project is marked rather than left out, so
+                # the list always reads the same way and choosing it again
+                # is harmless.
+                Option(f"{'* ' if pid == self.current else '  '}{title}", id=pid)
+                for pid, title in sorted(self.projects.items(), key=lambda kv: kv[1])
+            ]
+            yield OptionList(*options, id="project-list")
+            yield Label("enter to choose · esc to cancel", id="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one(OptionList).focus()
+
+    @on(OptionList.OptionSelected)
+    def chose(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class TaskFocus(ModalScreen[None]):
     """The selected task, shown in full and shown only.
 
@@ -401,6 +449,8 @@ class Help(ModalScreen[None]):
   i                  inbox — tasks with no date
   s                  someday — tasks put off
   r                  reload from the server
+  w                  hide the work project's tasks,
+                     and press again to bring them back
 
 [b]Looking at a task[/b]
   enter              show the selected task in full
@@ -412,6 +462,9 @@ class Help(ModalScreen[None]):
                      leaving it unfinished
   d                  set the date: today, tomorrow, a
                      given day, someday, or cleared
+  p                  put the task in a project — filing one
+                     that has none asks first, because it
+                     cannot be un-filed from here
   x                  cancel the task
   a                  add a task to the shown view
   e                  rename the selected task
@@ -523,6 +576,8 @@ class TaskApp(App[None]):
     }
     #dialog-title { text-style: bold; }
     #dialog-hint { color: $text-muted; }
+    #dialog-where { color: $text-muted; padding: 0 0 1 0; }
+    #project-list { height: auto; max-height: 12; background: $surface; }
     #help-body { padding: 1 0; }
     #picker-body { padding: 1 0; }
     #focus-title { text-style: bold; padding: 1 0 0 0; }
@@ -547,6 +602,7 @@ class TaskApp(App[None]):
         Binding(keys("i"), "inbox", "Inbox"),
         Binding(keys("s"), "someday", "Someday"),
         Binding(keys("r"), "refresh", "Reload"),
+        Binding(keys("w"), "toggle_work", "Hide work"),
         Binding("space", "toggle", "Tick"),
         # Its own key, never shared with tick: "." mirrors the app's cmd+.
         Binding(keys("full_stop"), "done_for_today", "Did today"),
@@ -561,6 +617,7 @@ class TaskApp(App[None]):
         Binding(keys("e"), "rename", "Rename"),
         Binding(keys("x"), "cancel_task", "Cancel"),
         Binding(keys("d"), "schedule", "Date"),
+        Binding(keys("p"), "project", "Project"),
         Binding(keys("o"), "open_link", "Link"),
         # Both keys, and deliberately NOT priority: a Mac laptop has no
         # forward-delete, so its Delete key arrives as backspace, while an
@@ -586,6 +643,8 @@ class TaskApp(App[None]):
         # against.  Only today's view gathers any, so elsewhere this is
         # 0 / None and no row is marked.
         self.past_due = 0
+        #: How many rows the work filter removed from the shown view.
+        self.hidden_work = 0
         self.reference: datetime | None = None
         self.projects: dict[str, str] = {}
         # What the last fetch reported, kept apart from the pending writes
@@ -604,6 +663,12 @@ class TaskApp(App[None]):
         # replace it with the view's counts the moment another write
         # confirms, leaving the failure effectively unreported.
         self._error: str | None = None
+        # Whether the work project's tasks are being hidden.  A mode over
+        # the views rather than part of what a view holds, so `belongs` goes
+        # on answering only where a task lives.  It lasts as long as the
+        # board is open and writes nothing.
+        self.hiding_work = False
+        self.work_project: str | None = singularity.load_work_project()
 
     # -- layout ------------------------------------------------------------
 
@@ -931,6 +996,10 @@ class TaskApp(App[None]):
         mine = self.group_of(task)
         return [t for t in self.tasks if self.group_of(t) == mine]
 
+    def is_work(self, task: Task) -> bool:
+        """Whether a task belongs to the project configured as work."""
+        return self.work_project is not None and task.project_id == self.work_project
+
     def belongs(self, task: Task) -> bool:
         """Whether a task belongs in the shown view, by that view's own rule.
 
@@ -971,11 +1040,15 @@ class TaskApp(App[None]):
             return
         previous = table.cursor_row
         keep = self._selected_id
+        shown = [t for t in self.patched() if self.belongs(t)]
+        # The mode removes rows the view already chose; it never changes
+        # which rows the view has.  Counted here, from the same list at the
+        # same moment, so the numbers cannot drift from what is on screen.
+        self.hidden_work = sum(1 for t in shown if self.is_work(t)) if self.hiding_work else 0
+        if self.hiding_work:
+            shown = [t for t in shown if not self.is_work(t)]
         tasks = singularity.sort_for_display(
-            [t for t in self.patched() if self.belongs(t)],
-            self.tz,
-            self.reference,
-            manual=self.orders_manually,
+            shown, self.tz, self.reference, manual=self.orders_manually
         )
         self.tasks = tasks
         self.past_due = (
@@ -1004,6 +1077,11 @@ class TaskApp(App[None]):
         bits = [f"{len(tasks)} task(s)", f"{done} done"]
         if self.past_due:
             bits.insert(1, f"{self.past_due} past due")
+        if self.hidden_work:
+            # Beside the other counts, never instead of them: the shown
+            # count stays the number of rows, as the inbox already does for
+            # the tasks it withholds.
+            bits.append(f"{self.hidden_work} work hidden")
         in_flight = sum(len(q) for q in self._pending.values())
         if in_flight:
             bits.append(f"{in_flight} saving")
@@ -1095,6 +1173,20 @@ class TaskApp(App[None]):
 
     # -- chrome ------------------------------------------------------------
 
+    def work_note(self) -> list[str]:
+        """What the daybar says about the work filter, if anything.
+
+        Said even when it hides nothing: a view that is quietly shorter is
+        otherwise indistinguishable from a day with less on it, and a mode
+        that hides nothing is indistinguishable from a key that does not
+        work.
+        """
+        if not self.hiding_work:
+            return []
+        if self.hidden_work:
+            return [f"work hidden ({self.hidden_work})"]
+        return ["work hidden"]
+
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
         if isinstance(self.position, Bucket):
@@ -1102,6 +1194,7 @@ class TaskApp(App[None]):
             if self.filed_out:
                 parts.append(f"{len(self.tasks)} shown")
                 parts.append(f"{self.filed_out} filed, hidden")
+            parts += self.work_note()
             bar.update("  ·  ".join(parts))
             return
         today = datetime.now(self.tz).date()
@@ -1109,7 +1202,8 @@ class TaskApp(App[None]):
         relative = {0: "today", 1: "tomorrow", -1: "yesterday"}.get(
             delta, f"{abs(delta)} days {'ahead' if delta > 0 else 'ago'}"
         )
-        bar.update(f"{self.position:%A %d %B %Y}  ·  {relative}")
+        parts = [f"{self.position:%A %d %B %Y}", relative, *self.work_note()]
+        bar.update("  ·  ".join(parts))
 
     def update_detail(self) -> None:
         task = self.selected
@@ -1316,6 +1410,29 @@ class TaskApp(App[None]):
     def action_move_down(self) -> None:
         self.move_task(1, "down")
 
+    def action_toggle_work(self) -> None:
+        """Hide the work project's tasks, or bring them back.
+
+        Writes nothing: the mode only decides which of the rows a view
+        already chose are painted.
+        """
+        if self.work_project is None:
+            self.set_status(
+                "No work project is set · put WORK_PROJECT in .env to hide one",
+                True,
+            )
+            return
+        if self.projects and self.work_project not in self.projects:
+            # A setting left behind by a renamed or deleted project would
+            # otherwise hide nothing and look exactly like a quiet day.
+            self.set_status(
+                f"The configured work project {self.work_project} was not found",
+                True,
+            )
+            return
+        self.hiding_work = not self.hiding_work
+        self.repaint()
+
     def action_cancel_task(self) -> None:
         task = self.selected
         if task is None or self.client is None:
@@ -1426,6 +1543,45 @@ class TaskApp(App[None]):
             placeholder,
             lambda tid: client.create_task(title, **fields),
             creates=True,
+        )
+
+    @work
+    async def action_project(self) -> None:
+        """Put the selected task in a project.
+
+        Filing a task that has none is confirmed first: the API takes only a
+        project id and refuses both an empty value and none, so nothing the
+        board can send un-files a task.  That makes a first filing the second
+        irreversible action after deleting, and it is asked the same way.
+        Moving a task that is already filed gives up nothing it still has, so
+        it is not asked.
+        """
+        task = self.selected
+        if task is None or self.client is None:
+            return
+        if not self.projects:
+            self.set_status("No projects to file into", True)
+            return
+        chosen = await self.push_screen_wait(
+            ProjectPicker(f"Project for “{task.title}”", self.projects, task.project_id)
+        )
+        if chosen is None or chosen == task.project_id:
+            return
+        if task.project_id is None:
+            ok = await self.push_screen_wait(
+                Confirm(
+                    f"File “{task.title}” under {self.projects[chosen]}? "
+                    "It cannot be un-filed here."
+                )
+            )
+            if not ok:
+                return
+        client = self.client
+        self.submit_write(
+            f"Filing under {self.projects[chosen]}",
+            task,
+            lambda tid: client.set_project(tid, chosen),
+            {"projectId": chosen},
         )
 
     @work

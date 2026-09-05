@@ -389,6 +389,21 @@ def load_token(env_path: str | os.PathLike[str] | None = None) -> str:
     return token
 
 
+def load_work_project(env_path: str | os.PathLike[str] | None = None) -> str | None:
+    """The project id that counts as work, or None if none is configured.
+
+    Read from the environment beside the token rather than written into the
+    source: a project id names something personal, and `.env` is the one
+    place such a thing lives and is already outside version control.
+
+    Absent and blank both mean "not configured", which is a state the board
+    reports rather than an error -- the board is perfectly usable without a
+    work project, it just cannot hide one.
+    """
+    load_dotenv(env_path, override=False)
+    return os.getenv("WORK_PROJECT", "").strip() or None
+
+
 class SingularityClient:
     """Thin wrapper over the REST API.
 
@@ -633,6 +648,25 @@ class SingularityClient:
     def update_task(self, task_id: str, **fields: Any) -> Task:
         payload = self.patch(f"/task/{task_id}", fields)
         return Task(payload.get("task", payload))
+
+    def set_project(self, task_id: str, project_id: str) -> Any:
+        """Put a task in a project.
+
+        One way only, and not by choice: the field must match `^(?:P)-`, and
+        both an empty value and a null are refused, so nothing that can be
+        sent returns a task to having no project.  A task can be moved to a
+        different project; it cannot be un-filed.
+
+        This goes through `/move` rather than an ordinary update because
+        filing a task also puts it in one of that project's groups, and a
+        plain `projectId` update then fails with GROUP_PROJECT_MISMATCH for
+        any task that already has one -- its group still belongs to the old
+        project.  `/move` reassigns the group along with the project, so it
+        is the only call that handles both filing and moving.  It is
+        idempotent, and it leaves the title, dates, completion and stored
+        order alone.
+        """
+        return self.post(f"/task/{task_id}/move", {"projectId": project_id})
 
     def set_schedule_order(self, task_id: str, order: int) -> Task:
         """Put a task at a given place in a hand-set sequence.
