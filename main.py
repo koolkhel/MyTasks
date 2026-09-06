@@ -61,19 +61,26 @@ TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
 #: that read-only is visible rather than discovered by pressing a key.
 TRACKER_ROW_MARK = "▸"
-#: How wide the column carrying a tracker row's state is.
-_STATE_WIDTH = 8
+#: How wide the when-column is.  It carries a tracker row's state and a
+#: task's own start time or how overdue it is, so it has to hold the widest
+#: of both; eleven cells is what the longest state label needs, and the
+#: longest a task puts there is shorter.  Named once so the width the label
+#: is trimmed to and the width the column is drawn at cannot drift apart.
+_WHEN_WIDTH = 11
 
 
 def _state_label(state: str) -> str:
-    """A tracker state, narrowed to fit the column that shows it.
+    """A tracker state, as the one word that names it.
 
-    The leading "In " is dropped because the column only ever holds a state,
-    which makes "In progress" fit exactly where it otherwise would not.
+    The tracker phrases its states itself, and the words that lead them are
+    often shared -- "In progress" and "In review" differ only in the last --
+    so the last word is the one worth the column.  Lower case because every
+    other label in the same column is lower case, which would otherwise hold
+    only for as long as the tracker happened to phrase its states that way.
     Anything still too wide is cut rather than allowed to overflow.
     """
-    label = state[3:] if state.startswith("In ") else state
-    return label[:_STATE_WIDTH]
+    words = state.split()
+    return words[-1].lower()[:_WHEN_WIDTH] if words else ""
 
 # Every printable key, paired with what the same physical key types on a
 # Russian keyboard.  A binding lists both, so the key a person presses is the
@@ -789,7 +796,7 @@ class TaskApp(App[None]):
         self.theme = TURBO_DARK.name
         table = self.query_one(DataTable)
         table.add_column("", key="mark", width=2)
-        table.add_column("When", key="when", width=8)
+        table.add_column("When", key="when", width=_WHEN_WIDTH)
         table.add_column("Task", key="title")
         table.add_column("Project", key="project", width=22)
         table.focus()

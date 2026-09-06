@@ -824,11 +824,12 @@ def openable_url(value: str | None) -> str | None:
 
 
 def overdue_label(since: datetime, now: datetime) -> str:
-    """How overdue, in at most 8 cells to fit the when-column.
+    """How overdue, kept short enough for the when-column that shows it.
 
     Whole days elapsed, so something late this morning reads "1d ago" rather
-    than a count of hours.  "999d ago" is exactly 8 cells; anything older
-    saturates instead of widening the column or being clipped mid-number.
+    than a count of hours.  "999d ago" is the longest this returns, at 8
+    cells; anything older saturates instead of being clipped mid-number,
+    which would read as a smaller number rather than as a truncation.
     """
     days = max(1, (now - since).days)
     return "999d+" if days > 999 else f"{days}d ago"
