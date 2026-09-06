@@ -324,6 +324,41 @@ class Task:
         return min(triggers) if triggers else None
 
     @property
+    def note_is_plain(self) -> bool:
+        """Whether this note is text alone, and so safe to rewrite as text.
+
+        False for a note carrying a styled run, a line kind, or anything
+        embedded that is not text.  The board shows a note as text and can
+        only store it as text, so rewriting one of these would mean keeping
+        the words and dropping everything else -- and a person who cannot see
+        what was dropped cannot object to it.  Answered here so that both the
+        refusal and the write ask the same question.
+        """
+        note = self.raw.get("note")
+        if not note or not isinstance(note, str):
+            return True
+        stripped = note.strip()
+        if not stripped.startswith("["):
+            # An older plain string, which is text by definition.
+            return True
+        import json
+
+        try:
+            ops = json.loads(stripped)
+        except json.JSONDecodeError:
+            return True
+        if not isinstance(ops, list):
+            return True
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            if not isinstance(op.get("insert"), str):
+                return False          # an embed: an image, a formula
+            if op.get("attributes"):
+                return False          # a styled run, or a line kind
+        return True
+
+    @property
     def note_text(self) -> str:
         """The note as plain text.
 
@@ -879,6 +914,29 @@ _ANCHOR = re.compile(r"<a\s[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I 
 _BARE_URL = re.compile(r"https?://[^\s<>\"')\]]+")
 #: Something with no scheme that still looks like a host, e.g. `academia.edu`.
 _BARE_HOST = re.compile(r"^[\w-]+(?:\.[\w-]+)+(?:/\S*)?$")
+
+
+def note_document(text: str | None) -> str:
+    """Text as a note the store will accept.
+
+    The mirror of `Task.note_text`.  A note is a string holding a delta: a
+    document described as the inserts that build it from nothing, not a
+    difference against anything.  One insert is enough for text, which is
+    the only thing the board writes.
+
+    The trailing newline is not decoration.  A delta document always ends
+    with one, and every note on the account this was written against does;
+    an encoder that omits it produces a document the editor at the other end
+    treats as malformed.  So clearing a note means writing the newline
+    alone -- which `note_text` already reads back as nothing, because it
+    strips.
+    """
+    import json
+
+    text = text or ""
+    if not text.endswith("\n"):
+        text += "\n"
+    return json.dumps([{"insert": text}], ensure_ascii=False)
 
 
 def url_in(text: str | None) -> str | None:

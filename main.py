@@ -39,6 +39,7 @@ from textual.widgets import (
     Label,
     OptionList,
     Static,
+    TextArea,
 )
 from textual.widgets.option_list import Option
 
@@ -217,9 +218,20 @@ def keys(spec: str) -> str:
     written in, and so the key bar -- which shows the first key of a binding
     -- goes on naming the English one.  A key with no twin, such as `escape`
     or an arrow, is left exactly as it was.
+
+    A modifier keeps its key company: `"ctrl+s"` becomes `"ctrl+s,ctrl+ы"`.
+    Whether a terminal sends the Latin letter or the Cyrillic one for a
+    combination depends on the terminal, so the board binds both rather than
+    depending on which -- the same answer it gives for a plain letter, and
+    one that costs nothing to be wrong about.
     """
+    def twin(key: str) -> str | None:
+        head, _, tail = key.rpartition("+")
+        base = KEY_TWINS.get(tail)
+        return None if base is None else (f"{head}+{base}" if head else base)
+
     parts = [k.strip() for k in spec.split(",")]
-    twins = [KEY_TWINS[k] for k in parts if k in KEY_TWINS]
+    twins = [t for t in (twin(k) for k in parts) if t]
     return ",".join(parts + twins)
 
 # The Turbo C++ editor theme, in the two moods it ships: near-black and the
@@ -391,6 +403,65 @@ class TaskInput(ModalScreen[str]):
             self.dismiss(text)
         else:
             self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class NoteArea(TextArea):
+    """The board's own text area, for editing a task's note.
+
+    Nothing is added to it yet, and that is the point: keys that act on the
+    text -- a template inserted, a date stamped, a line transformed, a marker
+    toggled -- belong on a class of the board's rather than on the framework's
+    own.  Having the class now costs a name and means adding such a key later
+    is a binding rather than a rebuild.
+
+    What it inherits is already an editor: several lines, soft wrapping, undo
+    and redo, cut, copy, paste and line deletion.
+    """
+
+
+class NoteInput(ModalScreen[str]):
+    """Where a task's note is written.
+
+    Dismisses with the text on saving and with nothing on leaving, so the
+    caller cannot mistake "saved an empty note" -- which clears it -- for
+    "changed nothing".
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        # Enter belongs to the text, so saving needs a key of its own.
+        # `f2` stands beside the usual combination because it is the same
+        # key on every keyboard layout, where a combination's letter may
+        # not be.
+        Binding(keys("ctrl+s") + ",f2", "save", "Save"),
+    ]
+
+    def __init__(self, title: str, value: str = ""):
+        super().__init__()
+        self.title_text = title
+        self.value = value
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self.title_text, id="dialog-title")
+            yield NoteArea(self.value, soft_wrap=True, id="dialog-note")
+            yield Label(
+                "ctrl+s or f2 to save · esc to discard · empty clears the note",
+                id="dialog-hint",
+            )
+
+    def on_mount(self) -> None:
+        area = self.query_one(NoteArea)
+        area.focus()
+        # At the end rather than the start: a note is opened far more often
+        # to add a line than to correct the first word.
+        area.move_cursor(area.document.end)
+
+    def action_save(self) -> None:
+        self.dismiss(self.query_one(NoteArea).text)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -597,6 +668,9 @@ class Help(ModalScreen[None]):
   x                  cancel the task
   a                  add a task to the shown view
   e                  rename the selected task
+  n                  write the selected task's note —
+                     ctrl+s or f2 saves, esc discards,
+                     an empty note clears it
   o                  open the task's link in a browser,
                      a tracker issue's page, or the
                      address a calendar event carries
@@ -773,6 +847,11 @@ class TaskApp(App[None]):
        question reads worse stretched.  `max-width` above still clamps this
        on a narrow terminal, so no second rule is needed to make it safe. */
     TaskInput #dialog { width: 90; }
+    /* The note editor takes the same width as the title prompt, for the same
+       reason, and a height that shows several lines without swallowing the
+       list behind it. */
+    NoteInput #dialog { width: 90; }
+    #dialog-note { height: 12; border: none; background: $surface; }
     #dialog-title { text-style: bold; }
     #dialog-hint { color: $text-muted; }
     #dialog-where { color: $text-muted; padding: 0 0 1 0; }
@@ -815,6 +894,7 @@ class TaskApp(App[None]):
         Binding("enter", "focus_task", "Focus"),
         Binding(keys("a"), "add", "Add"),
         Binding(keys("e"), "rename", "Rename"),
+        Binding(keys("n"), "note", "Note"),
         Binding(keys("x"), "cancel_task", "Cancel"),
         Binding(keys("d"), "schedule", "Date"),
         Binding(keys("p"), "project", "Project"),
@@ -2039,12 +2119,13 @@ class TaskApp(App[None]):
             bits.append(f"deadline: {deadline.astimezone(self.tz):%d %b %H:%M}")
         # A task can now have no flags at all, so drop the empty halves
         # rather than joining them into a stray blank line.
-        note = task.note_text
-        if self.is_event(task):
-            # This area renders its text as markup, and a description is
-            # written by whoever made the meeting -- somebody else, on a
-            # work calendar.  Its characters are shown, not obeyed.
-            note = escape(note)
+        # This area renders its text as markup, so everything drawn in it is
+        # escaped: a calendar description because somebody else wrote it, and
+        # a task's own note because a person who has just typed square
+        # brackets and watched them vanish has been told the board destroyed
+        # their work -- while the store holds it perfectly, which leaves them
+        # nothing to find when they go looking.
+        note = escape(task.note_text)
         sections = [part for part in ("  ·  ".join(bits), note) if part]
         detail.update("\n".join(sections))
 
@@ -2616,6 +2697,55 @@ class TaskApp(App[None]):
             task,
             lambda tid: client.update_task(tid, title=title),
             {"title": title},
+        )
+
+
+    @work
+    async def action_note(self) -> None:
+        """Write the selected task's note.
+
+        Gathers before it writes, so it asks the shared guard first: a row
+        the board does not own must refuse at once rather than open an
+        editor over a note it could never save.
+        """
+        task = self.selected
+        if task is None or self.client is None:
+            return
+        if self.refuse_foreign(task):
+            return
+        if not task.note_is_plain:
+            # Saving would keep the words and drop everything else.  Said
+            # rather than done, because what would be lost is exactly what
+            # cannot be seen here.
+            self.notice(
+                f"“{task.title}” has a formatted note · "
+                "it cannot be edited here without losing the formatting",
+                True,
+            )
+            return
+        before = task.note_text
+        written = await self.push_screen_wait(
+            NoteInput(f"Note for “{task.title}”", before)
+        )
+        if written is None:
+            return
+        if written.strip() == before.strip():
+            # A write that changes nothing still spends a request and still
+            # occupies a place in the undo history.
+            self.set_status("The note is unchanged")
+            return
+        # A task the API answered without the field carries no note, which is
+        # an empty document rather than nothing.  Settled before the write is
+        # recorded: an undo sends the previous value back, and the API refuses
+        # a null where it wants a string.
+        task.raw.setdefault("note", singularity.note_document(""))
+        document = singularity.note_document(written.strip())
+        client = self.client
+        self.submit_write(
+            "Clearing the note" if not written.strip() else "Writing the note",
+            task,
+            (lambda tid, value=document: client.update_task(tid, note=value)),
+            {"note": document},
         )
 
     @work
