@@ -79,6 +79,10 @@ EVENT_CALENDAR = "_event_calendar"
 #: whole day.  Kept as a number because placing the row is a comparison and
 #: nothing else needs the instant.
 EVENT_MINUTES = "_event_minutes"
+#: The address an event carries, resolved once when the row is built.  Its
+#: own key beside the tracker's, so the action that opens a link reads it the
+#: same way and the parsing stays off the keystroke.
+EVENT_URL = "_event_url"
 #: Prefixes an event's row id.  Built from the account, the time and the
 #: title rather than the framework's identifier, which repeats across every
 #: occurrence of a repeating event and would make them one row.
@@ -594,7 +598,8 @@ class Help(ModalScreen[None]):
   a                  add a task to the shown view
   e                  rename the selected task
   o                  open the task's link in a browser,
-                     or a tracker issue's page
+                     a tracker issue's page, or the
+                     address a calendar event carries
   backspace          delete for good (asks first)
 
 [b]Issues from the tracker[/b]
@@ -614,6 +619,10 @@ class Help(ModalScreen[None]):
   changing one would need the change to travel back, so
   every key that writes refuses and says so. Work-account
   events count as work, so w hides them too.
+  o opens the address a meeting carries — taken from
+  where the calendar put it, its location or its
+  description — and the description is shown below the
+  list while the event is selected.
 
 [b]Other[/b]
   ?                  this help
@@ -1117,6 +1126,14 @@ class TaskApp(App[None]):
         rows = []
         for event in self.events:
             minutes = None if event.all_day else event.start.hour * 60 + event.start.minute
+            # The location first, the description second: a calendar system
+            # may fill either, and where both were filled they named the
+            # same address -- but the location is usually the bare address
+            # where the description is prose with one somewhere inside.
+            address = (
+                singularity.url_in(event.location)
+                or singularity.url_in(event.notes)
+            )
             rows.append(Task({
                 "id": f"{EVENT_PREFIX}{event.account}:{event.label}:{event.title}",
                 "title": event.title,
@@ -1127,7 +1144,11 @@ class TaskApp(App[None]):
                 "projectId": (
                     self.work_project if config.is_work(event.account) else None
                 ),
+                # Where a task keeps its note, so the detail area draws an
+                # event's description with no knowledge of events at all.
+                "note": event.notes,
                 EVENT_MARK: True,
+                EVENT_URL: address,
                 EVENT_ACCOUNT: event.account,
                 EVENT_CALENDAR: event.calendar,
                 EVENT_MINUTES: minutes,
@@ -1194,6 +1215,36 @@ class TaskApp(App[None]):
 
     # -- writes ------------------------------------------------------------
 
+    def refuse_foreign(self, task: Task | None) -> bool:
+        """Say a row is not the board's to change, and report having said so.
+
+        Every write passes through this on its way to the funnel, so it
+        covers every action the board offers and every one added later.  It
+        is also called by the actions that gather something first -- a date,
+        a name, a confirmation -- because asking for input and refusing
+        afterwards offers a choice that was never on the table.  Both callers
+        share it so the two refusals cannot come to be worded differently.
+        """
+        if self.is_event(task):
+            # The board can read the calendar and nothing more, so a change
+            # it showed would be a change that never happened anywhere.
+            self.notice(
+                f"{task.raw.get(EVENT_ACCOUNT) or 'The event'} "
+                f"lives in the calendar · not editable here",
+                True,
+            )
+            return True
+        if self.is_tracker(task):
+            # Likewise: showing a change the tracker never made would be
+            # worse than refusing.
+            self.notice(
+                f"{task.raw.get(TRACKER_PROJECT) or 'The issue'} "
+                f"lives in the tracker · not editable here",
+                True,
+            )
+            return True
+        return False
+
     def submit_write(
         self,
         label: str,
@@ -1216,26 +1267,7 @@ class TaskApp(App[None]):
         Textual's own binding dispatcher, and shadowing it silently breaks
         every key in the app.
         """
-        if self.is_event(task):
-            # The same one place, for the same reason: the board can read
-            # the calendar and nothing more, so a change it showed would be
-            # a change that never happened anywhere.
-            self.notice(
-                f"{task.raw.get(EVENT_ACCOUNT) or 'The event'} "
-                f"lives in the calendar · not editable here",
-                True,
-            )
-            return
-        if self.is_tracker(task):
-            # The one place every write passes through, so this covers every
-            # action the board offers and every one added later.  The board
-            # does not own these rows: showing a change the tracker never
-            # made would be worse than refusing.
-            self.notice(
-                f"{task.raw.get(TRACKER_PROJECT) or 'The issue'} "
-                f"lives in the tracker · not editable here",
-                True,
-            )
+        if self.refuse_foreign(task):
             return
         patch = patch or {}
         # Acting again supersedes whatever was last said, so it stops
@@ -2008,6 +2040,11 @@ class TaskApp(App[None]):
         # A task can now have no flags at all, so drop the empty halves
         # rather than joining them into a stray blank line.
         note = task.note_text
+        if self.is_event(task):
+            # This area renders its text as markup, and a description is
+            # written by whoever made the meeting -- somebody else, on a
+            # work calendar.  Its characters are shown, not obeyed.
+            note = escape(note)
         sections = [part for part in ("  ·  ".join(bits), note) if part]
         detail.update("\n".join(sections))
 
@@ -2327,6 +2364,8 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
+        if self.refuse_foreign(task):
+            return
         today = datetime.now(self.tz).date()
         choice = await self.push_screen_wait(
             DatePicker(f"Date for “{task.title}”", today)
@@ -2439,6 +2478,8 @@ class TaskApp(App[None]):
         """
         task = self.selected
         if task is None or self.client is None:
+            return
+        if self.refuse_foreign(task):
             return
         if not self.projects:
             self.set_status("No projects to file into", True)
@@ -2564,6 +2605,8 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
+        if self.refuse_foreign(task):
+            return
         title = await self.push_screen_wait(TaskInput("Rename task", task.title))
         if not title or title == task.title:
             return
@@ -2579,6 +2622,8 @@ class TaskApp(App[None]):
     async def action_delete(self) -> None:
         task = self.selected
         if task is None or self.client is None:
+            return
+        if self.refuse_foreign(task):
             return
         # The API deletes for real -- a deleted task 404s afterwards, it does
         # not land in the basket -- so this always asks first.
@@ -2620,11 +2665,20 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None:
             return
-        # A tracker row carries its own page rather than a link found in a
-        # title, so the same key opens an issue with no separate action.
-        url = task.raw.get(TRACKER_URL) if self.is_tracker(task) else task.link
+        # A tracker row carries its own page, and an event the address found
+        # in it, rather than a link written into a title -- so the same key
+        # opens all three with no separate action for any of them.
+        if self.is_tracker(task):
+            url = task.raw.get(TRACKER_URL)
+        elif self.is_event(task):
+            url = task.raw.get(EVENT_URL)
+        else:
+            url = task.link
         if not url:
-            self.set_status("That task has no link")
+            # Named for what the row is: "that task" would be wrong on two
+            # of the three kinds of row this key now serves.
+            kind = "event" if self.is_event(task) else "task"
+            self.set_status(f"That {kind} has no link")
             return
         self.open_url(url)
         self.set_status(f"Opening {url}")

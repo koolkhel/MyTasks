@@ -280,18 +280,12 @@ class Task:
         """The first openable address in the title, or None.
 
         Anchors are considered before plain addresses, and the first match
-        wins; every address stays visible in the title either way.
+        wins; every address stays visible in the title either way.  The
+        search itself is `url_in`, which the calendar's events use on their
+        own text, so what counts as an address cannot come to differ
+        between a title and an event.
         """
-        title = self.raw.get("title") or ""
-        for href, _text in _ANCHOR.findall(title):
-            url = openable_url(href)
-            if url:
-                return url
-        for found in _BARE_URL.findall(_ANCHOR.sub(" ", title)):
-            url = openable_url(found)
-            if url:
-                return url
-        return None
+        return url_in(self.raw.get("title"))
 
     def past_due_since(
         self, now: datetime, tz: tzinfo | None = None
@@ -885,6 +879,28 @@ _ANCHOR = re.compile(r"<a\s[^>]*?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I 
 _BARE_URL = re.compile(r"https?://[^\s<>\"')\]]+")
 #: Something with no scheme that still looks like a host, e.g. `academia.edu`.
 _BARE_HOST = re.compile(r"^[\w-]+(?:\.[\w-]+)+(?:/\S*)?$")
+
+
+def url_in(text: str | None) -> str | None:
+    """The first address in a piece of text that may be opened, or None.
+
+    Anchors are considered before plain addresses, and the first match
+    wins.  One scanner rather than one per kind of text: a task's title, a
+    calendar event's location and its description are all ordinary text
+    that happens to be searched for something to hand to the system opener,
+    and what may be handed over must be decided the same way for all of
+    them.
+    """
+    text = text or ""
+    for href, _shown in _ANCHOR.findall(text):
+        url = openable_url(href)
+        if url:
+            return url
+    for found in _BARE_URL.findall(_ANCHOR.sub(" ", text)):
+        url = openable_url(found)
+        if url:
+            return url
+    return None
 
 
 def openable_url(value: str | None) -> str | None:

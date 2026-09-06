@@ -92,6 +92,17 @@ class Event:
     start: _dt.datetime
     end: _dt.datetime
     all_day: bool
+    #: Where the event says it happens.  Often the address that joins it
+    #: rather than a place, which is why it is carried rather than drawn.
+    location: str = ""
+    #: What the event says about itself, as written.
+    #:
+    #: Both of these are kept exactly as the calendar holds them and are not
+    #: parsed here.  Which of them holds an address the board is willing to
+    #: open is the board's own rule -- the same one it applies to a task's
+    #: title -- and copying that rule into this module would be a second
+    #: copy of a decision about what may be launched.
+    notes: str = ""
 
     @property
     def label(self) -> str:
@@ -256,6 +267,8 @@ def parse(raw, account_of: dict[str, str]) -> list[Event]:
                 start=_stamp(item.startDate()),
                 end=_stamp(item.endDate()),
                 all_day=bool(item.isAllDay()),
+                location=str(item.location() or ""),
+                notes=str(item.notes() or ""),
             )
         )
     return sorted(events, key=Event.sort_key)
