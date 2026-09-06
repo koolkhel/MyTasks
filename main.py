@@ -64,12 +64,14 @@ TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
 #: that read-only is visible rather than discovered by pressing a key.
 TRACKER_ROW_MARK = "▸"
-#: Drawn in the margin against a task carrying the configured tag.  A double
-#: vertical that joins to the row above and below, so that marked tasks
-#: standing together read as one bar rather than as several marks.  Not a
-#: colour: the board must stay legible to someone who cannot tell its
-#: colours apart, and the tag's own colour is deliberately unused.
-GREEN_RAIL = "║"
+#: Drawn in the margin against a task carrying the configured tag.  A star,
+#: which says "mine" at a glance where the double rule it replaced rewarded
+#: looking twice; it stands alone on its row rather than joining the marks
+#: above and below.  Not a colour: the board must stay legible to someone who
+#: cannot tell its colours apart, and the tag's own colour is deliberately
+#: unused.  Plain ASCII, so it is one cell wide in every locale -- the only
+#: mark on the board with no width caveat at all.
+GREEN_MARK = "*"
 #: How long a write that takes the tag off waits behind the previous tag
 #: write to the same task.  The store answers such a write and then does not
 #: apply it when it arrives soon after another.  Only a removal waits, and
@@ -679,6 +681,13 @@ class TaskApp(App[None]):
         background: $surface;
         border: round $accent;
     }
+    /* The prompt that adds and renames a task sets its own width, and only
+       its width: a title is often longer than the 50 cells the shared box
+       leaves for text, and a person editing what they cannot see is
+       guessing.  The other five dialogues keep the shared rule -- a short
+       question reads worse stretched.  `max-width` above still clamps this
+       on a narrow terminal, so no second rule is needed to make it safe. */
+    TaskInput #dialog { width: 90; }
     #dialog-title { text-style: bold; }
     #dialog-hint { color: $text-muted; }
     #dialog-where { color: $text-muted; padding: 0 0 1 0; }
@@ -826,7 +835,7 @@ class TaskApp(App[None]):
         # so switching needs no binding of its own.
         self.theme = TURBO_DARK.name
         table = self.query_one(DataTable)
-        table.add_column("", key="rail", width=1)
+        table.add_column("", key="mark_green", width=1)
         table.add_column("", key="mark", width=2)
         table.add_column("When", key="when", width=_WHEN_WIDTH)
         table.add_column("Task", key="title")
@@ -852,7 +861,7 @@ class TaskApp(App[None]):
         self.call_from_thread(self.show_tasks, listing)
         if self.green_tag and not self.green_checked:
             # After the day is on screen, for the same reason the tracker is:
-            # nothing about the rail needs this, only the name the board says
+            # nothing about the mark needs this, only the name the board says
             # back, so making the first paint wait on it would buy nothing.
             # Read back rather than trusted -- an id left behind by a deleted
             # tag would otherwise mark nothing and look like a quiet day.
@@ -1476,14 +1485,14 @@ class TaskApp(App[None]):
         return task is not None and task.has_tag(self.green_tag)
 
     def row_for(self, task: Task) -> tuple[str, str, str, str, str]:
-        rail = GREEN_RAIL if self.is_green(task) else ""
+        mark = GREEN_MARK if self.is_green(task) else ""
         if self.is_tracker(task):
             # Its own mark, so read-only is visible rather than found out by
             # pressing a key; and the tracker's project rather than the work
             # project the row belongs to, because that is what names the
             # issue to a person.
             return (
-                rail,
+                mark,
                 TRACKER_ROW_MARK,
                 _state_label(task.raw.get(TRACKER_STATE) or ""),
                 escape(task.raw.get("title") or ""),
@@ -1506,7 +1515,7 @@ class TaskApp(App[None]):
             title = f"[{self.late_colour}]{title}[/]"
         project = self.projects.get(task.project_id or "", "")
         return (
-            rail,
+            mark,
             MARKS[task.checked],
             when,
             title,
@@ -2102,7 +2111,7 @@ class TaskApp(App[None]):
 
             Runs on the queue that serialises this one task's writes, so
             neither the wait nor a re-read holds up anything else: the board
-            has already shown the row without its rail and answers every key
+            has already shown the row without its mark and answers every key
             meanwhile.
 
             A removal waits behind a recent tag write, because the store
