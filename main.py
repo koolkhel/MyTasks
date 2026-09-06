@@ -1248,24 +1248,61 @@ class TaskApp(App[None]):
         started = task.local_start(self.tz)
         return None if started is None else started.hour * 60 + started.minute
 
+    def event_key(self, event: Task) -> tuple:
+        """Where an event stands in the ordering the tasks are placed by.
+
+        An event has no opinion about being finished or overdue, but it still
+        has to be placed against rows that do -- so it stands in the same
+        ordering as what it is: not finished, not tagged, not past due, not
+        pinned, happening at its own hour.  Every band then falls out with no
+        special handling: a past-due task leads because the third entry
+        separates it, a finished task sinks because the first does, and the
+        event lands among the timed rows of the ordinary band.
+
+        The shape is `singularity.sort_key`'s and must stay so.  The
+        alternative -- a key of this function's own invention -- would drift
+        the first time a band was added, as one was when the tag arrived.
+
+        The hand-set order is nothing, which is what the store gives a task
+        created without one, so an event ties with such a task at the same
+        minute and is separated from it by title.  Which of a pair at the
+        same minute leads is arbitrary; being arbitrary in a stated direction
+        is better than being arbitrary by accident.
+        """
+        minutes = event.raw.get(EVENT_MINUTES) or 0
+        return (
+            False,                              # never finished
+            True,                               # never tagged
+            True,                               # never past due
+            0.0,                                # and so never overdue by any amount
+            True,                               # never pinned
+            event.raw.get(EVENT_MINUTES) is None,   # all-day sorts as all-day
+            (minutes // 60, minutes % 60),
+            0,                                  # carries no hand-set order
+            (event.raw.get("title") or "").casefold(),
+        )
+
     def place_events(self, tasks: list[Task], events: list[Task]) -> list[Task]:
-        """Put the events among the day's tasks, by when each happens.
+        """Put the events among the day's tasks, each where its hour belongs.
 
         Insertion, never a re-sort.  The tasks arrive in the order the
-        board's own rules put them in and leave in that same order, whatever
-        the events do -- which is the property the requirement asks for, and
-        one that holds by construction rather than by being tested for.
+        board's own rules put them in and leave in exactly that order,
+        whatever the events do -- no task key is recomputed and no task moves
+        relative to another.  That is the property the requirement asks for,
+        and it holds because of the shape of this function rather than
+        because a test happens to cover it.
 
-        A timed event goes above the first row that happens later than it; a
-        task naming no time counts as later than any event, so the events
-        settle into the run of timed rows rather than past the end of it.
-        Working forwards matters: two events at the same minute then keep
-        their order, because the second finds the first already in place and
-        not later than itself, and so follows it.
+        Which matters here more than most places: the rule this replaced was
+        wrong, and the test written for it passed anyway.  It compared only
+        the clock, and counted a row naming no time as later than any event
+        -- on the assumption that untimed rows sit at the end of a day.  They
+        do not.  A past-due task names no time and leads the day, so every
+        timed event was inserted above it and the whole calendar collected at
+        the top.
 
-        An event lasting the whole day leads the day, above every row that
-        happens at a time, because it describes the day rather than a moment
-        in it.
+        An event lasting the whole day still leads the day, above every row
+        that happens at a time, because it describes the day rather than a
+        moment in it.
         """
         def when(row: Task) -> tuple:
             minutes = row.raw.get(EVENT_MINUTES)
@@ -1278,15 +1315,28 @@ class TaskApp(App[None]):
         for event in sorted(
             (e for e in events if e.raw.get(EVENT_MINUTES) is not None), key=when
         ):
-            minutes = event.raw[EVENT_MINUTES]
+            key = self.event_key(event)
             where = len(placed)
             for i, row in enumerate(placed):
-                at = self.minutes_into_day(row)
-                if at is None or at > minutes:
+                if self.ordering_key(row) > key:
                     where = i
                     break
             placed.insert(where, event)
         return all_day + placed
+
+    def ordering_key(self, row: Task) -> tuple:
+        """The key a row is placed by, whichever kind of row it is.
+
+        An event's is made up; a task's comes from the function that ordered
+        it in the first place, so the comparison cannot read the task
+        differently from the sort that produced the list.
+        """
+        if self.is_event(row):
+            return self.event_key(row)
+        return singularity.sort_key(
+            row, self.tz, self.reference,
+            manual=self.orders_manually, green=self.green_tag,
+        )
 
     @staticmethod
     def is_event(task: Task | None) -> bool:
