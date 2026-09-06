@@ -43,6 +43,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 import singularity
+import ical
 import tracker
 from singularity import (
     CANCELLED,
@@ -67,6 +68,25 @@ TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
 #: that read-only is visible rather than discovered by pressing a key.
 TRACKER_ROW_MARK = "▸"
+#: Raw keys marking a row as the calendar's.  The same arrangement the
+#: tracker's rows use, for the same reason: a row carrying these is drawn,
+#: hidden and counted like any other and refuses every write, and nothing
+#: outside these few places needs to know where it came from.
+EVENT_MARK = "_event"
+EVENT_ACCOUNT = "_event_account"
+EVENT_CALENDAR = "_event_calendar"
+#: How far into the day an event starts, in minutes; absent when it lasts the
+#: whole day.  Kept as a number because placing the row is a comparison and
+#: nothing else needs the instant.
+EVENT_MINUTES = "_event_minutes"
+#: Prefixes an event's row id.  Built from the account, the time and the
+#: title rather than the framework's identifier, which repeats across every
+#: occurrence of a repeating event and would make them one row.
+EVENT_PREFIX = "cal:"
+#: The mark shown against an event, distinct from both a task's checkbox and
+#: the tracker's arrow: three rows that cannot be ticked would otherwise look
+#: like three kinds of the same thing.
+EVENT_ROW_MARK = "◇"
 #: Drawn in the margin against a task carrying the configured tag.  A star,
 #: which says "mine" at a glance where the double rule it replaced rewarded
 #: looking twice; it stands alone on its row rather than joining the marks
@@ -138,6 +158,18 @@ def _state_label(state: str) -> str:
     """
     words = state.split()
     return words[-1].lower()[:_WHEN_WIDTH] if words else ""
+
+
+def _event_label(minutes: int | None) -> str:
+    """When an event starts, for the column that holds a task's own time.
+
+    An event lasting the whole day says so in words rather than showing a
+    midnight it does not mean.  Lower case, as everything else in this
+    column is.
+    """
+    if minutes is None:
+        return "all-day"
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 # Every printable key, paired with what the same physical key types on a
 # Russian keyboard.  A binding lists both, so the key a person presses is the
@@ -574,6 +606,15 @@ class Help(ModalScreen[None]):
   so w hides them. Without a VPN the board says so
   and carries on without them.
 
+[b]Events from the calendar[/b]
+  Each day also shows what your calendar holds for it,
+  from the accounts you configure, marked ◇ and placed
+  among the tasks by the hour they start — those lasting
+  the whole day lead the day. They are read-only here:
+  changing one would need the change to travel back, so
+  every key that writes refuses and says so. Work-account
+  events count as work, so w hides them too.
+
 [b]Other[/b]
   ?                  this help
   q                  quit
@@ -796,6 +837,14 @@ class TaskApp(App[None]):
         self.past_due = 0
         #: How many rows the work filter removed from the shown view.
         self.hidden_work = 0
+        #: Whether the shown view's own tasks have arrived yet.  The
+        #: calendar answers in a couple of milliseconds where the store
+        #: takes hundreds, so without this the board would report "0
+        #: task(s)" beside the events for as long as the fetch lasts --
+        #: a day that looks empty rather than one still loading.
+        self._fetched = False
+        #: How many calendar events the shown view holds.
+        self.shown_events = 0
         #: How many tracker issues the shown view holds.
         self.shown_issues = 0
         self.reference: datetime | None = None
@@ -834,6 +883,17 @@ class TaskApp(App[None]):
         #: apart from the day's own errors: an unreachable tracker must
         #: never be reported as the day failing to load.
         self.tracker_error: str | None = None
+        # The calendar: read-only, for whichever day is shown, and equally
+        # optional.  A board with no accounts configured is an ordinary board.
+        self.calendar_config = ical.load_config()
+        self.events: list[ical.Event] = []
+        #: Which day the events on hand belong to, so a day change is never
+        #: shown the day before's events while the new day is being read.
+        self.events_day: date | None = None
+        #: Why the calendar could not be read, when it could not be.  Kept
+        #: apart from the day's own errors for the tracker's reason: an
+        #: unreadable calendar is not the day failing to load.
+        self.calendar_error: str | None = None
         self.work_project: str | None = singularity.load_work_project()
         self.green_tag: str | None = singularity.load_green_tag()
         #: What the configured tag turned out to be, once looked up, and
@@ -884,6 +944,10 @@ class TaskApp(App[None]):
     def load(self) -> None:
         """Fetch the shown view's tasks off the UI thread."""
         self.call_from_thread(self.set_status, "Loading…")
+        # Started before the day is asked for, not after: the calendar is on
+        # its own path entirely, so a store that is slow or unreachable does
+        # not decide whether the day's events are read.
+        self.call_from_thread(self.load_calendar)
         try:
             if self.client is None:
                 self.client = SingularityClient()
@@ -969,6 +1033,165 @@ class TaskApp(App[None]):
         self.repaint()
         self.notice(message, True)
 
+    # -- the calendar ------------------------------------------------------
+
+    @work(exclusive=True, thread=True, group="calendar")
+    def load_calendar(self) -> None:
+        """Read the shown day's events, off the UI thread and off the day's path.
+
+        Its own worker for the tracker's reasons, and asked afresh for every
+        day rather than cached: a day costs a couple of milliseconds, so
+        there is nothing to keep in step and nothing to go stale.
+
+        A view that is not a day -- the inbox, someday -- has no date for the
+        calendar to answer, so it holds no events rather than today's.
+        """
+        config = self.calendar_config
+        day = self.position
+        if config is None or isinstance(day, Bucket):
+            self.call_from_thread(self.clear_calendar)
+            return
+        try:
+            events = ical.fetch(config, day)
+        except ical.CalendarUnreadable as exc:
+            self.call_from_thread(self.calendar_failed, day, str(exc))
+            return
+        self.call_from_thread(self.calendar_loaded, day, events)
+
+    def clear_calendar(self) -> None:
+        """Forget the events where they cannot apply to the view."""
+        if self.events or self.calendar_error or self.events_day is not None:
+            self.events = []
+            self.events_day = None
+            self.calendar_error = None
+            self.repaint()
+
+    def calendar_loaded(self, day, events: list[ical.Event]) -> None:
+        """Take the day's events, and stop saying the calendar was unreadable.
+
+        The day the read was for is checked against the day now shown: a
+        slow read finishing after the person has moved on must not put one
+        day's events under another's date.
+        """
+        if day != self.position:
+            return
+        was = self.calendar_error
+        self.events = events
+        self.events_day = day
+        self.calendar_error = None
+        if was and self._notice and self._notice[0] == was:
+            self._notice = None
+        self.repaint()
+
+    def calendar_failed(self, day, message: str) -> None:
+        """Remember that the calendar is unreadable, and say so once.
+
+        Said rather than left silent for the tracker's reason: a day with no
+        events is perfectly ordinary, so a quiet failure would be
+        indistinguishable from a free day.
+        """
+        if day != self.position:
+            return
+        self.events = []
+        self.events_day = day
+        if self.calendar_error == message:
+            # Already said, and the day has not changed underneath it.
+            # Repeating it on every refresh would bury whatever else the
+            # board has to say.
+            return
+        self.calendar_error = message
+        self.repaint()
+        self.notice(message, True)
+
+    def event_rows(self) -> list[Task]:
+        """The day's events, as rows the board can draw.
+
+        Each carries the work project's id when it came from the work
+        account, so the key that hides work hides these too and `is_work`
+        needs to know nothing about the calendar.  The marker is what every
+        write checks before refusing.
+        """
+        config = self.calendar_config
+        if config is None or self.events_day != self.position:
+            return []
+        rows = []
+        for event in self.events:
+            minutes = None if event.all_day else event.start.hour * 60 + event.start.minute
+            rows.append(Task({
+                "id": f"{EVENT_PREFIX}{event.account}:{event.label}:{event.title}",
+                "title": event.title,
+                "checked": EMPTY,
+                "deferred": False,
+                "useTime": False,
+                # Belonging to the work project is what makes `w` hide it.
+                "projectId": (
+                    self.work_project if config.is_work(event.account) else None
+                ),
+                EVENT_MARK: True,
+                EVENT_ACCOUNT: event.account,
+                EVENT_CALENDAR: event.calendar,
+                EVENT_MINUTES: minutes,
+            }))
+        return rows
+
+    def minutes_into_day(self, task: Task) -> int | None:
+        """How far into the day a row happens, or None if it names no time.
+
+        One answer for both kinds of row, so placing an event among the
+        tasks is a comparison of like with like.
+        """
+        if self.is_event(task):
+            return task.raw.get(EVENT_MINUTES)
+        if not task.timed:
+            return None
+        started = task.local_start(self.tz)
+        return None if started is None else started.hour * 60 + started.minute
+
+    def place_events(self, tasks: list[Task], events: list[Task]) -> list[Task]:
+        """Put the events among the day's tasks, by when each happens.
+
+        Insertion, never a re-sort.  The tasks arrive in the order the
+        board's own rules put them in and leave in that same order, whatever
+        the events do -- which is the property the requirement asks for, and
+        one that holds by construction rather than by being tested for.
+
+        A timed event goes above the first row that happens later than it; a
+        task naming no time counts as later than any event, so the events
+        settle into the run of timed rows rather than past the end of it.
+        Working forwards matters: two events at the same minute then keep
+        their order, because the second finds the first already in place and
+        not later than itself, and so follows it.
+
+        An event lasting the whole day leads the day, above every row that
+        happens at a time, because it describes the day rather than a moment
+        in it.
+        """
+        def when(row: Task) -> tuple:
+            minutes = row.raw.get(EVENT_MINUTES)
+            return (minutes or 0, (row.raw.get("title") or "").casefold())
+
+        all_day = sorted(
+            (e for e in events if e.raw.get(EVENT_MINUTES) is None), key=when
+        )
+        placed = list(tasks)
+        for event in sorted(
+            (e for e in events if e.raw.get(EVENT_MINUTES) is not None), key=when
+        ):
+            minutes = event.raw[EVENT_MINUTES]
+            where = len(placed)
+            for i, row in enumerate(placed):
+                at = self.minutes_into_day(row)
+                if at is None or at > minutes:
+                    where = i
+                    break
+            placed.insert(where, event)
+        return all_day + placed
+
+    @staticmethod
+    def is_event(task: Task | None) -> bool:
+        """Whether a row came from the calendar rather than the board."""
+        return bool(task is not None and task.raw.get(EVENT_MARK))
+
     # -- writes ------------------------------------------------------------
 
     def submit_write(
@@ -993,6 +1216,16 @@ class TaskApp(App[None]):
         Textual's own binding dispatcher, and shadowing it silently breaks
         every key in the app.
         """
+        if self.is_event(task):
+            # The same one place, for the same reason: the board can read
+            # the calendar and nothing more, so a change it showed would be
+            # a change that never happened anywhere.
+            self.notice(
+                f"{task.raw.get(EVENT_ACCOUNT) or 'The event'} "
+                f"lives in the calendar · not editable here",
+                True,
+            )
+            return
         if self.is_tracker(task):
             # The one place every write passes through, so this covers every
             # action the board offers and every one added later.  The board
@@ -1223,8 +1456,16 @@ class TaskApp(App[None]):
         known = {t.id for t in listing.tasks}
         self._base = listing.tasks + [t for t in unborn if t.id not in known]
         self.filed_out = listing.filed_out
-        # A fresh view supersedes whatever was said about the old one.
-        self._notice = None
+        self._fetched = True
+        # A fresh view supersedes whatever was said about the old one --
+        # except what an outside source is standing on.  The calendar
+        # answers in a couple of milliseconds and so nearly always reports
+        # before the day's own fetch returns; wiping its message here would
+        # mean an unreadable calendar was never once seen.  Each source
+        # takes its own message down when it recovers.
+        standing = {m for m in (self.calendar_error, self.tracker_error) if m}
+        if not (self._notice and self._notice[0] in standing):
+            self._notice = None
         self.reference = listing.reference
         self.repaint()
 
@@ -1292,6 +1533,13 @@ class TaskApp(App[None]):
         if not 0 <= there < len(self.tasks):
             return None
         other = self.tasks[there]
+        if self.is_event(other):
+            # An event is placed by the clock, not by any order a person
+            # sets, so there is no sequence to trade places in.  It ends the
+            # run rather than being stepped over: a task landing on the far
+            # side of it would be claiming a position the next repaint would
+            # take straight back.
+            return None
         if self.group_of(other) != self.group_of(task):
             return None
         return other
@@ -1318,9 +1566,19 @@ class TaskApp(App[None]):
         return singularity.order_between(far, near)
 
     def run_around(self, task: Task) -> list[Task]:
-        """The task's whole ordering group, in the sequence now shown."""
+        """The task's whole ordering group, in the sequence now shown.
+
+        The board's own rows alone.  A calendar event or a tracker issue can
+        land in the same group by the keys that decide one, but neither has
+        an order to set, and respacing a run that included them would ask
+        for writes that must be refused and leave the run half spaced.
+        """
         mine = self.group_of(task)
-        return [t for t in self.tasks if self.group_of(t) == mine]
+        return [
+            t for t in self.tasks
+            if not (self.is_event(t) or self.is_tracker(t))
+            and self.group_of(t) == mine
+        ]
 
     @property
     def shows_tracker(self) -> bool:
@@ -1427,21 +1685,30 @@ class TaskApp(App[None]):
         # list -- past the finished tasks -- is where a person stops looking.
         issues = self.tracker_rows()
         self.shown_issues = len(issues)
+        events = self.event_rows()
         # The filter is applied to both, because appending afterwards would
         # otherwise carry the tracker rows -- the most work-like rows on
         # screen -- straight past the key that hides work.
         self.hidden_work = (
-            sum(1 for t in tasks + issues if self.is_work(t))
+            sum(1 for t in tasks + issues + events if self.is_work(t))
             if self.hiding_work else 0
         )
         if self.hiding_work:
             tasks = [t for t in tasks if not self.is_work(t)]
             issues = [t for t in issues if not self.is_work(t)]
+            events = [t for t in events if not self.is_work(t)]
             self.shown_issues = len(issues)
-        tasks = issues + tasks
+        # The events take their place among the day's tasks by when they
+        # happen; the tracker's rows are pinned above the result, being
+        # about now rather than about the day.
+        self.shown_events = len(events)
+        tasks = issues + self.place_events(tasks, events)
         self.tasks = tasks
         self.past_due = (
-            sum(1 for t in tasks if t.past_due_since(self.reference, self.tz))
+            sum(
+                1 for t in tasks
+                if not self.is_event(t) and t.past_due_since(self.reference, self.tz)
+            )
             if self.reference
             else 0
         )
@@ -1462,7 +1729,7 @@ class TaskApp(App[None]):
             self._selected_id = None
         self.update_daybar()
         self.update_detail()
-        own = [t for t in tasks if not self.is_tracker(t)]
+        own = [t for t in tasks if not (self.is_tracker(t) or self.is_event(t))]
         done = sum(1 for t in own if t.done)
         # The task count is what the board manages; issues are counted
         # beside it, never folded into it.
@@ -1471,6 +1738,10 @@ class TaskApp(App[None]):
             # Not named for any one state: more than one may be shown, and
             # which state each issue is in is on its own row.
             bits.append(f"{self.shown_issues} tracked")
+        if self.shown_events:
+            # Counted beside the tasks rather than among them: the board
+            # manages the tasks and only reports these.
+            bits.append(f"{self.shown_events} event(s)")
         if self.past_due:
             bits.insert(1, f"{self.past_due} past due")
         green = sum(1 for t in own if self.is_green(t))
@@ -1490,6 +1761,11 @@ class TaskApp(App[None]):
         # view is fetched afresh.
         if self._notice:
             self.set_status(*self._notice)
+        elif not self._fetched:
+            # The events can be on screen before the day's tasks are; saying
+            # how many tasks there are before they have arrived would name a
+            # number that is about to change.
+            self.set_status("Loading…")
         else:
             self.set_status(" · ".join(bits))
 
@@ -1606,6 +1882,20 @@ class TaskApp(App[None]):
                 self.shortened(escape(task.raw.get("title") or ""), self.title_width),
                 self.shortened(
                     f"[dim]{escape(task.raw.get(TRACKER_PROJECT) or '')}[/dim]",
+                    _PROJECT_WIDTH,
+                ),
+            )
+        if self.is_event(task):
+            # Its own mark, so read-only is visible rather than found out by
+            # pressing a key; and the calendar it came from where a task
+            # names its project, because that is what places the event.
+            return (
+                "",
+                EVENT_ROW_MARK,
+                _event_label(task.raw.get(EVENT_MINUTES)),
+                self.shortened(escape(task.raw.get("title") or ""), self.title_width),
+                self.shortened(
+                    f"[dim]{escape(task.raw.get(EVENT_CALENDAR) or '')}[/dim]",
                     _PROJECT_WIDTH,
                 ),
             )
@@ -1774,6 +2064,8 @@ class TaskApp(App[None]):
         # The withheld count belongs to the view being left, so clear it
         # before repainting; load() sets the new one.
         self.filed_out = 0
+        # The new view's tasks have not arrived, whatever the old one's did.
+        self._fetched = False
         self.update_daybar()
         self.load()
 
@@ -1864,6 +2156,12 @@ class TaskApp(App[None]):
         """
         task = self.selected
         if task is None or self.client is None:
+            return
+        if self.is_event(task):
+            self.notice(
+                f"“{task.title}” lives in the calendar · it cannot be reordered here",
+                True,
+            )
             return
         if self.is_tracker(task):
             self.notice(
@@ -2199,7 +2497,10 @@ class TaskApp(App[None]):
                 "No tag is set · put GREEN_TAG in .env to mark tasks", True
             )
             return
-        if self.green_checked and self.green_title is None and not self.is_tracker(task):
+        if (
+            self.green_checked and self.green_title is None
+            and not (self.is_tracker(task) or self.is_event(task))
+        ):
             # Configured but resolving to nothing: marking would write a tag
             # the account does not have, and the API would refuse it anyway.
             self.set_status(
