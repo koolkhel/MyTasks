@@ -16,6 +16,9 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+# `time` above is datetime's class, not the module, so the two clock
+# functions this needs are imported by name rather than shadowed.
+from time import monotonic, sleep
 from typing import Any, Callable, Iterable
 
 from textual import on, work
@@ -61,6 +64,23 @@ TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
 #: that read-only is visible rather than discovered by pressing a key.
 TRACKER_ROW_MARK = "▸"
+#: Drawn in the margin against a task carrying the configured tag.  A double
+#: vertical that joins to the row above and below, so that marked tasks
+#: standing together read as one bar rather than as several marks.  Not a
+#: colour: the board must stay legible to someone who cannot tell its
+#: colours apart, and the tag's own colour is deliberately unused.
+GREEN_RAIL = "║"
+#: How long a write that takes the tag off waits behind the previous tag
+#: write to the same task.  The store answers such a write and then does not
+#: apply it when it arrives soon after another.  Only a removal waits, and
+#: only behind a recent write, so taking the mark off a task marked on an
+#: earlier day is immediate.  See design.md for the measurements.
+TAG_SETTLE_SECONDS = 2.5
+#: How many times a removal is re-sent when the store says it applied the
+#: write but a read shows the tag still there.  Waiting makes that rare
+#: rather than impossible, and the board must not settle for rare: it reads
+#: back and sends again.  Two extra attempts, spaced by the same wait.
+TAG_REMOVAL_ATTEMPTS = 3
 #: How wide the when-column is.  It carries a tracker row's state and a
 #: task's own start time or how overdue it is, so it has to hold the widest
 #: of both; eleven cells is what the longest state label needs, and the
@@ -704,6 +724,7 @@ class TaskApp(App[None]):
         Binding(keys("x"), "cancel_task", "Cancel"),
         Binding(keys("d"), "schedule", "Date"),
         Binding(keys("p"), "project", "Project"),
+        Binding(keys("g"), "green", "Green"),
         Binding(keys("o"), "open_link", "Link"),
         # Both keys, and deliberately NOT priority: a Mac laptop has no
         # forward-delete, so its Delete key arrives as backspace, while an
@@ -770,6 +791,16 @@ class TaskApp(App[None]):
         #: never be reported as the day failing to load.
         self.tracker_error: str | None = None
         self.work_project: str | None = singularity.load_work_project()
+        self.green_tag: str | None = singularity.load_green_tag()
+        #: What the configured tag turned out to be, once looked up, and
+        #: whether that lookup has happened.  The two are separate because
+        #: "not looked up yet" and "looked up, and it names nothing" call
+        #: for opposite answers when the key is pressed.
+        self.green_title: str | None = None
+        self.green_checked: bool = False
+        #: When each task's tag was last written, so a removal knows whether
+        #: it has to wait.  Keyed by task id; absent means "not this sitting".
+        self._tag_written: dict[str, float] = {}
 
     # -- layout ------------------------------------------------------------
 
@@ -795,6 +826,7 @@ class TaskApp(App[None]):
         # so switching needs no binding of its own.
         self.theme = TURBO_DARK.name
         table = self.query_one(DataTable)
+        table.add_column("", key="rail", width=1)
         table.add_column("", key="mark", width=2)
         table.add_column("When", key="when", width=_WHEN_WIDTH)
         table.add_column("Task", key="title")
@@ -818,6 +850,17 @@ class TaskApp(App[None]):
             self.call_from_thread(self.set_status, str(exc), True)
             return
         self.call_from_thread(self.show_tasks, listing)
+        if self.green_tag and not self.green_checked:
+            # After the day is on screen, for the same reason the tracker is:
+            # nothing about the rail needs this, only the name the board says
+            # back, so making the first paint wait on it would buy nothing.
+            # Read back rather than trusted -- an id left behind by a deleted
+            # tag would otherwise mark nothing and look like a quiet day.
+            try:
+                self.green_title = self.client.tag_title(self.green_tag)
+            except SingularityError:
+                self.green_title = None
+            self.green_checked = True
         # Started once the day is on screen, and never awaited: the day
         # appears in its own time whatever the tracker does.
         if self.shows_tracker:
@@ -1187,7 +1230,7 @@ class TaskApp(App[None]):
         Tasks sharing it are the ones a hand-set sequence can arrange; a
         move may not carry a task past one that differs here.
         """
-        return singularity.group_key(task, self.tz, self.reference)
+        return singularity.group_key(task, self.tz, self.reference, self.green_tag)
 
     def neighbour_to_pass(self, task: Task, step: int) -> "Task | None":
         """The task a move would carry the selected one past, if any.
@@ -1326,7 +1369,8 @@ class TaskApp(App[None]):
         keep = self._selected_id
         shown = [t for t in self.patched() if self.belongs(t)]
         tasks = singularity.sort_for_display(
-            shown, self.tz, self.reference, manual=self.orders_manually
+            shown, self.tz, self.reference, manual=self.orders_manually,
+            green=self.green_tag,
         )
         # The tracker's rows join outside the ordering, never during it: an
         # issue has no date, so the day's own membership rule would reject
@@ -1382,6 +1426,11 @@ class TaskApp(App[None]):
             bits.append(f"{self.shown_issues} tracked")
         if self.past_due:
             bits.insert(1, f"{self.past_due} past due")
+        green = sum(1 for t in own if self.is_green(t))
+        if green:
+            # Beside the other counts, as the tracker's and the work
+            # filter's are: none of them replaces the number of rows.
+            bits.append(f"{green} green")
         if self.hidden_work:
             # Beside the other counts, never instead of them: the shown
             # count stays the number of rows, as the inbox already does for
@@ -1418,13 +1467,23 @@ class TaskApp(App[None]):
                 text = text.replace(marked, f"[link='{url}']{marked}[/link]", 1)
         return text
 
-    def row_for(self, task: Task) -> tuple[str, str, str, str]:
+    def is_green(self, task: Task | None) -> bool:
+        """Whether this task carries the configured tag.
+
+        False when no tag is configured, and for a tracker row, which the
+        board made up rather than fetched and which carries no tags at all.
+        """
+        return task is not None and task.has_tag(self.green_tag)
+
+    def row_for(self, task: Task) -> tuple[str, str, str, str, str]:
+        rail = GREEN_RAIL if self.is_green(task) else ""
         if self.is_tracker(task):
             # Its own mark, so read-only is visible rather than found out by
             # pressing a key; and the tracker's project rather than the work
             # project the row belongs to, because that is what names the
             # issue to a person.
             return (
+                rail,
                 TRACKER_ROW_MARK,
                 _state_label(task.raw.get(TRACKER_STATE) or ""),
                 escape(task.raw.get("title") or ""),
@@ -1447,6 +1506,7 @@ class TaskApp(App[None]):
             title = f"[{self.late_colour}]{title}[/]"
         project = self.projects.get(task.project_id or "", "")
         return (
+            rail,
             MARKS[task.checked],
             when,
             title,
@@ -1993,6 +2053,89 @@ class TaskApp(App[None]):
                 "the API cannot return it to having none"
                 if task.project_id is None else None
             ),
+        )
+
+    def action_green(self) -> None:
+        """Mark the selected task as green, or take the mark off again.
+
+        One key for both directions: a person wants the task marked or not
+        marked, and should not have to know which it is now to say so.
+
+        The API replaces a task's tags outright rather than merging, so the
+        write carries every other tag the task has back with it.  That makes
+        this the board's only read-modify-write, and it is built from the
+        task on screen rather than a fresh fetch, so it stays on the same
+        optimistic path as every other action.
+
+        Nothing is confirmed and nothing is irreversible: unlike a project,
+        the tag comes off again, so pressing the key twice leaves the task
+        exactly as it was found.
+        """
+        task = self.selected
+        if task is None or self.client is None:
+            return
+        if self.green_tag is None:
+            self.set_status(
+                "No tag is set · put GREEN_TAG in .env to mark tasks", True
+            )
+            return
+        if self.green_checked and self.green_title is None and not self.is_tracker(task):
+            # Configured but resolving to nothing: marking would write a tag
+            # the account does not have, and the API would refuse it anyway.
+            self.set_status(
+                f"The configured tag {self.green_tag} was not found", True
+            )
+            return
+        # A task the API answered without the field carries no tags, which
+        # is an empty list rather than nothing.  Settling that before the
+        # write is recorded matters: an undo sends the previous value back,
+        # and the API refuses a null where it wants an array.
+        task.raw.setdefault("tags", [])
+        marked = task.has_tag(self.green_tag)
+        tags = [t for t in task.tags if t != self.green_tag]
+        if not marked:
+            tags.append(self.green_tag)
+        client, wanted = self.client, list(tags)
+
+        def write(tid: str) -> Any:
+            """Send the tags, and for a removal make sure it actually took.
+
+            Runs on the queue that serialises this one task's writes, so
+            neither the wait nor a re-read holds up anything else: the board
+            has already shown the row without its rail and answers every key
+            meanwhile.
+
+            A removal waits behind a recent tag write, because the store
+            drops one that arrives too soon.  Waiting makes that rare, not
+            impossible, so the removal is then read back and sent again if
+            the tag is still there.  Only a removal needs this; setting a
+            tag was never seen to fail.
+            """
+            if wanted:
+                result = client.set_tags(tid, wanted)
+                self._tag_written[tid] = monotonic()
+                return result
+            result = None
+            for attempt in range(TAG_REMOVAL_ATTEMPTS):
+                since = self._tag_written.get(tid)
+                if since is not None:
+                    left = TAG_SETTLE_SECONDS - (monotonic() - since)
+                    if left > 0:
+                        sleep(left)
+                result = client.set_tags(tid, wanted)
+                self._tag_written[tid] = monotonic()
+                if attempt == TAG_REMOVAL_ATTEMPTS - 1:
+                    break
+                if not client.task_tags(tid):
+                    break
+            return result
+
+        self.submit_write(
+            f"Unmarking {self.green_title or 'green'}" if marked
+            else f"Marking {self.green_title or 'green'}",
+            task,
+            write,
+            {"tags": wanted},
         )
 
     @work

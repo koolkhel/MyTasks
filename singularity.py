@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from itertools import chain
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Sequence
 
 import requests
 from dotenv import load_dotenv
@@ -181,6 +181,20 @@ class Task:
     @property
     def project_id(self) -> str | None:
         return self.raw.get("projectId") or None
+
+    @property
+    def tags(self) -> tuple[str, ...]:
+        """The tag ids this task carries, in the order the API gave them.
+
+        A row the board made up rather than fetched -- a tracker issue --
+        has no tags at all, and neither does a task the API answered without
+        the field, so the absent case is a tuple rather than an error.
+        """
+        return tuple(self.raw.get("tags") or ())
+
+    def has_tag(self, tag_id: str | None) -> bool:
+        """Whether this task carries `tag_id`; False when none is configured."""
+        return bool(tag_id) and tag_id in self.tags
 
     @property
     def is_note(self) -> bool:
@@ -404,6 +418,20 @@ def load_work_project(env_path: str | os.PathLike[str] | None = None) -> str | N
     return os.getenv("WORK_PROJECT", "").strip() or None
 
 
+def load_green_tag(env_path: str | os.PathLike[str] | None = None) -> str | None:
+    """The tag id that marks a task green, or None if none is configured.
+
+    Beside the work project and for the same reason: a tag id names
+    something personal, and the board's source should carry neither the id
+    nor the tag's name.
+
+    Absent and blank both mean "not configured", which leaves an ordinary
+    board that simply marks nothing.
+    """
+    load_dotenv(env_path, override=False)
+    return os.getenv("GREEN_TAG", "").strip() or None
+
+
 class SingularityClient:
     """Thin wrapper over the REST API.
 
@@ -417,10 +445,15 @@ class SingularityClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 20.0,
         tz: tzinfo | None = None,
+        green: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.tz = tz or local_tz()
+        # The tag that orders a task first.  The client holds it because the
+        # client is what sorts a fetched listing, and the board would
+        # otherwise disagree with the order it was handed.
+        self.green = green if green is not None else load_green_tag()
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -533,7 +566,9 @@ class SingularityClient:
             tasks = day_query()
             if not include_done:
                 tasks = [t for t in tasks if not t.done and not t.cancelled]
-            return Listing(sort_for_display(tasks, self.tz, manual=True))
+            return Listing(
+                sort_for_display(tasks, self.tz, manual=True, green=self.green)
+            )
 
         # Today costs three queries, so they go out together rather than one
         # after another: the day itself plus the two that find what is past
@@ -554,7 +589,7 @@ class SingularityClient:
                  if t.id not in {x.id for x in tasks}]
         tasks = tasks + extra
         return Listing(
-            sort_for_display(tasks, self.tz, now, manual=True),
+            sort_for_display(tasks, self.tz, now, manual=True, green=self.green),
             past_due=sum(1 for t in tasks if t.past_due_since(now, self.tz)),
             reference=now,
         )
@@ -629,7 +664,7 @@ class SingularityClient:
             unfiled = [t for t in tasks if not t.project_id]
             filed_out = len(tasks) - len(unfiled)
             tasks = unfiled
-        return Listing(sort_for_display(tasks, self.tz), filed_out)
+        return Listing(sort_for_display(tasks, self.tz, green=self.green), filed_out)
 
     def tasks_at(self, position: "date | Bucket", **filters: Any) -> Listing:
         """Tasks for whichever position the board is showing."""
@@ -793,6 +828,51 @@ class SingularityClient:
             names[project["id"]] = f"{emoji} {title}".strip() if emoji else title
         return names
 
+    # -- tags --------------------------------------------------------------
+
+    def tag_title(self, tag_id: str) -> str | None:
+        """The title of one tag, or None if the id names nothing.
+
+        Read one at a time rather than by listing: the account's tags cannot
+        be listed with this token, but a tag is readable by its id, which is
+        all the board needs to confirm what it was pointed at.
+        """
+        try:
+            payload = self.get(f"/tag/{tag_id}")
+        except ApiError as exc:
+            if exc.status in (400, 403, 404):
+                return None
+            raise
+        tag = payload.get("tag") if isinstance(payload, dict) and "tag" in payload else payload
+        if not isinstance(tag, dict) or tag.get("removed"):
+            return None
+        return tag.get("title") or None
+
+    def task_tags(self, task_id: str) -> tuple[str, ...]:
+        """The tags the store currently holds for one task.
+
+        Read back after a removal, because the store answers a removal it
+        then does not apply.  A failure to read is reported as "still
+        tagged", so a caller checking its own write tries again rather than
+        believing a request that never arrived.
+        """
+        try:
+            payload = self.get(f"/task/{task_id}")
+        except SingularityError:
+            return ("?",)
+        task = payload.get("task") if isinstance(payload, dict) and "task" in payload else payload
+        if not isinstance(task, dict):
+            return ("?",)
+        return tuple(task.get("tags") or ())
+
+    def set_tags(self, task_id: str, tags: Sequence[str]) -> Any:
+        """Replace a task's tags outright, which is what the API does.
+
+        The field is not merged upstream, so a caller adding or dropping one
+        tag has to send the rest back with it.
+        """
+        return self.patch(f"/task/{task_id}", {"tags": list(tags)})
+
 
 #: Only these may be handed to the operating system's opener.  An allowlist
 #: rather than a blocklist: a title is text a person typed or a browser
@@ -873,6 +953,7 @@ def sort_key(
     tz: tzinfo | None = None,
     now: datetime | None = None,
     manual: bool = False,
+    green: str | None = None,
 ) -> tuple:
     """How one task orders against another within a view.
 
@@ -880,12 +961,19 @@ def sort_key(
     before them is the task's group, which a manual sequence may not
     cross.  `group_key` takes exactly that prefix, so the two cannot come
     to disagree about where a group ends.
+
+    `green` names the tag that lifts a task above the rest.  It ranks below
+    only whether a task is finished, so it outranks how overdue a task is:
+    marking a task is how a person says it comes before the backlog, and a
+    rule where lateness won would say the opposite.  Finished work still
+    sinks, marked or not.
     """
     tz = tz or local_tz()
     started = task.local_start(tz)
     late = task.past_due_since(now, tz) if now else None
     return (
         task.done or task.cancelled,
+        not task.has_tag(green),
         late is None,
         # Most overdue first within the past-due group; constant elsewhere.
         late.timestamp() if late else 0.0,
@@ -898,7 +986,10 @@ def sort_key(
 
 
 def group_key(
-    task: Task, tz: tzinfo | None = None, now: datetime | None = None
+    task: Task,
+    tz: tzinfo | None = None,
+    now: datetime | None = None,
+    green: str | None = None,
 ) -> tuple:
     """Everything `sort_for_display` decides before the hand-set order.
 
@@ -910,7 +1001,7 @@ def group_key(
     conditions, so that adding an ordering key above the manual one keeps
     this honest without a second edit.
     """
-    return sort_key(task, tz, now)[:-2]
+    return sort_key(task, tz, now, green=green)[:-2]
 
 
 def order_between(lower: int | None, upper: int | None) -> int | None:
@@ -937,6 +1028,7 @@ def sort_for_display(
     tz: tzinfo | None = None,
     now: datetime | None = None,
     manual: bool = False,
+    green: str | None = None,
 ) -> list[Task]:
     """Open before finished, past due before due today, then time and order.
 
@@ -952,7 +1044,7 @@ def sort_for_display(
     tasks stay in ascending start time however they are moved.
     """
     tz = tz or local_tz()
-    return sorted(tasks, key=lambda t: sort_key(t, tz, now, manual))
+    return sorted(tasks, key=lambda t: sort_key(t, tz, now, manual, green))
 
 
 # --------------------------------------------------------------------------
