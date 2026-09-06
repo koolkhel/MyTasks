@@ -23,6 +23,7 @@ from datetime import date, datetime, time, timedelta
 from time import monotonic, sleep
 from typing import Any, Callable, Iterable, Iterator
 
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -105,6 +106,24 @@ TAG_REMOVAL_ATTEMPTS = 3
 #: longest a task puts there is shorter.  Named once so the width the label
 #: is trimmed to and the width the column is drawn at cannot drift apart.
 _WHEN_WIDTH = 11
+
+#: How wide the column naming a task's project is.  Eleven cells hold the
+#: names in use with room to spare; it was twenty-two, and the eleven given
+#: back go to the title, which is the column that runs out of room.
+_PROJECT_WIDTH = 11
+#: What every column other than the title costs, including the two cells of
+#: padding the table puts around each of the five.  Measured rather than
+#: derived: the padding is not declared anywhere, and assuming it would put
+#: the title a few cells too wide and leave the table scrolling after all.
+_ROW_OVERHEAD = 1 + 2 + _WHEN_WIDTH + _PROJECT_WIDTH + 2 * 5
+#: The narrowest the title column is allowed to be.  Below this a title stops
+#: being recognisable, so the board keeps this much and lets the list scroll
+#: instead -- which is what it did at every width before.
+_TITLE_MIN = 30
+#: Put at the end of text the column had to cut, so that a person can tell a
+#: title that ends from one that carries on.  The column alone would cut it
+#: silently.
+_ELLIPSIS = "…"
 
 
 def _state_label(state: str) -> str:
@@ -854,8 +873,8 @@ class TaskApp(App[None]):
         table.add_column("", key="mark_green", width=1)
         table.add_column("", key="mark", width=2)
         table.add_column("When", key="when", width=_WHEN_WIDTH)
-        table.add_column("Task", key="title")
-        table.add_column("Project", key="project", width=22)
+        table.add_column("Task", key="title", width=self.title_width)
+        table.add_column("Project", key="project", width=_PROJECT_WIDTH)
         table.focus()
         self.load()
 
@@ -1390,6 +1409,9 @@ class TaskApp(App[None]):
             # Confirming a write can land as the app is shutting down, by
             # which time there is nothing left to paint.
             return
+        # The title column was declared before the table had a size, so the
+        # first paint is where it learns how wide it really is.
+        self.fit_columns()
         previous = table.cursor_row
         keep = self._selected_id
         shown = [t for t in self.patched() if self.belongs(t)]
@@ -1500,6 +1522,76 @@ class TaskApp(App[None]):
         """
         return task is not None and task.has_tag(self.green_tag)
 
+    def fit_columns(self) -> bool:
+        """Give the title column the room the terminal currently leaves.
+
+        Returns whether the width changed, so a caller can skip redrawing
+        when it did not.  Called after the first layout as well as on every
+        resize: a column is declared before the table has a size, so its
+        width would otherwise be stuck at the minimum forever.
+        """
+        table = next(iter(self.query(DataTable)), None)
+        if table is None:
+            return False
+        column = table.columns.get("title")
+        if column is None:
+            return False
+        wanted = self.title_width
+        if column.width == wanted:
+            return False
+        column.width = wanted
+        return True
+
+    def on_resize(self) -> None:
+        """Follow the terminal: refit the columns and redraw what they hold.
+
+        The rows carry text already cut to a width, so a resize has to build
+        them again -- widening a column without rebuilding would leave the
+        old ellipsis in a row with room to spare.
+
+        Deferred until the layout has settled: this arrives before the table
+        has been given its new size, so fitting here would measure the width
+        the table is about to stop having.
+        """
+        self.call_after_refresh(self._refit)
+
+    def _refit(self) -> None:
+        if self.fit_columns():
+            self.repaint()
+
+    @property
+    def title_width(self) -> int:
+        """How much room the title column has, from the terminal as it is now.
+
+        The other columns cost a fixed amount, so the title takes what they
+        leave rather than a share of the screen -- a share would have the
+        fixed cost added to it and overflow at every width.  Never below the
+        minimum: past that the list scrolls, which it did anyway before.
+
+        Read afresh each time rather than stored, so a resized terminal needs
+        nothing kept in step.
+        """
+        # Measured from the app rather than from the table, because a resize
+        # reaches the app first: asking the table during one returns the
+        # width it is about to stop having, and the rows come out a size
+        # behind.  The table fills the app's width -- there is nothing
+        # beside it -- which a test pins so this cannot drift unnoticed.
+        return max(_TITLE_MIN, self.size.width - _ROW_OVERHEAD)
+
+    @staticmethod
+    def shortened(markup: str, width: int) -> Text:
+        """Cell text cut to `width`, saying so, with its styling intact.
+
+        Built as text that carries its own styling rather than as markup,
+        because the cut has to fall in the words and not in the middle of a
+        link.  The column would cut it too, but silently -- the whole point
+        is that a shortened title looks shortened.
+        """
+        text = Text.from_markup(markup)
+        if len(text) > width:
+            text.truncate(width, overflow="ellipsis")
+        return text
+
     def row_for(self, task: Task) -> tuple[str, str, str, str, str]:
         mark = GREEN_MARK if self.is_green(task) else ""
         if self.is_tracker(task):
@@ -1511,8 +1603,11 @@ class TaskApp(App[None]):
                 mark,
                 TRACKER_ROW_MARK,
                 _state_label(task.raw.get(TRACKER_STATE) or ""),
-                escape(task.raw.get("title") or ""),
-                f"[dim]{escape(task.raw.get(TRACKER_PROJECT) or '')}[/dim]",
+                self.shortened(escape(task.raw.get("title") or ""), self.title_width),
+                self.shortened(
+                    f"[dim]{escape(task.raw.get(TRACKER_PROJECT) or '')}[/dim]",
+                    _PROJECT_WIDTH,
+                ),
             )
         title = self._markup_title(task)
         if task.recurring:
@@ -1534,8 +1629,8 @@ class TaskApp(App[None]):
             mark,
             MARKS[task.checked],
             when,
-            title,
-            f"[dim]{project}[/dim]" if project else "",
+            self.shortened(title, self.title_width),
+            self.shortened(f"[dim]{project}[/dim]", _PROJECT_WIDTH) if project else "",
         )
 
     @property
