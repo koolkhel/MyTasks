@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 import uuid
+from contextlib import contextmanager
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 # `time` above is datetime's class, not the module, so the two clock
 # functions this needs are imported by name rather than shadowed.
 from time import monotonic, sleep
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -72,6 +74,20 @@ TRACKER_ROW_MARK = "▸"
 #: unused.  Plain ASCII, so it is one cell wide in every locale -- the only
 #: mark on the board with no width caveat at all.
 GREEN_MARK = "*"
+#: What the terminal is asked to call the tab the board runs in, so that the
+#: tab holding it can be found among others without opening it.  Fixed rather
+#: than describing the day or the counts: a tab bar is scanned, not read, and
+#: a name that moves as work is done is noise where a stable one is a landmark.
+TAB_TITLE = "MyTasks"
+#: Asking a terminal to name its tab is an escape sequence, not an API.  The
+#: form below sets window and icon name together, which is what a tab picks
+#: up, and the pair after it remember and restore whatever was there before --
+#: the board is quit often, and a tab left misnamed is worse than one never
+#: named.  A terminal that understands none of these consumes them silently
+#: rather than printing them.
+_TITLE_SET = "\x1b]0;{}\x07"
+_TITLE_PUSH = "\x1b[22;2t"
+_TITLE_POP = "\x1b[23;2t"
 #: How long a write that takes the tag off waits behind the previous tag
 #: write to the same task.  The store answers such a write and then does not
 #: apply it when it arrives soon after another.  Only a removal waits, and
@@ -2221,6 +2237,40 @@ class TaskApp(App[None]):
         self.push_screen(Help())
 
 
+@contextmanager
+def terminal_tab_named(title: str) -> "Iterator[None]":
+    """Name the terminal's tab for the duration, then give the name back.
+
+    Writes nothing unless the output really is a terminal, so a piped or
+    redirected run carries no control sequences.  The restore runs however
+    the board leaves -- a crash is no reason for a terminal to keep the wrong
+    name -- and a terminal that cannot remember a previous title simply keeps
+    the new one, which the shell's next prompt usually replaces anyway.
+    """
+    stream = sys.stdout
+    naming = False
+    try:
+        naming = stream.isatty()
+    except (ValueError, AttributeError):
+        # A stream that has been closed or replaced by something without the
+        # question: not a terminal as far as this is concerned.
+        naming = False
+    if naming:
+        stream.write(_TITLE_PUSH + _TITLE_SET.format(title))
+        stream.flush()
+    try:
+        yield
+    finally:
+        if naming:
+            try:
+                stream.write(_TITLE_POP)
+                stream.flush()
+            except ValueError:
+                # Shutting down took the stream with it; the terminal keeps
+                # the name, which is the lesser fault and never an error here.
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Terminal task board for SingularityApp.")
     parser.add_argument("day", nargs="?", help="day to open, YYYY-MM-DD (default: today)")
@@ -2229,7 +2279,8 @@ def main(argv: list[str] | None = None) -> int:
         day = date.fromisoformat(args.day) if args.day else None
     except ValueError:
         parser.error("day must look like YYYY-MM-DD")
-    TaskApp(day).run()
+    with terminal_tab_named(TAB_TITLE):
+        TaskApp(day).run()
     return 0
 
 
