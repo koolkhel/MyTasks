@@ -1316,11 +1316,68 @@ The board SHALL NOT imply the action was fully reversed.
 - **WHEN** the date is restored by an undo
 - **THEN** the task appears in the view it was in before, not the one it was moved to
 
-### Requirement: Today shows the issues the tracker reports for me
+### Requirement: The tracker block sits below the day's unfinished tasks and is not ordered
+
+The tracker block SHALL sit after every unfinished task the board manages and
+before the first finished or cancelled one. An issue names no hour and no
+date, which makes it kin to the day's untimed work rather than to the
+appointments and the overdue tasks that lead the day.
+
+Where the day holds no finished task, the block SHALL end the list. Where
+every task is finished, the block SHALL lead them. In both cases the rule is
+the same one: the block marks where the day's unfinished work ends.
+
+The block SHALL NOT take part in the day's ordering. Its rows SHALL NOT be
+interleaved with tasks, SHALL NOT be reordered by anything the day does, and
+SHALL keep a stable sequence among themselves.
+
+Within the block, issues SHALL be ordered by their state in the order the
+states are configured, and by issue key within a state. Configuring the
+states therefore decides which of them leads the block.
+
+No key that reorders SHALL move a tracker row, and the board SHALL say why
+rather than doing nothing.
+
+#### Scenario: Below the unfinished work and above the finished
+
+- **WHEN** today holds past-due tasks, tasks due today, finished tasks and tracker issues
+- **THEN** every tracker issue is listed after all the unfinished tasks and before every finished one
+
+#### Scenario: Beside the day's untimed work
+
+- **WHEN** today holds tasks that name a time and tasks that name none, together with tracker issues
+- **THEN** the block follows the tasks naming no time, with no unfinished task of the day between them
+
+#### Scenario: A day with nothing finished
+
+- **WHEN** today holds tracker issues and no finished or cancelled task
+- **THEN** the block ends the list
+
+#### Scenario: A day with everything finished
+
+- **WHEN** every task today is finished or cancelled and the tracker reports issues
+- **THEN** the block is listed before all of them
+
+#### Scenario: The configured order of states is the order of the block
+
+- **WHEN** issues are shown in more than one state
+- **THEN** they appear grouped in the order the states are configured, and by key within each state
+
+#### Scenario: Ticking a task moves it past the block
+
+- **WHEN** a task is ticked and the day reorders
+- **THEN** the ticked task passes below the block, which keeps its own sequence and its place between the unfinished tasks and the finished ones
+
+#### Scenario: Reordering does not reach a tracker row
+
+- **WHEN** a person tries to move a tracker row up or down
+- **THEN** the board says the issue lives in the tracker and cannot be reordered here, and nothing changes
+
+### Requirement: Today shows the tracker's issues, and what each one is
 
 Today's view SHALL additionally show the issues assigned to the configured
 person that the issue tracker reports as being in any of the configured
-states, in a block above every task the board manages.
+states, in a block placed among the tasks the board manages.
 
 The block SHALL appear on today alone. An issue the tracker reports as being
 worked on or waiting on review is current rather than scheduled, and showing
@@ -1346,10 +1403,10 @@ Two configured states MAY end in the same word. Where they do, their rows are
 still told apart by the block's grouping, which follows the configured order
 of the states.
 
-#### Scenario: The issues appear above today's tasks
+#### Scenario: The issues appear among today's tasks
 
 - **WHEN** today is displayed and the tracker reports issues for the configured person
-- **THEN** each appears as a row above the day's own tasks, showing its key, its summary and its state
+- **THEN** each appears as a row among the day's own tasks, showing its key, its summary and its state
 
 #### Scenario: More than one state at once
 
@@ -1393,42 +1450,8 @@ of the states.
 
 #### Scenario: A tracker row is distinguishable from a task
 
-- **WHEN** the block is shown above the day's tasks
+- **WHEN** the block is shown among the day's tasks
 - **THEN** a tracker row is marked differently from a task, without relying on colour to tell them apart
-
-### Requirement: The tracker block sits above the day and is not ordered
-
-The tracker block SHALL sit before every task the board manages and SHALL NOT
-take part in the day's ordering. Its rows SHALL NOT be interleaved with tasks,
-SHALL NOT move when tasks are ticked or reordered, and SHALL keep a stable
-sequence among themselves.
-
-Within the block, issues SHALL be ordered by their state in the order the
-states are configured, and by issue key within a state. Configuring the
-states therefore decides which of them leads the block.
-
-No key that reorders SHALL move a tracker row, and the board SHALL say why
-rather than doing nothing.
-
-#### Scenario: Above everything the board manages
-
-- **WHEN** today holds past-due tasks, tasks due today, finished tasks and tracker issues
-- **THEN** every tracker issue is listed before all of them
-
-#### Scenario: The configured order of states is the order of the block
-
-- **WHEN** issues are shown in more than one state
-- **THEN** they appear grouped in the order the states are configured, and by key within each state
-
-#### Scenario: Ticking a task does not disturb the block
-
-- **WHEN** a task is ticked and the day reorders
-- **THEN** the tracker rows stay where they were, before the tasks, in the same sequence
-
-#### Scenario: Reordering does not reach a tracker row
-
-- **WHEN** a person tries to move a tracker row up or down
-- **THEN** the board says the issue lives in the tracker and cannot be reordered here, and nothing changes
 
 ### Requirement: A tracker issue cannot be changed from the board
 

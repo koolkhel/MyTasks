@@ -679,8 +679,9 @@ class Help(ModalScreen[None]):
 [b]Issues from the tracker[/b]
   Today lists the issues assigned to you in the
   states you configure — in progress, in review —
-  above your own tasks, each showing which state
-  it is in. They are read-only here: open one with
+  below the day's unfinished tasks and above the
+  finished ones, each showing which state it is
+  in. They are read-only here: open one with
   o, work on it in the tracker. They count as work,
   so w hides them. Without a VPN the board says so
   and carries on without them.
@@ -1324,6 +1325,34 @@ class TaskApp(App[None]):
             placed.insert(where, event)
         return all_day + placed
 
+    def place_issues(self, rows: list[Task], issues: list[Task]) -> list[Task]:
+        """Put the tracker's block where the day's unfinished work ends.
+
+        After every unfinished row and before the first finished or
+        cancelled one.  An issue names no hour and no date, which makes it
+        kin to the day's untimed work rather than to the appointments and
+        the overdue tasks that lead the day.
+
+        Before the finished rows rather than after them, which is the whole
+        of the difference between this and putting the block at the foot of
+        the list.  By the end of a day most of the list is finished -- more
+        finished rows than live ones, measured -- and a block below them is
+        a block nobody reads, which is the reason it used to sit on top.
+
+        The block goes in whole rather than being ordered row by row: its
+        rows are grouped by the configured state, and giving each one a
+        place of its own would sort them among the day's untimed tasks by
+        title and lose that grouping.
+        """
+        if not issues:
+            return rows
+        where = next(
+            (i for i, row in enumerate(rows)
+             if not self.is_event(row) and (row.done or row.cancelled)),
+            len(rows),
+        )
+        return rows[:where] + issues + rows[where:]
+
     def ordering_key(self, row: Task) -> tuple:
         """The key a row is placed by, whichever kind of row it is.
 
@@ -1861,10 +1890,10 @@ class TaskApp(App[None]):
             events = [t for t in events if not self.is_work(t)]
             self.shown_issues = len(issues)
         # The events take their place among the day's tasks by when they
-        # happen; the tracker's rows are pinned above the result, being
-        # about now rather than about the day.
+        # happen; the tracker's block goes in whole, where the day's
+        # unfinished work ends.
         self.shown_events = len(events)
-        tasks = issues + self.place_events(tasks, events)
+        tasks = self.place_issues(self.place_events(tasks, events), issues)
         self.tasks = tasks
         self.past_due = (
             sum(
