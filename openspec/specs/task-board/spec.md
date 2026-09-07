@@ -1997,8 +1997,11 @@ An event SHALL be ordered among the day's rows by when it starts, so that the
 day reads in the order it will be lived. An event at nine and a task at eleven
 SHALL appear in that order, and this SHALL hold whatever else the day holds.
 
-An event lasting the whole day SHALL be placed above the rows that happen at a
-time, because it describes the day rather than a moment within it.
+An event lasting the whole day SHALL lead the day, above every other row it
+holds -- above the past-due tasks, above the day's own tasks that name no
+time, and above the tracker block. It describes the whole day rather than a
+moment within it, so nothing that happens inside the day outranks it. Where a
+day holds more than one, they SHALL keep a stable order among themselves.
 
 An event SHALL be placed by the same ordering the tasks are placed by, standing
 in it as what an event is: not finished, not tagged, not past due, not pinned,
@@ -2039,6 +2042,26 @@ tasks in precisely the order the rules for tasks give them.
 
 - **WHEN** a day holds an all-day event and rows that happen at a time
 - **THEN** the all-day event is above them
+
+#### Scenario: An all-day event leads the past-due tasks too
+
+- **WHEN** a day holds an all-day event and tasks that are past due
+- **THEN** the all-day event is above every one of them
+
+#### Scenario: An all-day event leads the day's own untimed tasks
+
+- **WHEN** a day holds an all-day event and the day's own tasks that name no time
+- **THEN** the all-day event is above them, and they are not mixed together
+
+#### Scenario: An all-day event leads the tracker block
+
+- **WHEN** today holds an all-day event and the tracker reports issues
+- **THEN** the all-day event is above the block
+
+#### Scenario: More than one all-day event
+
+- **WHEN** a day holds several all-day events
+- **THEN** all of them lead the day, in a stable order among themselves
 
 #### Scenario: The tasks keep their own order
 
