@@ -44,7 +44,10 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 import singularity
+import email.utils
+
 import ical
+import mail
 import tracker
 from singularity import (
     CANCELLED,
@@ -69,6 +72,22 @@ TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
 #: that read-only is visible rather than discovered by pressing a key.
 TRACKER_ROW_MARK = "▸"
+#: Raw keys marking a row as the mailbox's.  The same arrangement the tracker
+#: and the calendar use, for the same reason: a row carrying these is drawn
+#: and counted like any other and refuses every write.
+MAIL_MARK = "_mail"
+MAIL_SENDER = "_mail_sender"
+MAIL_COUNT = "_mail_count"
+MAIL_WHEN = "_mail_when"
+MAIL_TEXT = "_mail_text"
+#: Prefixes a mail row's id.  Built from the newest message's identity, which
+#: is unique within the mailbox.
+MAIL_PREFIX = "mail:"
+#: The mark shown against a mail row, distinct from a task's checkbox, the
+#: tracker's arrow and an event's diamond: four kinds of row that cannot be
+#: ticked would otherwise look like four of the same thing.
+MAIL_ROW_MARK = "@"
+
 #: Raw keys marking a row as the calendar's.  The same arrangement the
 #: tracker's rows use, for the same reason: a row carrying these is drawn,
 #: hidden and counted like any other and refuses every write, and nothing
@@ -171,6 +190,19 @@ def _state_label(state: str) -> str:
     """
     words = state.split()
     return words[-1].lower()[:_WHEN_WIDTH] if words else ""
+
+
+def _mail_who(sender: str) -> str:
+    """Who a message is from, in the room a column leaves.
+
+    The display name where there is one, else the part before the @: a
+    notification's whole address is mostly the host it came from, which every
+    message from that system repeats, so the informative part is the front.
+    """
+    name, address = email.utils.parseaddr(sender)
+    if name:
+        return name
+    return (address or sender).split("@")[0]
 
 
 def _event_label(minutes: int | None) -> str:
@@ -692,7 +724,10 @@ class Help(ModalScreen[None]):
                      the day orders differently
   ← / → or h / l     previous / next day
   t                  jump to today
-  i                  inbox — tasks with no date
+  i                  inbox — tasks with no date, and the
+                     mail awaiting a decision above them.
+                     Mail is read-only here; o opens what
+                     a thread points at
   s                  someday — tasks put off
   r                  reload from the server
   w                  hide the work project's tasks,
@@ -1005,6 +1040,10 @@ class TaskApp(App[None]):
         #: task(s)" beside the events for as long as the fetch lasts --
         #: a day that looks empty rather than one still loading.
         self._fetched = False
+        #: How many mail threads the shown view holds, and how many messages
+        #: they stand for.
+        self.shown_mail = 0
+        self.shown_messages = 0
         #: How many calendar events the shown view holds.
         self.shown_events = 0
         #: How many of them were already over when the rows were last drawn.
@@ -1049,6 +1088,14 @@ class TaskApp(App[None]):
         #: apart from the day's own errors: an unreachable tracker must
         #: never be reported as the day failing to load.
         self.tracker_error: str | None = None
+        # The mailbox: read-only, its own view, and equally optional.  A
+        # board with none configured is an ordinary board.
+        self.mail_config = mail.load_config()
+        self.mail_threads: list = []
+        #: Why the mailbox could not be read, when it could not be.  Kept
+        #: apart from the day's own errors for the reason the tracker's and
+        #: the calendar's are: an unreadable mailbox is not the day failing.
+        self.mail_error: str | None = None
         # The calendar: read-only, for whichever day is shown, and equally
         # optional.  A board with no accounts configured is an ordinary board.
         self.calendar_config = ical.load_config()
@@ -1123,6 +1170,7 @@ class TaskApp(App[None]):
         # its own path entirely, so a store that is slow or unreachable does
         # not decide whether the day's events are read.
         self.call_from_thread(self.load_calendar)
+        self.call_from_thread(self.load_mail)
         try:
             if self.client is None:
                 self.client = SingularityClient()
@@ -1223,7 +1271,12 @@ class TaskApp(App[None]):
         """
         config = self.calendar_config
         day = self.position
-        if config is None or isinstance(day, Bucket):
+        # Asked positively -- "is this a day" rather than "is this a bucket".
+        # The negative form was a bug the moment a third kind of position
+        # existed: the mail view is not a Bucket, so it fell through here and
+        # the calendar was asked for the events of something that is not a
+        # date.
+        if config is None or not isinstance(day, date):
             self.call_from_thread(self.clear_calendar)
             return
         try:
@@ -1478,6 +1531,110 @@ class TaskApp(App[None]):
         """Whether a row came from the calendar rather than the board."""
         return bool(task is not None and task.raw.get(EVENT_MARK))
 
+    # -- the mailbox -------------------------------------------------------
+
+    @property
+    def shows_mail(self) -> bool:
+        """Whether the shown view is the one mail belongs to.
+
+        The inbox: the board's queue of things that have arrived and not been
+        decided about, which is what mail read daily is.  Not a view of its
+        own -- see design.md, where the reasoning that first gave it one is
+        recorded along with why it was wrong.
+        """
+        return self.position is Bucket.INBOX
+
+    @work(exclusive=True, thread=True, group="mail")
+    def load_mail(self) -> None:
+        """Read the mailbox, off the UI thread and off the day's path.
+
+        Its own worker for the reasons the tracker's and the calendar's are:
+        a mailbox can be large, and a day must not wait for it, nor be
+        reported as failing when it is the mailbox that could not be read.
+        """
+        config = self.mail_config
+        if config is None:
+            return
+        try:
+            found = mail.threads(mail.read(config))
+        except mail.MailboxUnreadable as exc:
+            self.call_from_thread(self.mail_failed, str(exc))
+            return
+        self.call_from_thread(self.mail_loaded, found)
+
+    def mail_loaded(self, found: list) -> None:
+        """Take what the mailbox held, and stop saying it was unreadable."""
+        was = self.mail_error
+        self.mail_threads = found
+        self.mail_error = None
+        if was and self._notice and self._notice[0] == was:
+            self._notice = None
+        self.repaint()
+
+    def mail_failed(self, message: str) -> None:
+        """Remember that the mailbox is unreadable, and say so once."""
+        self.mail_threads = []
+        if self.mail_error == message:
+            return
+        self.mail_error = message
+        self.repaint()
+        self.notice(message, True)
+
+    def _mail_when(self, stamp: float) -> str:
+        """When a message arrived, in the room the column leaves.
+
+        The time alone for today, the date for anything older -- which is
+        what every mail client does, and what fits: a date and a time
+        together is twelve cells against the eleven this column has, and
+        would be cut just where the minutes are.
+        """
+        when = datetime.fromtimestamp(stamp, self.tz)
+        if when.date() == datetime.now(self.tz).date():
+            return when.strftime("%H:%M")
+        return when.strftime("%d %b")
+
+    def mail_rows(self) -> list[Task]:
+        """The mailbox's threads, as rows the board can draw.
+
+        Only in the mail view: a thread belongs to no day, and repeating it
+        under every date would say it did.  The marker is what every write
+        checks before refusing.
+        """
+        if not self.shows_mail:
+            return []
+        rows = []
+        for thread in self.mail_threads:
+            newest = thread.newest
+            rows.append(Task({
+                "id": f"{MAIL_PREFIX}{newest.ident}",
+                "title": newest.subject or "(no subject)",
+                "checked": EMPTY,
+                "deferred": False,
+                "useTime": False,
+                MAIL_MARK: True,
+                MAIL_SENDER: newest.sender,
+                MAIL_COUNT: thread.count,
+                MAIL_WHEN: newest.when.timestamp(),
+                # Only the newest message's text.  A run of notifications
+                # about one thing carries one near-identical address per
+                # message -- four builds of a job give four console
+                # addresses differing in a number -- and offering every one
+                # would ask a person to choose between things they cannot
+                # tell apart.  The newest is the one wanted.
+                MAIL_TEXT: newest.text,
+                # Where a task keeps its note, so the detail area shows what
+                # the message says with no knowledge of mail at all -- the
+                # same path a calendar event's description takes.  The
+                # newest message's, consistent with the links offered.
+                "note": newest.body,
+            }))
+        return rows
+
+    @staticmethod
+    def is_mail(task: Task | None) -> bool:
+        """Whether a row came from the mailbox rather than the board."""
+        return bool(task is not None and task.raw.get(MAIL_MARK))
+
     # -- writes ------------------------------------------------------------
 
     def openable(self, task: Task) -> list[tuple[str, str]]:
@@ -1498,7 +1655,16 @@ class TaskApp(App[None]):
         """
         config = self.tracker_config
         found: list[tuple[str, str]] = []
-        for text in (task.raw.get("title") or "", task.note_text):
+        # A mail row's candidates come from its newest message, which the
+        # row carries for the purpose.  Not from the whole thread: a run of
+        # notifications about one thing holds one near-identical address per
+        # message, and offering all of them would ask a person to choose
+        # between things they cannot tell apart.
+        texts = (
+            (task.raw.get(MAIL_TEXT) or "",) if self.is_mail(task)
+            else (task.raw.get("title") or "", task.note_text)
+        )
+        for text in texts:
             if config is not None:
                 for key in config.keys_in(text):
                     found.append((key, config.issue_url(key)))
@@ -1538,6 +1704,16 @@ class TaskApp(App[None]):
         afterwards offers a choice that was never on the table.  Both callers
         share it so the two refusals cannot come to be worded differently.
         """
+        if self.is_mail(task):
+            # The same one place again: the board reads the mailbox and does
+            # not own it, so a change it showed would be a change that
+            # happened nowhere.
+            self.notice(
+                f"{_mail_who(task.raw.get(MAIL_SENDER) or '') or 'That message'} "
+                f"lives in the mailbox · not editable here",
+                True,
+            )
+            return True
         if self.is_event(task):
             # The board can read the calendar and nothing more, so a change
             # it showed would be a change that never happened anywhere.
@@ -1808,7 +1984,8 @@ class TaskApp(App[None]):
         # before the day's own fetch returns; wiping its message here would
         # mean an unreadable calendar was never once seen.  Each source
         # takes its own message down when it recovers.
-        standing = {m for m in (self.calendar_error, self.tracker_error) if m}
+        standing = {m for m in (self.calendar_error, self.tracker_error,
+                                self.mail_error) if m}
         if not (self._notice and self._notice[0] in standing):
             self._notice = None
         self.reference = listing.reference
@@ -1844,7 +2021,7 @@ class TaskApp(App[None]):
         This is the one place that decides, so the fetched view and the
         repainted one cannot disagree about it.
         """
-        return not isinstance(self.position, Bucket)
+        return isinstance(self.position, date)
 
     def next_order(self) -> int:
         """A stored order past every task in the shown day."""
@@ -1934,7 +2111,7 @@ class TaskApp(App[None]):
         would say it was scheduled for each of them.
         """
         return (
-            not isinstance(self.position, Bucket)
+            isinstance(self.position, date)
             and self.position == datetime.now(self.tz).date()
         )
 
@@ -2048,6 +2225,14 @@ class TaskApp(App[None]):
         # unfinished work ends.
         self.shown_events = len(events)
         tasks = self.place_issues(self.place_events(tasks, events), issues)
+        # Mail leads the inbox's tasks: it is time-ordered and perishable
+        # where an undated task waits indefinitely, so the daily processing
+        # starts at the top rather than after a scroll.  Prepended, never
+        # sorted in, so the tasks keep exactly the order they had alone.
+        mails = self.mail_rows()
+        self.shown_mail = len(mails)
+        self.shown_messages = sum(t.raw.get(MAIL_COUNT, 1) for t in mails)
+        tasks = mails + tasks
         self.tasks = tasks
         self.past_due = (
             sum(
@@ -2077,7 +2262,8 @@ class TaskApp(App[None]):
         self._ended_shown = self.ended_count()
         self.update_daybar()
         self.update_detail()
-        own = [t for t in tasks if not (self.is_tracker(t) or self.is_event(t))]
+        own = [t for t in tasks
+               if not (self.is_tracker(t) or self.is_event(t) or self.is_mail(t))]
         done = sum(1 for t in own if t.done)
         # The task count is what the board manages; issues are counted
         # beside it, never folded into it.
@@ -2086,6 +2272,11 @@ class TaskApp(App[None]):
             # Not named for any one state: more than one may be shown, and
             # which state each issue is in is on its own row.
             bits.append(f"{self.shown_issues} tracked")
+        if self.shown_mail:
+            # Both queues, side by side: the size of each is visible without
+            # counting rows, and neither is folded into the other.
+            bits.append(f"{self.shown_mail} thread(s)")
+            bits.append(f"{self.shown_messages} message(s)")
         if self.shown_events:
             # Counted beside the tasks rather than among them: the board
             # manages the tasks and only reports these.
@@ -2230,6 +2421,25 @@ class TaskApp(App[None]):
                 self.shortened(escape(task.raw.get("title") or ""), self.title_width),
                 self.shortened(
                     f"[dim]{escape(task.raw.get(TRACKER_PROJECT) or '')}[/dim]",
+                    _PROJECT_WIDTH,
+                ),
+            )
+        if self.is_mail(task):
+            # Its own mark, and the sender where a task names its project --
+            # who sent it is what places a message.  The count of messages
+            # behind the thread goes with the subject, being about the
+            # subject rather than a column of its own.
+            count = task.raw.get(MAIL_COUNT) or 1
+            subject = escape(task.raw.get("title") or "")
+            if count > 1:
+                subject = f"{subject} [dim]({count})[/dim]"
+            return (
+                "",
+                MAIL_ROW_MARK,
+                self._mail_when(task.raw.get(MAIL_WHEN) or 0),
+                self.shortened(subject, self.title_width),
+                self.shortened(
+                    f"[dim]{escape(_mail_who(task.raw.get(MAIL_SENDER) or ''))}[/dim]",
                     _PROJECT_WIDTH,
                 ),
             )
@@ -2440,7 +2650,7 @@ class TaskApp(App[None]):
         picked would be arbitrary -- so the movement does nothing and `t` is
         the way back to the calendar.
         """
-        if isinstance(self.position, Bucket):
+        if not isinstance(self.position, date):
             self.set_status(f"{self.position.label} has no days · press t for today")
             return
         self._go(self.position + timedelta(days=days))
@@ -2459,6 +2669,7 @@ class TaskApp(App[None]):
 
     def action_someday(self) -> None:
         self._go(Bucket.SOMEDAY)
+
 
     def action_refresh(self) -> None:
         self.projects = {}
@@ -3057,6 +3268,9 @@ class TaskApp(App[None]):
         if self.is_event(task):
             self.hand_over(task.raw.get(EVENT_URL), task)
             return
+        # A mail row offers what its newest message points at, collected the
+        # same way a task's candidates are -- so one opens, several ask, and
+        # none says so, exactly as for a task.
         choices = self.openable(task)
         if len(choices) <= 1:
             self.hand_over(choices[0][1] if choices else None, task)
@@ -3072,7 +3286,8 @@ class TaskApp(App[None]):
         if not url:
             # Named for what the row is: "that task" would be wrong on two
             # of the three kinds of row this key now serves.
-            kind = "event" if self.is_event(task) else "task"
+            kind = ("event" if self.is_event(task)
+                    else "thread" if self.is_mail(task) else "task")
             self.set_status(f"That {kind} has no link")
             return
         self.open_url(url)
