@@ -5,33 +5,115 @@ context: |
     We use conventional commits
     Domain: todo app
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+    The board draws rows from four sources -- the task store (the only one it
+    writes freely), the issue tracker, the calendar, and a maildir.  A row from
+    a source carries a marker, is drawn and counted like any other row, and
+    refuses the writes that would change it.
+
+    Tests are not in the repo.  They are standalone scripts in the session's
+    scratchpad, run one at a time with the venv's Python, each printing its own
+    checks and an "N/M checks passed" line.  Some drive the UI through
+    Textual's Pilot against a stubbed store; others talk to the real account.
 
 # Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+    tasks:
+        - >-
+            A verification task must name its instrument -- which suite, and
+            whether it runs against a stub or the live account -- and say what
+            would count as passing.  "Verify it works" cannot be checked off
+            honestly.
+        - >-
+            Keep verification against a stub separate from verification
+            against the live account.  The two fail for different reasons and
+            are re-run differently.
+        - >-
+            Where a task reads a fixture the code under test can now write to,
+            say that the fixture is copied per run.
 
 # Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+operations:
+    apply:
+        guidance:
+            - >-
+                Do not run every suite back to back.  The task store answers
+                HTTP 429 ThrottlerException under that load and stays
+                throttled for tens of minutes, after which every live suite
+                fails for a reason that has nothing to do with the change.
+                Run the stubbed suites as a batch; pace the live ones about
+                25 seconds apart.
+            - >-
+                Count throttle errors in a run and report them, so a quota
+                failure is never read as a regression.  A live suite that
+                failed early having passed alone minutes before is a throttle,
+                not a bug.
+            - >-
+                Re-run a single live-suite failure before believing it.  These
+                suites contend over one account, and several are known to fail
+                once and pass clean immediately after.
+            - >-
+                Before calling any suite failure a regression, run that suite
+                against a git worktree at HEAD.  Identical failures before and
+                after mean pre-existing, and several suites here fail that way.
+            - >-
+                Freeze the product code for a verification run and confirm it
+                with shasum afterwards.  A run spanning an edit proves nothing
+                about either version.  Un-check any task whose verification
+                predates a later edit to the code it verified.
+            - >-
+                The regression instrument is a capture of the board from a
+                worktree at HEAD and one from the working tree, taken the same
+                day minutes apart and compared key by key.  Lists that only
+                gain entries are outside additions; a regression removes or
+                reorders.
+            - >-
+                Refresh the day-guarded baseline before starting a change,
+                never after.  A baseline taken afterwards agrees with whatever
+                the change did, and one from another day silently compares two
+                different days.
+            - >-
+                Live suites name the tasks they create with a zz- prefix and
+                delete them in a finally.  Check the account for leaks after a
+                run -- a crashed suite leaves tasks behind, and they surface
+                later as a phantom regression in the counts.
+            - >-
+                Copy a fixture per run rather than reading the shipped one in
+                place, as soon as the code under test can write to it.  A key
+                that writes turned a read-only sample maildir into a writable
+                one, and a suite rewrote the fixture every other suite measures
+                against.
+            - >-
+                A suite comparing the board's rows to a store fetch must
+                exclude rows from the other sources first.  The store was
+                never asked about a calendar event, a tracker issue or a mail
+                thread, so counting them makes the suite fail by exactly their
+                number.
+            - >-
+                Report calendar and mailbox data as counts only.  Never print
+                or commit a subject, sender, body, event title or folder name.
+            - >-
+                Anchor every scripted edit and assert the anchor is present
+                before writing.  A silent no-op replace once left a refusal
+                unimplemented while the parse check still passed, and the key
+                went on performing a real write.
+    archive:
+        guidance:
+            - >-
+                Merge a spec delta on parsed requirement blocks, never by
+                string offsets.  Computing an insertion point before removals
+                shift the text corrupted this spec once, dropping one
+                requirement and duplicating scenarios into another -- and
+                validate passed on the corrupted file.
+            - >-
+                Before writing a merged spec, assert that splitting and
+                rejoining the original is byte-identical, that no scenario was
+                lost, and that every untouched requirement is unchanged.  That
+                check caught a splitter quietly losing 3 of 104 requirements.
+            - >-
+                Stage explicitly with `git add -- '*.py' openspec`.  Never
+                `git add -A` -- the scratchpad, the captures and .env sit
+                nearby.
+            - >-
+                Grep the staged diff for scrubbed identifiers, project keys and
+                credentials before committing.  A real tracker key was removed
+                from this history with filter-repo and must not return.
