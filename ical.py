@@ -109,6 +109,19 @@ class Event:
         """When it starts, as a row shows it."""
         return "all-day" if self.all_day else self.start.strftime("%H:%M")
 
+    def ended_by(self, moment: _dt.datetime) -> bool:
+        """Whether this event is over by then.
+
+        The end, not the start.  An event that has begun and not finished is
+        one there is still a chance of joining, and calling it past would say
+        there was not.
+
+        An all-day event ends when its day does, which is what the calendar
+        stores for it, so a day already behind reads as over and the day
+        itself does not.
+        """
+        return self.end <= moment
+
     def sort_key(self) -> tuple:
         """Where it falls among a day's rows.
 

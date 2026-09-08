@@ -84,6 +84,10 @@ EVENT_MINUTES = "_event_minutes"
 #: own key beside the tracker's, so the action that opens a link reads it the
 #: same way and the parsing stays off the keystroke.
 EVENT_URL = "_event_url"
+#: When the event ends, as a timestamp.  Carried so a row can be drawn
+#: against the present without the calendar being read again -- the fetch
+#: already knows it, and asking again every minute would be absurd.
+EVENT_ENDS = "_event_ends"
 #: Prefixes an event's row id.  Built from the account, the time and the
 #: title rather than the framework's identifier, which repeats across every
 #: occurrence of a repeating event and would make them one row.
@@ -125,6 +129,10 @@ TAG_SETTLE_SECONDS = 2.5
 #: rather than impossible, and the board must not settle for rare: it reads
 #: back and sends again.  Two extra attempts, spaced by the same wait.
 TAG_REMOVAL_ATTEMPTS = 3
+#: How often the board looks at whether an event has ended.  A minute,
+#: because a row's time is drawn to the minute and a busier timer could not
+#: show anything this one misses.
+ELAPSED_CHECK_SECONDS = 60
 #: How wide the when-column is.  It carries a tracker row's state and a
 #: task's own start time or how overdue it is, so it has to hold the widest
 #: of both; eleven cells is what the longest state label needs, and the
@@ -743,7 +751,11 @@ class Help(ModalScreen[None]):
   o opens the address a meeting carries — taken from
   where the calendar put it, its location or its
   description — and the description is shown below the
-  list while the event is selected.
+  list while the event is selected. An event whose end
+  has passed is dimmed, so a day reads as what is left
+  of it; one that has started but not finished is not,
+  since there is still a chance of joining. The clock
+  top right is the current time.
 
 [b]Other[/b]
   ?                  this help
@@ -846,6 +858,19 @@ class TaskApp(App[None]):
     Screen { layers: base overlay; }
 
     #body { height: 1fr; }
+
+    /* The framework draws the header as $foreground on $panel.  In the blue
+       theme those are the palette's yellow on its grey -- #FFFF55 on
+       #AAAAAA, a measured 2.18:1, which is not readable; the dark theme's
+       #141414 gives 17.27:1 and is fine.  A deliberate departure from using
+       the declared panel colour here, recorded like the others: $surface
+       measures 16.32:1 on the dark theme and 10.52:1 on the blue, so the
+       header reads in both.  This was always true of the title; the clock is
+       what made it worth fixing, having put something there worth reading. */
+    Header {
+        background: $surface;
+        color: $foreground;
+    }
 
     #daybar {
         height: 1;
@@ -982,6 +1007,10 @@ class TaskApp(App[None]):
         self._fetched = False
         #: How many calendar events the shown view holds.
         self.shown_events = 0
+        #: How many of them were already over when the rows were last drawn.
+        #: What the timer compares against, so a redraw happens on a change
+        #: and not on a schedule.
+        self._ended_shown = 0
         #: How many tracker issues the shown view holds.
         self.shown_issues = 0
         self.reference: datetime | None = None
@@ -1046,7 +1075,12 @@ class TaskApp(App[None]):
     # -- layout ------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        # The clock is the framework's own: it owns its interval, refreshes
+        # itself, and does not touch the table to do it.  To the minute --
+        # seconds would move several times a second in the corner of the eye
+        # for a precision nothing here acts on, and every other time this
+        # board shows is to the minute.
+        yield Header(show_clock=True, time_format="%H:%M")
         with Vertical(id="body"):
             yield Static("", id="daybar")
             # No zebra striping: it paints every other row a lighter shade,
@@ -1066,6 +1100,10 @@ class TaskApp(App[None]):
         # Registering also puts both in the command palette's theme picker,
         # so switching needs no binding of its own.
         self.theme = TURBO_DARK.name
+        # How often to look at whether an event has ended.  A minute is the
+        # granularity the rows are drawn to, so a shorter interval could not
+        # show anything a longer one missed.
+        self.set_interval(ELAPSED_CHECK_SECONDS, self.recheck_elapsed)
         table = self.query_one(DataTable)
         table.add_column("", key="mark_green", width=1)
         table.add_column("", key="mark", width=2)
@@ -1276,6 +1314,7 @@ class TaskApp(App[None]):
                 # event's description with no knowledge of events at all.
                 "note": event.notes,
                 EVENT_MARK: True,
+                EVENT_ENDS: event.end.timestamp(),
                 EVENT_URL: address,
                 EVENT_ACCOUNT: event.account,
                 EVENT_CALENDAR: event.calendar,
@@ -1414,6 +1453,26 @@ class TaskApp(App[None]):
             manual=self.orders_manually, green=self.green_tag,
         )
 
+    def has_ended(self, task: Task) -> bool:
+        """Whether this row's event is already over.
+
+        Against the present rather than against `reference`: that instant is
+        the fetch's, and is absent on every day but today, so a rule measured
+        by it would simply never fire elsewhere.  The two are deliberately
+        different clocks answering different questions -- see design.md.
+        """
+        ends = task.raw.get(EVENT_ENDS)
+        return ends is not None and ends <= datetime.now(self.tz).timestamp()
+
+    def ended_count(self) -> int:
+        """How many shown rows are events already over.
+
+        What the timer compares.  Cheap, and enough: the set only ever grows
+        as time passes within one fetch, so a change in its size is a change
+        in the set.
+        """
+        return sum(1 for t in self.tasks if self.is_event(t) and self.has_ended(t))
+
     @staticmethod
     def is_event(task: Task | None) -> bool:
         """Whether a row came from the calendar rather than the board."""
@@ -1452,6 +1511,22 @@ class TaskApp(App[None]):
             seen.add(url)
             unique.append((shown, url))
         return unique
+
+    def recheck_elapsed(self) -> None:
+        """Redraw when an event has fallen behind the present, and not otherwise.
+
+        A timer that redrew on every tick would move the list under a
+        person's hands fifty-nine times out of sixty for nothing, so this
+        compares how many shown events are over against how many were and
+        leaves the board alone when that is the same.
+
+        Nothing is fetched to decide it: the ends are already on the rows.
+        """
+        now_ended = self.ended_count()
+        if now_ended == self._ended_shown:
+            return
+        self._ended_shown = now_ended
+        self.repaint()
 
     def refuse_foreign(self, task: Task | None) -> bool:
         """Say a row is not the board's to change, and report having said so.
@@ -1997,6 +2072,9 @@ class TaskApp(App[None]):
             self._selected_id = tasks[index].id
         else:
             self._selected_id = None
+        # Recorded after the rows are built, so the timer compares what is
+        # on screen rather than what was on screen a fetch ago.
+        self._ended_shown = self.ended_count()
         self.update_daybar()
         self.update_detail()
         own = [t for t in tasks if not (self.is_tracker(t) or self.is_event(t))]
@@ -2159,11 +2237,21 @@ class TaskApp(App[None]):
             # Its own mark, so read-only is visible rather than found out by
             # pressing a key; and the calendar it came from where a task
             # names its project, because that is what places the event.
+            #
+            # An event already over recedes.  Dim rather than a colour, and
+            # measured rather than assumed: with the row cursor on it, a dim
+            # cell keeps its dimness while its colours are replaced, where a
+            # coloured cell loses the colour outright -- the trap
+            # `late_colour` documents.  So this is the one expression that
+            # survives being the selected row.  Not struck out: nothing about
+            # an event was completed.
+            over = self.has_ended(task)
+            name = escape(task.raw.get("title") or "")
             return (
                 "",
                 EVENT_ROW_MARK,
                 _event_label(task.raw.get(EVENT_MINUTES)),
-                self.shortened(escape(task.raw.get("title") or ""), self.title_width),
+                self.shortened(f"[dim]{name}[/dim]" if over else name, self.title_width),
                 self.shortened(
                     f"[dim]{escape(task.raw.get(EVENT_CALENDAR) or '')}[/dim]",
                     _PROJECT_WIDTH,
