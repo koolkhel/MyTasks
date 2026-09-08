@@ -74,12 +74,19 @@ TRACKER_PREFIX = "yt:"
 TRACKER_ROW_MARK = "▸"
 #: Raw keys marking a row as the mailbox's.  The same arrangement the tracker
 #: and the calendar use, for the same reason: a row carrying these is drawn
-#: and counted like any other and refuses every write.
+#: and counted like any other and refuses every write -- every write that
+#: would change it, that is.  Promoting reads one and creates a task, which
+#: is the one key a mail row answers.
 MAIL_MARK = "_mail"
 MAIL_SENDER = "_mail_sender"
 MAIL_COUNT = "_mail_count"
 MAIL_WHEN = "_mail_when"
 MAIL_TEXT = "_mail_text"
+#: The thread's own messages, so a promotion can mark them read and an undo
+#: can mark them unread again.  The one raw value on this board that is not a
+#: plain scalar: nothing else can find a message's file, since an identity is
+#: a header and the same header may sit in two folders.
+MAIL_MESSAGES = "_mail_messages"
 #: Prefixes a mail row's id.  Built from the newest message's identity, which
 #: is unique within the mailbox.
 MAIL_PREFIX = "mail:"
@@ -726,8 +733,8 @@ class Help(ModalScreen[None]):
   t                  jump to today
   i                  inbox — tasks with no date, and the
                      mail awaiting a decision above them.
-                     Mail is read-only here; o opens what
-                     a thread points at
+                     o opens what a thread points at;
+                     f turns it into a task on today
   s                  someday — tasks put off
   r                  reload from the server
   w                  hide the work project's tasks,
@@ -763,7 +770,27 @@ class Help(ModalScreen[None]):
                      too, from its title or its note;
                      where a task offers more than one,
                      o asks which
+  f                  turn the selected mail thread into a
+                     task on today, carrying what the
+                     message said in its note. The thread's
+                     messages are marked read, so the row
+                     leaves the inbox; u puts both back
   backspace          delete for good (asks first)
+
+[b]Mail awaiting a decision[/b]
+  The inbox also lists what the folders you configure
+  hold, marked @ and newest first, each showing who it
+  is from and how many messages are in the thread. Only
+  unread mail: a message dealt with, here or in whatever
+  program you read mail with, is out of the queue.
+  What the newest message says is shown below the list,
+  HTML rendered as text, and o opens what it points at.
+  Every key that changes a task refuses a mail row —
+  except f, which makes one from it. That is the only
+  thing the board writes to the mailbox: the messages of
+  a promoted thread are marked read, by the rename a
+  maildir records a flag with. Nothing is moved, removed
+  or altered.
 
 [b]Issues from the tracker[/b]
   Today lists the issues assigned to you in the
@@ -878,6 +905,12 @@ class Undoable:
     applied: int = 0
     reason: str = ""
     note: str = ""
+    #: Where reversing an action is not a matter of putting fields back.
+    #: Called with the tasks this entry wrote, keyed by the id they hold
+    #: now, and is then the whole of the undo.  Creating a task cannot be
+    #: reversed by restoring anything -- there was nothing before it -- so
+    #: an action that creates and can still be taken back needs this.
+    undo_action: "Callable[[dict[str, Task]], bool] | None" = None
 
     @property
     def reversible(self) -> bool:
@@ -1008,6 +1041,7 @@ class TaskApp(App[None]):
         Binding(keys("p"), "project", "Project"),
         Binding(keys("g"), "green", "Green"),
         Binding(keys("o"), "open_link", "Link"),
+        Binding(keys("f"), "promote", "To task"),
         # Both keys, and deliberately NOT priority: a Mac laptop has no
         # forward-delete, so its Delete key arrives as backspace, while an
         # external keyboard sends delete.  A priority binding would take
@@ -1088,8 +1122,9 @@ class TaskApp(App[None]):
         #: apart from the day's own errors: an unreachable tracker must
         #: never be reported as the day failing to load.
         self.tracker_error: str | None = None
-        # The mailbox: read-only, its own view, and equally optional.  A
-        # board with none configured is an ordinary board.
+        # The mailbox: read except for the seen flag a promotion sets, shown
+        # in the inbox, and equally optional.  A board with none configured
+        # is an ordinary board.
         self.mail_config = mail.load_config()
         self.mail_threads: list = []
         #: Why the mailbox could not be read, when it could not be.  Kept
@@ -1273,9 +1308,9 @@ class TaskApp(App[None]):
         day = self.position
         # Asked positively -- "is this a day" rather than "is this a bucket".
         # The negative form was a bug the moment a third kind of position
-        # existed: the mail view is not a Bucket, so it fell through here and
-        # the calendar was asked for the events of something that is not a
-        # date.
+        # existed: one that was neither a Bucket nor a date fell through
+        # here, and the calendar was asked for the events of something that
+        # is not a day.
         if config is None or not isinstance(day, date):
             self.call_from_thread(self.clear_calendar)
             return
@@ -1596,9 +1631,10 @@ class TaskApp(App[None]):
     def mail_rows(self) -> list[Task]:
         """The mailbox's threads, as rows the board can draw.
 
-        Only in the mail view: a thread belongs to no day, and repeating it
+        Only in the inbox: a thread belongs to no day, and repeating it
         under every date would say it did.  The marker is what every write
-        checks before refusing.
+        that would change a row checks before refusing -- promoting is the
+        one key that reads it and answers.
         """
         if not self.shows_mail:
             return []
@@ -1622,6 +1658,10 @@ class TaskApp(App[None]):
                 # would ask a person to choose between things they cannot
                 # tell apart.  The newest is the one wanted.
                 MAIL_TEXT: newest.text,
+                # Every message in the thread, not only the newest: a
+                # promotion takes the whole thread out of the queue, so it
+                # is the whole thread that must be marked.
+                MAIL_MESSAGES: thread.messages,
                 # Where a task keeps its note, so the detail area shows what
                 # the message says with no knowledge of mail at all -- the
                 # same path a calendar event's description takes.  The
@@ -1705,9 +1745,11 @@ class TaskApp(App[None]):
         share it so the two refusals cannot come to be worded differently.
         """
         if self.is_mail(task):
-            # The same one place again: the board reads the mailbox and does
-            # not own it, so a change it showed would be a change that
-            # happened nowhere.
+            # The same one place again: the board does not own the message,
+            # so a change to it shown here would be a change that happened
+            # nowhere.  Promoting does not come through here -- it creates a
+            # task rather than changing the row, and marks the thread read
+            # by its own path.
             self.notice(
                 f"{_mail_who(task.raw.get(MAIL_SENDER) or '') or 'That message'} "
                 f"lives in the mailbox · not editable here",
@@ -1747,6 +1789,7 @@ class TaskApp(App[None]):
         subject: str | None = None,
         undo_reason: str | None = None,
         undo_note: str = "",
+        undo_action: "Callable[[dict[str, Task]], bool] | None" = None,
         record: bool = True,
     ) -> None:
         """Show a write's outcome at once, then queue it for the API.
@@ -1766,7 +1809,7 @@ class TaskApp(App[None]):
         if record:
             self.remember(
                 group, label, subject or task.title, task, patch,
-                undo_reason, undo_note,
+                undo_reason, undo_note, undo_action,
             )
         pending = Pending(
             task_id=task.id,
@@ -1816,6 +1859,7 @@ class TaskApp(App[None]):
         patch: dict[str, Any],
         reason: str | None,
         note: str,
+        undo_action: "Callable[[dict[str, Task]], bool] | None" = None,
     ) -> None:
         """Note what a write is about to replace, so it can be put back.
 
@@ -1828,8 +1872,14 @@ class TaskApp(App[None]):
                 break
         else:
             entry = Undoable(group=group, label=label, subject=subject,
-                             reason=reason or "", note=note)
+                             reason=reason or "", note=note,
+                             undo_action=undo_action)
             self._undo.append(entry)
+        if undo_action is not None:
+            # The reversal knows what to do with the task; there are no
+            # previous values, because there was no task before this.
+            entry.tasks[task.id] = task
+            return
         if reason:
             # Nothing to put back; the entry exists only to say so.
             return
@@ -1936,6 +1986,16 @@ class TaskApp(App[None]):
         self._draining.add(new)
         if self._selected_id == key:
             self._selected_id = new
+        # An undo entry filed under the placeholder would reach an id that
+        # never existed.  Only an action carrying its own reversal can be
+        # undone after creating anything, so this had nothing to correct
+        # until one existed.
+        for entry in self._undo:
+            if key in entry.tasks:
+                entry.tasks[new] = result
+                del entry.tasks[key]
+            if key in entry.previous:
+                entry.previous[new] = entry.previous.pop(key)
         self.repaint()
         return new
 
@@ -2835,6 +2895,19 @@ class TaskApp(App[None]):
         # otherwise: an undo reaches the task it wrote even after the person
         # has navigated somewhere that does not hold it.
         known = {t.id: t for t in self._base}
+        if entry.undo_action is not None:
+            # An action that created something cannot be reversed by putting
+            # fields back -- there was nothing before it to put back.  It
+            # carries its own reversal, and that is the whole of the undo.
+            wrote = {
+                task_id: known.get(task_id) or task
+                for task_id, task in entry.tasks.items()
+            }
+            if not entry.undo_action(wrote):
+                return
+            note = f" · {entry.note}" if entry.note else ""
+            self.notice(f"Undid: {entry.label.lower()} “{entry.subject}”{note}")
+            return
         restored = 0
         for task_id, fields in entry.previous.items():
             task = known.get(task_id) or entry.tasks.get(task_id)
@@ -3002,6 +3075,133 @@ class TaskApp(App[None]):
                 "if you meant to"
             ),
         )
+
+    def action_promote(self) -> None:
+        """Turn the selected mail thread into a task on today.
+
+        The one place a row from a source becomes the board's own.  Nothing
+        is asked first: the decision that a message is work is the whole of
+        the input, and a dialogue here would make the queue slower to drain
+        than it is worth -- the rename key is one press away for a title
+        somebody else chose.
+
+        Two halves, in this order.  The task is created, and then the
+        thread's messages are marked read so the row leaves the queue by the
+        same rule that put it there.  A task made and not marked shows the
+        row once more, which a person can see and act on; a message marked
+        with no task made is work that has silently left the queue.  Only
+        the first of those is repairable, so the task goes first.
+        """
+        task = self.selected
+        if task is None or self.client is None:
+            return
+        if not self.is_mail(task):
+            self.notice(
+                "f turns a mail thread into a task · "
+                "this row is not one of those",
+                True,
+            )
+            return
+        messages = list(task.raw.get(MAIL_MESSAGES) or ())
+        title = task.title
+        today = datetime.now(self.tz).date()
+        # What the message said, and which message it was.  The body because
+        # a task holding the message is the work where one naming it is a
+        # reminder -- and because the addresses a notification carries are
+        # in its own text, so `o` reaches the build or the issue through the
+        # note with nothing extracted.  The identity so the message can
+        # still be found in the mailbox afterwards.
+        #
+        # Both read off the message rather than off the row's note field,
+        # which happens to hold the same body: what the task carries should
+        # not depend on how the row was drawn.
+        newest = messages[-1] if messages else None
+        body = (newest.body if newest is not None else "").strip()
+        ident = (newest.ident if newest is not None else "").strip()
+        # A bare label is worse than no label, so the identity goes in only
+        # when there is one.
+        parts = [p for p in (body, f"Message-ID: {ident}" if ident else "") if p]
+        note = "\n\n".join(parts)
+        fields: dict[str, Any] = {
+            "start": singularity.iso_z(
+                datetime.combine(today, time.min, tzinfo=self.tz)
+            ),
+            "useTime": False,
+            "note": singularity.note_document(note),
+        }
+        client = self.client
+        config = self.mail_config
+
+        def create(_tid: str) -> Any:
+            # The day's own tasks, fetched here rather than read off the
+            # screen: mail is shown in the inbox and the task goes to today,
+            # so the shown view's orders say nothing about where this
+            # belongs.  On the write thread, so the row is on screen before
+            # this runs.
+            try:
+                held = client.tasks_for_day(today).tasks
+                order = max(
+                    (t.schedule_order for t in held),
+                    default=0,
+                ) + singularity.ORDER_STEP
+            except Exception:
+                # A day that could not be read is not a reason to lose the
+                # task.  The API's own default is 0, the lowest there is.
+                order = singularity.ORDER_STEP
+            return client.create_task(title, scheduleOrder=order, **fields)
+
+        placeholder = Task({"id": f"tmp:{uuid.uuid4()}", "title": title, **fields})
+        self._base = self._base + [placeholder]
+
+        def reverse(wrote: dict[str, Task]) -> bool:
+            """Delete the task and put the thread back in the queue."""
+            made = next(iter(wrote.values()), None)
+            if made is None:
+                # Nothing to delete means nothing to reverse.  Said rather
+                # than passed over: the entry has been taken off the stack
+                # by now, so silence would look like a key that did nothing.
+                self.notice(
+                    f"“{title}” is no longer here · nothing to undo there",
+                    True,
+                )
+                return False
+            self.submit_write(
+                "Deleting", made, lambda tid: client.delete_task(tid),
+                removes=True, record=False,
+            )
+            if config is not None and messages:
+                try:
+                    mail.mark_unread(config, messages)
+                except mail.MailboxUnwritable as exc:
+                    self.notice(
+                        f"the task is gone · the message could not be "
+                        f"put back in the queue: {exc}",
+                        True,
+                    )
+                    return False
+                self.load_mail()
+            return True
+
+        self.submit_write(
+            "Promoting",
+            placeholder,
+            create,
+            creates=True,
+            subject=title,
+            undo_action=reverse,
+            undo_note="the thread is back in the inbox",
+        )
+        if config is None or not messages:
+            return
+        try:
+            mail.mark_read(config, messages)
+        except mail.MailboxUnwritable as exc:
+            # The task stands.  Saying so is the whole remedy: the row comes
+            # back at the next read, which is visible and harmless, where
+            # undoing the task would throw away the decision that made it.
+            self.notice(f"“{title}” added · but {exc}", True)
+            return
+        self.load_mail()
 
     @work
     async def action_project(self) -> None:

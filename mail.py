@@ -1,8 +1,13 @@
-"""Read-only access to a mailbox kept on disk.
+"""Access to a mailbox kept on disk, reading it and marking it read.
 
-Only what a queue needs: the messages in a maildir, grouped into the threads
-they belong to.  Nothing here writes -- no flag is set, no message moved,
-renamed or removed, and nothing marked read.
+Only what a queue needs: the unread messages in a maildir, grouped into the
+threads they belong to, and one flag written back.
+
+The one write is marking a message read, which is what takes a thread out of
+the queue once it has become a task.  It is done by renaming the file the way
+every maildir client does, so the bytes of a message are never rewritten: no
+message is moved between folders, removed, or altered in content.  Reading
+writes nothing at all.
 
 The directory is the boundary, deliberately.  Reading a maildir needs no
 credential, no network and no knowledge of any server, and it works with
@@ -82,6 +87,14 @@ class Message:
     #: mistake.
     body: str
     text: str
+    #: The folder it was read from, empty for the mailbox's own inbox.  Kept
+    #: because nothing else on a message can find the file again: the
+    #: identity is a header, and the same header may appear in two folders.
+    folder: str = ""
+    #: Its key within that folder, which is what the mailbox addresses
+    #: messages by.  Searching for the identity instead would be slower and
+    #: still ambiguous for the messages that have none.
+    key: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,6 +124,15 @@ class Thread:
         second do not swap about between redraws.
         """
         return (-self.newest.when.timestamp(), self.newest.ident)
+
+
+class MailboxUnwritable(Exception):
+    """A message could not be marked read.
+
+    Told apart from `MailboxUnreadable` because the two happen at opposite
+    moments and mean opposite things to a person: one is a queue that cannot
+    be shown, the other a task that was made and a row that will come back.
+    """
 
 
 def load_config(env_path: str | os.PathLike[str] | None = None) -> Config | None:
@@ -285,7 +307,12 @@ def _when(raw: str | None) -> datetime:
 
 
 def read(config: Config) -> list[Message]:
-    """Every message in the mailbox.
+    """Every unread message in the mailbox.
+
+    Unread, because a queue is what has not been dealt with.  A message
+    already marked read has been dealt with -- here, or in whatever program
+    the person reads mail with -- and showing it again would make the queue a
+    list of everything instead.
 
     A message that cannot be parsed is passed over rather than taking the
     others with it: one malformed mail in a corporate inbox is ordinary, and
@@ -307,10 +334,10 @@ def read(config: Config) -> list[Message]:
     # The mailbox's own inbox, then each folder named.  A folder that is not
     # there is reported rather than passed over: an empty queue and a
     # misspelt folder name look identical on screen and mean the opposite.
-    reading = [box]
+    reading = [("", box)]
     for name in config.folders:
         try:
-            reading.append(box.get_folder(name))
+            reading.append((name, box.get_folder(name)))
         except _mailbox.NoSuchMailboxError as exc:
             raise MailboxUnreadable(
                 f"no folder named {name} in the mailbox"
@@ -319,13 +346,31 @@ def read(config: Config) -> list[Message]:
             raise MailboxUnreadable(f"the folder {name} could not be read") from exc
 
     found = []
-    for folder in reading:
-        found.extend(_messages(folder))
+    for name, folder in reading:
+        found.extend(_messages(folder, name))
     return found
 
 
-def _messages(box) -> list[Message]:
-    """Every message in one folder, skipping any that cannot be parsed."""
+def _folder_path(config: Config, folder: str) -> str:
+    """Where a folder's own maildir sits on disk.
+
+    The mailbox's own directory for its inbox, and a dot-prefixed
+    subdirectory for a named folder -- the maildir++ layout, which is the
+    same one `Maildir.get_folder` uses to find it.  Worked out here rather
+    than read off the opened mailbox so that nothing depends on the
+    library's private attributes.
+    """
+    return config.path if not folder else os.path.join(config.path, "." + folder)
+
+
+def _messages(box, folder: str = "") -> list[Message]:
+    """Every unread message in one folder, skipping any that cannot be parsed.
+
+    Read messages are skipped here rather than filtered afterwards: parsing
+    a body is the expensive part of reading a mailbox, and a folder holding
+    a year of dealt-with mail would pay it for every message to throw them
+    all away.
+    """
     found = []
     try:
         keys = list(box.keys())
@@ -336,6 +381,17 @@ def _messages(box) -> list[Message]:
             raw = box[key]
         except Exception:
             continue
+        try:
+            # Maildir keeps a message's flags in its filename, and `S` is
+            # the one meaning seen.  A message still in `new/` has no flags
+            # at all, which is what unread looks like there.
+            if "S" in raw.get_flags():
+                continue
+        except Exception:
+            # A message whose flags cannot be read is shown rather than
+            # hidden: an unreadable flag is not evidence of having dealt
+            # with anything.
+            pass
         try:
             subject = _decoded(raw.get("Subject"))
             body = _body(raw)
@@ -350,6 +406,8 @@ def _messages(box) -> list[Message]:
                 answers=(raw.get("In-Reply-To") or "").strip() or None,
                 body=body,
                 text=f"{subject}\n{body}",
+                folder=folder,
+                key=key,
             ))
         except Exception:
             continue
@@ -389,3 +447,98 @@ def threads(messages: list[Message]) -> list[Thread]:
         for group in grouped.values()
     ]
     return sorted(made, key=Thread.sort_key)
+
+
+def mark_read(config: Config, messages: list[Message]) -> None:
+    """Mark each of these messages read, and change nothing else.
+
+    Done by renaming the file, which is how a maildir records flags in the
+    first place: the name gains an `S`, and a message still in the folder's
+    new area moves to its current one because that is where a message that
+    has been looked at belongs.  The bytes are never rewritten, so a
+    message's content cannot differ afterwards -- writing it back through
+    the mailbox library would re-serialize it, which is a change nobody
+    asked for.
+
+    A message already marked read is left alone rather than reported: the
+    point is that it ends up read, and it already is.
+
+    Raises `MailboxUnwritable` if any of them could not be marked, having
+    marked as many as it could.  Partly done is the honest outcome: the
+    thread's row comes back with fewer messages in it, which is visible,
+    where stopping at the first failure would leave the same state and say
+    less about it.
+    """
+    _reflag(config, messages, seen=True)
+
+
+def mark_unread(config: Config, messages: list[Message]) -> None:
+    """Mark each of these messages unread again.
+
+    What undoing a promotion needs: the row returns to the queue by the
+    same rule that took it out.
+
+    The message stays in the folder's current area rather than going back
+    to its new area.  The new area means a message no program has yet
+    touched, and this one has been looked at -- claiming otherwise would be
+    a lie the format is entitled to believe.  Unflagged in the current area
+    is unread, which is what is wanted and all that is wanted.
+    """
+    _reflag(config, messages, seen=False)
+
+
+def _reflag(config: Config, messages: list[Message], seen: bool) -> None:
+    """Add or clear the seen flag on each message, touching nothing else.
+
+    One implementation for both directions, so the two cannot come to
+    disagree about what counts as changing a message.
+    """
+    import mailbox as _mailbox
+
+    if not config.path:
+        raise MailboxUnwritable("no mailbox is configured")
+
+    by_folder: dict[str, list[Message]] = {}
+    for message in messages:
+        by_folder.setdefault(message.folder, []).append(message)
+
+    failed = []
+    for folder, group in by_folder.items():
+        where = _folder_path(config, folder)
+        try:
+            box = _mailbox.Maildir(where, create=False)
+        except OSError:
+            failed.extend(group)
+            continue
+        for message in group:
+            if not message.key:
+                # Nothing to rename: a message the board did not read from a
+                # file of its own cannot be flagged in one.
+                failed.append(message)
+                continue
+            try:
+                raw = box[message.key]
+                flags = set(raw.get_flags())
+                if ("S" in flags) == seen:
+                    continue
+                info = raw.get_info()
+                old = os.path.join(
+                    where, raw.get_subdir(),
+                    message.key + (f":{info}" if info else ""),
+                )
+                flags.add("S") if seen else flags.discard("S")
+                # Flags are recorded in ASCII order, and the current area is
+                # where a message a program has opened belongs -- in both
+                # directions, because unread is not the same as untouched.
+                new = os.path.join(
+                    where, "cur", f"{message.key}:2,{''.join(sorted(flags))}"
+                )
+                if old != new:
+                    os.rename(old, new)
+            except (OSError, KeyError):
+                failed.append(message)
+    if failed:
+        raise MailboxUnwritable(
+            f"{len(failed)} message{'' if len(failed) == 1 else 's'} "
+            f"could not be marked {'read' if seen else 'unread'}"
+        )
