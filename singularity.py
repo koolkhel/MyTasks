@@ -939,25 +939,39 @@ def note_document(text: str | None) -> str:
     return json.dumps([{"insert": text}], ensure_ascii=False)
 
 
-def url_in(text: str | None) -> str | None:
-    """The first address in a piece of text that may be opened, or None.
+def urls_in(text: str | None) -> list[str]:
+    """Every address in a piece of text that may be opened, in order.
 
-    Anchors are considered before plain addresses, and the first match
-    wins.  One scanner rather than one per kind of text: a task's title, a
-    calendar event's location and its description are all ordinary text
-    that happens to be searched for something to hand to the system opener,
-    and what may be handed over must be decided the same way for all of
-    them.
+    One scanner rather than one per kind of text: a task's title, a task's
+    note, a calendar event's location and its description are all ordinary
+    text that happens to be searched for something to hand to the system
+    opener, and what may be handed over must be decided the same way for all
+    of them.  `url_in` is the same walk stopped at the first, so the scheme
+    allowlist is applied in exactly one place -- two scanners that had to
+    agree about what may be launched is the arrangement worth avoiding.
+
+    Anchors are read before plain addresses.  A stored anchor is the
+    deliberate link, where a plain address may be incidental to the words
+    around it; and the plain pass reads the text with the anchors taken out,
+    so an anchor's own address is not also found loose.
     """
     text = text or ""
+    found = []
     for href, _shown in _ANCHOR.findall(text):
         url = openable_url(href)
         if url:
-            return url
-    for found in _BARE_URL.findall(_ANCHOR.sub(" ", text)):
-        url = openable_url(found)
+            found.append(url)
+    for raw in _BARE_URL.findall(_ANCHOR.sub(" ", text)):
+        url = openable_url(raw)
         if url:
-            return url
+            found.append(url)
+    return found
+
+
+def url_in(text: str | None) -> str | None:
+    """The first address in a piece of text that may be opened, or None."""
+    for url in urls_in(text):
+        return url
     return None
 
 

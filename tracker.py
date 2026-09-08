@@ -17,6 +17,7 @@ here.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -63,6 +64,40 @@ class Config:
         if self.projects:
             parts.append(f"project: {', '.join(self.projects)}")
         return " ".join(parts)
+
+    def issue_url(self, key: str) -> str:
+        """The page of an issue named by key.
+
+        The same address `Issue.url` builds, from the same configured
+        location, for an issue nobody reported -- one a task merely mentions.
+        Built here rather than by the caller so that one place knows the
+        shape of a tracker address.
+        """
+        return f"{self.base_url}/issue/{key}"
+
+    def keys_in(self, text: str | None) -> list[str]:
+        """Every mention of a configured project's issue, in order.
+
+        Only the configured projects are recognised.  A pattern for "letters,
+        a dash, digits" also matches a version, a standard or a year --
+        `GPT-4`, `ISO-8601`, `COVID-19` -- and none of those is an issue.
+        Narrowing it to the projects already configured removes that whole
+        class of mistake, needs no setting of its own, and means the
+        recognised set follows the configuration rather than a pattern
+        somebody has to remember to edit.
+
+        A project with no projects configured recognises nothing: there is
+        no list to be a member of.
+        """
+        if not (text and self.projects):
+            return []
+        pattern = "|".join(re.escape(p) for p in self.projects)
+        return [
+            f"{project}-{number}"
+            for project, number in re.findall(
+                rf"\b({pattern})-(\d+)\b", text
+            )
+        ]
 
     def rank(self, state: str) -> int:
         """Where a state sits in the configured order, for sorting."""

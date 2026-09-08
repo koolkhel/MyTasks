@@ -467,6 +467,47 @@ class NoteInput(ModalScreen[str]):
         self.dismiss(None)
 
 
+class LinkPicker(ModalScreen[str]):
+    """Pick which of a task's links to open.
+
+    The shape `ProjectPicker` uses, because it is the same act: a list, the
+    list's own movement, escape to leave.  Two dialogues that ask a person to
+    choose one of several things should not look different from each other.
+
+    Dismisses with the address, so the caller opens what was chosen without
+    having to find it again.
+    """
+
+    BINDINGS = [Binding(keys("escape,q"), "cancel", "Cancel")]
+
+    def __init__(self, title: str, choices: list[tuple[str, str]]):
+        super().__init__()
+        self.title_text = title
+        self.choices = choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self.title_text, id="dialog-title")
+            yield OptionList(
+                # Numbered by position, not keyed: a task can hold more
+                # links than there are comfortable keys, and the list moves
+                # by arrows anyway.
+                *(Option(shown, id=str(i)) for i, (shown, _url) in enumerate(self.choices)),
+                id="link-list",
+            )
+            yield Label("enter to open · esc to leave it", id="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one(OptionList).focus()
+
+    @on(OptionList.OptionSelected)
+    def chose(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.choices[int(event.option.id)][1])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class Confirm(ModalScreen[bool]):
     """Yes/no gate for the destructive actions."""
 
@@ -673,7 +714,12 @@ class Help(ModalScreen[None]):
                      an empty note clears it
   o                  open the task's link in a browser,
                      a tracker issue's page, or the
-                     address a calendar event carries
+                     address a calendar event carries.
+                     A task that mentions one of your
+                     configured projects' issues opens it
+                     too, from its title or its note;
+                     where a task offers more than one,
+                     o asks which
   backspace          delete for good (asks first)
 
 [b]Issues from the tracker[/b]
@@ -857,6 +903,7 @@ class TaskApp(App[None]):
     #dialog-hint { color: $text-muted; }
     #dialog-where { color: $text-muted; padding: 0 0 1 0; }
     #project-list { height: auto; max-height: 12; background: $surface; }
+    #link-list { height: auto; max-height: 12; background: $surface; }
     #help-body { padding: 1 0; }
     #picker-body { padding: 1 0; }
     #focus-title { text-style: bold; padding: 1 0 0 0; }
@@ -1373,6 +1420,38 @@ class TaskApp(App[None]):
         return bool(task is not None and task.raw.get(EVENT_MARK))
 
     # -- writes ------------------------------------------------------------
+
+    def openable(self, task: Task) -> list[tuple[str, str]]:
+        """Everything the task offers to open, as (what to show, address).
+
+        Read from the title and then the note, each scanned for issues the
+        tracker knows and for addresses.  Reading order rather than an order
+        by kind: it needs no rule to be predictable, and the answer does not
+        depend on which kind happens to be looked for first.
+
+        A note is read for exactly what a title is read for.  A rule that
+        found an issue key in a note but not an address, or the reverse,
+        could not be remembered.
+
+        Two candidates resolving to the same address collapse to one, so an
+        issue mentioned both by key and by its own link is offered once
+        rather than twice under different names.
+        """
+        config = self.tracker_config
+        found: list[tuple[str, str]] = []
+        for text in (task.raw.get("title") or "", task.note_text):
+            if config is not None:
+                for key in config.keys_in(text):
+                    found.append((key, config.issue_url(key)))
+            for url in singularity.urls_in(text):
+                found.append((url, url))
+        seen, unique = set(), []
+        for shown, url in found:
+            if url in seen:
+                continue
+            seen.add(url)
+            unique.append((shown, url))
+        return unique
 
     def refuse_foreign(self, task: Task | None) -> bool:
         """Say a row is not the board's to change, and report having said so.
@@ -2863,26 +2942,45 @@ class TaskApp(App[None]):
             )
         )
 
-    def action_open_link(self) -> None:
-        """Hand the selected task's address to the operating system.
+    @work
+    async def action_open_link(self) -> None:
+        """Hand the selected row's address to the operating system.
 
         Routed through the app's own opener rather than the standard library
         so a test can intercept it and assert the address without launching
         a browser -- which is what makes this, rather than the clickable
         span, the path that ships verified.
+
+        A task may offer several things to open, in which case it asks.  A
+        person pressing the key never has to know in advance whether they
+        will be asked: one is opened, several are offered, none is said.
         """
         task = self.selected
         if task is None:
             return
-        # A tracker row carries its own page, and an event the address found
-        # in it, rather than a link written into a title -- so the same key
-        # opens all three with no separate action for any of them.
+        # A tracker row carries its own page and an event the address found
+        # in it, rather than anything written in a title -- so the same key
+        # opens all three with no separate action for any of them.  Neither
+        # ever offers a choice: each has exactly one address, by
+        # construction.
         if self.is_tracker(task):
-            url = task.raw.get(TRACKER_URL)
-        elif self.is_event(task):
-            url = task.raw.get(EVENT_URL)
-        else:
-            url = task.link
+            self.hand_over(task.raw.get(TRACKER_URL), task)
+            return
+        if self.is_event(task):
+            self.hand_over(task.raw.get(EVENT_URL), task)
+            return
+        choices = self.openable(task)
+        if len(choices) <= 1:
+            self.hand_over(choices[0][1] if choices else None, task)
+            return
+        chosen = await self.push_screen_wait(
+            LinkPicker(f"Open from “{task.title}”", choices)
+        )
+        if chosen:
+            self.hand_over(chosen, task)
+
+    def hand_over(self, url: str | None, task: Task) -> None:
+        """Open one address, or say the row has none."""
         if not url:
             # Named for what the row is: "that task" would be wrong on two
             # of the three kinds of row this key now serves.
