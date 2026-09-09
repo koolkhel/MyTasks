@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from collections import deque
@@ -46,6 +47,7 @@ from textual.widgets.option_list import Option
 import singularity
 import email.utils
 
+import gateway
 import ical
 import mail
 import tracker
@@ -732,9 +734,10 @@ class Help(ModalScreen[None]):
   ← / → or h / l     previous / next day
   t                  jump to today
   i                  inbox — tasks with no date, and the
-                     mail awaiting a decision above them.
+                     mail awaiting a decision below them.
                      o opens what a thread points at;
-                     f turns it into a task on today
+                     space files it away; f turns it into
+                     a task on today
   s                  someday — tasks put off
   r                  reload from the server
   w                  hide the work project's tasks,
@@ -747,7 +750,9 @@ class Help(ModalScreen[None]):
   enter              show the selected task in full
 
 [b]Changing tasks[/b]
-  space              tick / untick the selected task
+  space              tick / untick the selected task —
+                     on a mail row it reviews the message
+                     instead: see below
   .                  done for today — records the work
                      and moves the task to tomorrow,
                      leaving it unfinished
@@ -773,24 +778,43 @@ class Help(ModalScreen[None]):
   f                  turn the selected mail thread into a
                      task on today, carrying what the
                      message said in its note. The thread's
-                     messages are marked read, so the row
-                     leaves the inbox; u puts both back
+                     messages are filed away as well, so
+                     the row leaves the inbox; u puts both
+                     back
   backspace          delete for good (asks first)
 
 [b]Mail awaiting a decision[/b]
   The inbox also lists what the folders you configure
-  hold, marked @ and newest first, each showing who it
-  is from and how many messages are in the thread. Only
-  unread mail: a message dealt with, here or in whatever
-  program you read mail with, is out of the queue.
+  hold, marked @ and newest first, below your own tasks
+  — there is far more mail than there are tasks, and
+  your own work should not be behind a scroll. Each row
+  shows who it is from and how many messages it stands
+  for: updates about one issue in a project you have
+  configured are one row, so a discussion is one
+  decision rather than five. Only unread mail: a message
+  dealt with, here or in whatever program you read mail
+  with, is out of the queue.
   What the newest message says is shown below the list,
-  HTML rendered as text, and o opens what it points at.
-  Every key that changes a task refuses a mail row —
-  except f, which makes one from it. That is the only
-  thing the board writes to the mailbox: the messages of
-  a promoted thread are marked read, by the rename a
-  maildir records a flag with. Nothing is moved, removed
-  or altered.
+  HTML rendered as text. o opens what the row points at
+  — where its messages carry an address with a #fragment
+  it offers the earliest of them, so a discussion reads
+  downward from where you left off.
+  Two keys act on a mail row. o reads it, and space
+  reviews it: every message the row stands for is moved
+  to your account's archive folder, which is not
+  mirrored here — so a reviewed message is gone from
+  this queue for good rather than merely marked. Once
+  the move is confirmed they are marked read, so nothing
+  you have dealt with is still new mail to your other
+  programs. f does both, making a task first. Nothing is
+  deleted, nothing goes anywhere but the archive, no
+  flag is set outside it, and nothing at all is written
+  to the mail on this disk. u moves them back, unread
+  again, and the row returns when the mailbox next
+  catches up.
+  Every other key that changes a task refuses a mail
+  row. Reviewing needs the mail gateway configured;
+  reading does not.
 
 [b]Issues from the tracker[/b]
   Today lists the issues assigned to you in the
@@ -1023,7 +1047,10 @@ class TaskApp(App[None]):
         Binding(keys("r"), "refresh", "Reload"),
         Binding(keys("w"), "toggle_work", "Hide work"),
         Binding(keys("u"), "undo", "Undo"),
-        Binding("space", "toggle", "Tick"),
+        # Named for both things it does: on a task it ticks, on a mail row
+        # it files the message away where the board cannot show it again,
+        # and the bar is where a person finds that out before pressing it.
+        Binding("space", "toggle", "Tick / review"),
         # Its own key, never shared with tick: "." mirrors the app's cmd+.
         Binding(keys("full_stop"), "done_for_today", "Did today"),
         # Not priority: a priority binding fires ahead of every focused
@@ -1126,6 +1153,43 @@ class TaskApp(App[None]):
         # in the inbox, and equally optional.  A board with none configured
         # is an ordinary board.
         self.mail_config = mail.load_config()
+        #: How to reach the mail gateway, or None.  Its own configuration,
+        #: separate from the mailbox's: reading needs no credentials and no
+        #: network, and a board that can read mail and not file it away is
+        #: a real state rather than a broken one.
+        self.gateway_config = gateway.load_config()
+        #: How a connection to the gateway is opened, or None for the real
+        #: one.  The single seam through which the board reaches a mail
+        #: server, so a suite can drive every path of a review -- including
+        #: the ones that must fail -- without an account.
+        self.gateway_connect = None
+        #: Identities the gateway has confirmed are in the archive, for this
+        #: session only.  The folders are a mirror, refreshed on a timer of
+        #: its own, so for up to one sync interval a read still returns a
+        #: message that has already been filed away -- and every view change
+        #: re-reads.  Without this the queue would not drain: a person who
+        #: reviewed ten rows and pressed `i` would meet them all again, which
+        #: is the one thing this whole change exists to prevent.
+        #:
+        #: Nothing is written anywhere, and nothing survives the session: the
+        #: account is still the record of what has been reviewed.  This only
+        #: keeps the board from showing what it has already been told is
+        #: gone.  Pruned on every read to what the mailbox still holds, so it
+        #: stays the size of the mirror's lag rather than growing all day.
+        self.reviewed: set[str] = set()
+        #: Set when the board is closing, so a review that is part way
+        #: through confirming gives up instead of holding the run open.
+        #: Quitting used to wait five minutes on a worker blocked in the
+        #: gateway, saying nothing.
+        self._closing = False
+        #: Held for the length of one review, so reviews reach the gateway
+        #: one at a time.  Without it a person ticking ten rows in a row
+        #: opened ten connections at once, each holding the archive open
+        #: for the minutes a confirmation takes -- which is slower for all
+        #: ten than doing them in turn, and is a load the account did not
+        #: ask for.  The rows have already left the screen, so waiting here
+        #: costs a person nothing.
+        self._mail_gate = threading.Lock()
         self.mail_threads: list = []
         #: Why the mailbox could not be read, when it could not be.  Kept
         #: apart from the day's own errors for the reason the tracker's and
@@ -1591,16 +1655,67 @@ class TaskApp(App[None]):
         if config is None:
             return
         try:
-            found = mail.threads(mail.read(config))
+            raw = mail.read(config)
         except mail.MailboxUnreadable as exc:
             self.call_from_thread(self.mail_failed, str(exc))
             return
-        self.call_from_thread(self.mail_loaded, found)
+        held = {message.ident for message in raw}
+        # Filtered before grouping, not after: a row can hold messages from
+        # a folder that has caught up and one that has not, and dropping the
+        # whole row would hide mail that is still there.
+        filed = self.reviewed
+        found = mail.threads([m for m in raw if m.ident not in filed],
+                             fold=self.mail_fold)
+        self.call_from_thread(self.mail_loaded, found, held)
 
-    def mail_loaded(self, found: list) -> None:
+    def mail_fold(self, message: Any) -> object | None:
+        """What a message is about, or None where the board cannot tell.
+
+        Two things together: the issue its text names in a configured
+        tracker project, and the first address it carries.  Messages
+        agreeing on both are one row.
+
+        Both, not either.  In one of the folders read daily, mail about a
+        merge request names the issue it mentions, so several unrelated
+        requests cite one issue -- the key alone merged 24 of 38 groups
+        wrongly.  This matters more than tidiness: reviewing a row files
+        away every message in it, so a wrong fold does not merely misdraw a
+        row, it archives mail nobody looked at.
+
+        A configured project's key, not a general pattern for
+        letters-dash-digits: that pattern also matches a version or a
+        standard, and the board has one place that knows which projects
+        count.
+
+        A message carrying no address at all is left alone.  The rule is
+        that the first address each carries is the same, and a message with
+        none has no such address to agree about -- and where the rule cannot
+        be shown to hold, not folding is the safe direction.
+
+        This is what `mail.threads` takes as its `fold`: knowing which
+        projects are configured and how to find an address in text belongs
+        here, not in a module whose whole job is reading a maildir.
+        """
+        config = self.tracker_config
+        if config is None:
+            return None
+        keys = config.keys_in(message.text)
+        if not keys:
+            return None
+        urls = singularity.urls_in(message.text)
+        if not urls:
+            return None
+        return (keys[0], urls[0])
+
+    def mail_loaded(self, found: list, held: "set[str] | None" = None) -> None:
         """Take what the mailbox held, and stop saying it was unreadable."""
         was = self.mail_error
         self.mail_threads = found
+        if held is not None:
+            # Only what the mirror still returns.  An identity it has caught
+            # up on needs remembering no longer, and forgetting it is what
+            # keeps this bounded by the sync interval.
+            self.reviewed &= held
         self.mail_error = None
         if was and self._notice and self._notice[0] == was:
             self._notice = None
@@ -1633,8 +1748,8 @@ class TaskApp(App[None]):
 
         Only in the inbox: a thread belongs to no day, and repeating it
         under every date would say it did.  The marker is what every write
-        that would change a row checks before refusing -- promoting is the
-        one key that reads it and answers.
+        that would change a row checks before refusing -- reviewing and
+        promoting are the two keys that read it and answer.
         """
         if not self.shows_mail:
             return []
@@ -1651,16 +1766,17 @@ class TaskApp(App[None]):
                 MAIL_SENDER: newest.sender,
                 MAIL_COUNT: thread.count,
                 MAIL_WHEN: newest.when.timestamp(),
-                # Only the newest message's text.  A run of notifications
-                # about one thing carries one near-identical address per
-                # message -- four builds of a job give four console
-                # addresses differing in a number -- and offering every one
-                # would ask a person to choose between things they cannot
-                # tell apart.  The newest is the one wanted.
+                # The newest message's text, which is what the row offers
+                # to open where no message carries an anchored address: a
+                # run of notifications about one thing carries one
+                # near-identical address per message -- four builds of a job
+                # give four console addresses differing in a number -- and
+                # offering every one would ask a person to choose between
+                # things they cannot tell apart.
                 MAIL_TEXT: newest.text,
-                # Every message in the thread, not only the newest: a
-                # promotion takes the whole thread out of the queue, so it
-                # is the whole thread that must be marked.
+                # Every message in the thread, not only the newest.  Two
+                # things need all of them: reviewing files away the whole
+                # row, and an anchored address is looked for across it.
                 MAIL_MESSAGES: thread.messages,
                 # Where a task keeps its note, so the detail area shows what
                 # the message says with no knowledge of mail at all -- the
@@ -1674,6 +1790,204 @@ class TaskApp(App[None]):
     def is_mail(task: Task | None) -> bool:
         """Whether a row came from the mailbox rather than the board."""
         return bool(task is not None and task.raw.get(MAIL_MARK))
+
+    @staticmethod
+    def by_folder(messages: Iterable[Any]) -> dict[str, list[str]]:
+        """These messages' identities, grouped by the folder each was read from.
+
+        A row can hold messages from more than one folder -- what folds them
+        is the issue they are about -- and the gateway addresses a message
+        within a folder, so the folder has to travel with the identity.
+        """
+        out: dict[str, list[str]] = {}
+        for message in messages:
+            out.setdefault(message.folder, []).append(message.ident)
+        return out
+
+    def drop_thread(self, task: Task) -> tuple[Any, int] | None:
+        """Take the row's thread out of the queue, and hand it back.
+
+        With the position it held, so an archive that cannot be confirmed
+        puts the row back where the person last saw it rather than at the
+        end of a queue of hundreds.
+        """
+        ident = task.id[len(MAIL_PREFIX):]
+        for where, thread in enumerate(self.mail_threads):
+            if thread.newest.ident == ident:
+                self.mail_threads = (self.mail_threads[:where]
+                                     + self.mail_threads[where + 1:])
+                return thread, where
+        return None
+
+    def restore_thread(self, thread: Any, where: int | None) -> None:
+        """Put a thread back in the queue, where it was."""
+        if any(t.newest.ident == thread.newest.ident for t in self.mail_threads):
+            return
+        at = len(self.mail_threads) if where is None else where
+        self.mail_threads = (self.mail_threads[:at] + [thread]
+                             + self.mail_threads[at:])
+        self.repaint()
+
+    def review(self, task: Task) -> None:
+        """File the selected mail row away, and take it out of the queue.
+
+        The row goes at once and the moving happens behind the screen, as
+        every write on this board does.  It does not go through
+        `submit_write`, though: that machinery speaks to the task store and
+        carries a patch to apply to a task, and neither is what this is.
+
+        The row leaves the queue before the move is confirmed, and comes
+        back if it cannot be.  The other order -- wait, then retire -- would
+        leave a person looking at a row for the second a confirmation takes,
+        with no way to tell it from one the key had missed.
+        """
+        messages = list(task.raw.get(MAIL_MESSAGES) or ())
+        title = task.title
+        config = self.gateway_config
+        if config is None:
+            # Reading mail needs nothing; filing it away needs an account.
+            # Said plainly rather than refused as unownable: the row is the
+            # board's to act on, and this is the one thing missing.
+            self.notice(
+                "reviewing files the message away on the server · "
+                "no mail gateway is configured",
+                True,
+            )
+            return
+        if not messages:
+            self.notice(f"“{title}” holds no message to file away", True)
+            return
+        # The selection is read before the row goes, from the list on
+        # screen, so it lands where the person was looking.
+        after = self.next_open_after(task)
+        dropped = self.drop_thread(task)
+        if dropped is None:
+            # The queue was re-read between the keypress and here.  Nothing
+            # to file away that the next read will not show again.
+            self.notice(f"“{title}” is no longer in the queue", True)
+            return
+        thread, where = dropped
+        self._selected_id = after
+        self.notice(f"Reviewing “{title}” · filing {len(messages)} away")
+        self.repaint()
+        self.remember_review(task, title, messages)
+        self.file_away(config, self.by_folder(messages), title, thread, where)
+
+    def remember_review(self, task: Task, title: str,
+                        messages: list[Any]) -> None:
+        """Record a review so the undo key can move the mail back.
+
+        Its own entry rather than one made by `submit_write`: there is no
+        task to put fields back on, and reversing this is a move on the
+        server.
+        """
+        config = self.gateway_config
+
+        def reverse(_wrote: dict[str, Task]) -> bool:
+            if config is None:
+                return False
+            self.put_back(config, self.by_folder(messages), title)
+            return True
+
+        entry = Undoable(
+            group=str(uuid.uuid4()),
+            label="Reviewing",
+            subject=title,
+            # What the board can honestly promise: the folder is a mirror,
+            # so the row returns when whatever fills it next catches up.
+            note="the row returns when the mailbox next catches up",
+            undo_action=reverse,
+        )
+        entry.tasks[task.id] = task
+        self._undo.append(entry)
+
+    @work(thread=True, group="mail-write")
+    def file_away(self, config: Any, by_folder: dict[str, list[str]],
+                  title: str, thread: Any, where: int) -> None:
+        """Move a reviewed row's messages to the archive, and confirm it.
+
+        Off the UI thread: the move is one round trip, but confirming is a
+        search a message, about a second each, and the board must stay under
+        a person's hands throughout.
+        """
+        try:
+            with self._mail_gate:
+                if self._closing:
+                    return
+                outcome = gateway.archive(config, by_folder,
+                                          connect=self.gateway_connect,
+                                          stop=lambda: self._closing)
+        except (gateway.MoveFailed, gateway.GatewayUnreachable) as exc:
+            # The row comes back.  A row retired on an unconfirmed move is a
+            # message a person believes they have dealt with.
+            self.call_from_thread(self.review_failed, title, thread, where,
+                                  str(exc))
+            return
+        self.call_from_thread(self.review_done, title, outcome)
+
+    def forget_reviewed(self, idents: "set[str]") -> None:
+        """Stop holding these back from the queue.  UI thread only."""
+        self.reviewed -= idents
+
+    def on_unmount(self) -> None:
+        """Tell whatever is still confirming a review to stop waiting.
+
+        A row's confirmation is a search of the archive a message, and the
+        archive is slow: a person quitting mid-review would otherwise wait
+        on it, with the board gone and nothing said.  What was moved is in
+        the archive either way, and the next run finds it there.
+        """
+        self._closing = True
+
+    def review_done(self, title: str, outcome: Any) -> None:
+        """Say what became of a reviewed row's messages."""
+        parts = []
+        if outcome.archived:
+            parts.append(f"{len(outcome.archived)} filed away")
+        if outcome.already:
+            parts.append(f"{len(outcome.already)} already reviewed")
+        if outcome.missing:
+            # Not a failure of the move and not a success: something else
+            # moved that message, and saying which is more use than either.
+            parts.append(
+                f"{len(outcome.missing)} in neither the folder nor the archive")
+        # Both count as in the archive, and both must stay out of the queue
+        # until the mirror agrees: one was just moved, the other was already
+        # there when we looked.
+        self.reviewed |= set(outcome.archived) | set(outcome.already)
+        said = " · ".join(parts) or "nothing to file away"
+        self.notice(f"Reviewed “{title}” · {said}", bool(outcome.missing))
+
+    def review_failed(self, title: str, thread: Any, where: int,
+                      why: str) -> None:
+        """Put a row back, and say why it is back."""
+        self.restore_thread(thread, where)
+        self.notice(f"“{title}” is back in the queue · {why}", True)
+
+    @work(thread=True, group="mail-write")
+    def put_back(self, config: Any, by_folder: dict[str, list[str]],
+                 title: str) -> None:
+        """Move a reviewed row's messages out of the archive again."""
+        # Forgotten first, so the row is free to come back the moment the
+        # mailbox shows it again.  Before the move rather than after: a
+        # restore that half succeeded must not leave the board hiding mail
+        # that is back in the folder.
+        self.call_from_thread(self.forget_reviewed,
+                              {i for idents in by_folder.values() for i in idents})
+        try:
+            with self._mail_gate:
+                outcome = gateway.restore(config, by_folder,
+                                          connect=self.gateway_connect)
+        except (gateway.MoveFailed, gateway.GatewayUnreachable) as exc:
+            self.call_from_thread(
+                self.notice,
+                f"“{title}” could not be put back in the mailbox: {exc}", True)
+            return
+        if outcome.missing:
+            self.call_from_thread(
+                self.notice,
+                f"“{title}”: {len(outcome.missing)} were not in the archive "
+                f"to put back", True)
 
     # -- writes ------------------------------------------------------------
 
@@ -1693,23 +2007,11 @@ class TaskApp(App[None]):
         issue mentioned both by key and by its own link is offered once
         rather than twice under different names.
         """
-        config = self.tracker_config
-        found: list[tuple[str, str]] = []
-        # A mail row's candidates come from its newest message, which the
-        # row carries for the purpose.  Not from the whole thread: a run of
-        # notifications about one thing holds one near-identical address per
-        # message, and offering all of them would ask a person to choose
-        # between things they cannot tell apart.
-        texts = (
-            (task.raw.get(MAIL_TEXT) or "",) if self.is_mail(task)
-            else (task.raw.get("title") or "", task.note_text)
+        found = (
+            self.mail_openable(task) if self.is_mail(task)
+            else self.candidates(
+                (task.raw.get("title") or "", task.note_text))
         )
-        for text in texts:
-            if config is not None:
-                for key in config.keys_in(text):
-                    found.append((key, config.issue_url(key)))
-            for url in singularity.urls_in(text):
-                found.append((url, url))
         seen, unique = set(), []
         for shown, url in found:
             if url in seen:
@@ -1717,6 +2019,68 @@ class TaskApp(App[None]):
             seen.add(url)
             unique.append((shown, url))
         return unique
+
+    def candidates(self, texts: Iterable[str]) -> list[tuple[str, str]]:
+        """What these texts offer to open, in the order they are read in.
+
+        Issues the tracker knows first, then addresses, per text -- reading
+        order rather than an order by kind, so the answer does not depend on
+        which kind happens to be looked for first.
+        """
+        config = self.tracker_config
+        found: list[tuple[str, str]] = []
+        for text in texts:
+            if config is not None:
+                for key in config.keys_in(text):
+                    found.append((key, config.issue_url(key)))
+            for url in singularity.urls_in(text):
+                found.append((url, url))
+        return found
+
+    def mail_openable(self, task: Task) -> list[tuple[str, str]]:
+        """What a mail row offers to open.  Two rules, each where its
+        evidence lies.
+
+        An address carrying a fragment names a place *within* a page, which
+        is where a discussion should be entered so that it reads downward: a
+        person opening thirty comments wants to begin where they left off,
+        not land at the newest remark and scroll up.  So where the row's
+        messages carry such addresses, the earliest of them is what is
+        offered -- earliest and latest differ in 75 of 121 folded rows, so
+        this is not a distinction without a difference.  The issues the
+        row's text names are offered beside it, as they are for a task.
+
+        Where no message carries one, the candidates come from the newest
+        message alone, exactly as they did before this: a run of
+        notifications about one thing holds one near-identical address per
+        message -- four builds of a job give four console addresses
+        differing in a number -- and offering every one would ask a person
+        to choose between things they cannot tell apart.  The folder that
+        reasoning was formed on carries no fragments at all, so it keeps
+        precisely the behaviour it has.
+
+        This is why the change reads as a reversal and is not one.
+        """
+        messages = list(task.raw.get(MAIL_MESSAGES) or ())
+        anchored = next(
+            (url for message in messages
+             for url in singularity.urls_in(message.text) if "#" in url),
+            None,
+        )
+        if anchored is None:
+            return self.candidates((task.raw.get(MAIL_TEXT) or "",))
+        # The issues the whole row names, then the one address.  Not the
+        # row's other addresses: they are the near-identical run the
+        # fall-through exists to collapse, and the anchored one is the
+        # answer to where this row should be opened.
+        config = self.tracker_config
+        whole = "\n".join(message.text for message in messages)
+        found: list[tuple[str, str]] = []
+        if config is not None:
+            for key in config.keys_in(whole):
+                found.append((key, config.issue_url(key)))
+        found.append((anchored, anchored))
+        return found
 
     def recheck_elapsed(self) -> None:
         """Redraw when an event has fallen behind the present, and not otherwise.
@@ -1747,9 +2111,9 @@ class TaskApp(App[None]):
         if self.is_mail(task):
             # The same one place again: the board does not own the message,
             # so a change to it shown here would be a change that happened
-            # nowhere.  Promoting does not come through here -- it creates a
-            # task rather than changing the row, and marks the thread read
-            # by its own path.
+            # nowhere.  Two keys do not come through here: reviewing and
+            # promoting, which do not change the row but file the message
+            # away on the server, each by its own path.
             self.notice(
                 f"{_mail_who(task.raw.get(MAIL_SENDER) or '') or 'That message'} "
                 f"lives in the mailbox · not editable here",
@@ -2285,14 +2649,17 @@ class TaskApp(App[None]):
         # unfinished work ends.
         self.shown_events = len(events)
         tasks = self.place_issues(self.place_events(tasks, events), issues)
-        # Mail leads the inbox's tasks: it is time-ordered and perishable
-        # where an undated task waits indefinitely, so the daily processing
-        # starts at the top rather than after a scroll.  Prepended, never
-        # sorted in, so the tasks keep exactly the order they had alone.
+        # Mail follows the inbox's tasks.  It once led them, so that the
+        # daily processing started at the top rather than after a scroll --
+        # and that reasoning is why it now goes last: mail arrives in far
+        # greater quantity than a person files tasks, some 460 rows against
+        # 35, so leading with it guarantees the scroll it was meant to
+        # avoid.  Appended, never sorted in, so the tasks keep exactly the
+        # order they had alone.
         mails = self.mail_rows()
         self.shown_mail = len(mails)
         self.shown_messages = sum(t.raw.get(MAIL_COUNT, 1) for t in mails)
-        tasks = mails + tasks
+        tasks = tasks + mails
         self.tasks = tasks
         self.past_due = (
             sum(
@@ -2739,6 +3106,14 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
+        if self.is_mail(task):
+            # The same key, two different things: on a task it records work
+            # finished, on a mail row it files the message away where the
+            # board cannot show it again.  One key because a review is a
+            # hundred keystrokes a day, and the wording carries the
+            # distinction that a confirmation on each would carry worse.
+            self.review(task)
+            return
         want_done = not task.done
         label = "Ticking" if want_done else "Unticking"
         client = self.client
@@ -3086,9 +3461,10 @@ class TaskApp(App[None]):
         somebody else chose.
 
         Two halves, in this order.  The task is created, and then the
-        thread's messages are marked read so the row leaves the queue by the
-        same rule that put it there.  A task made and not marked shows the
-        row once more, which a person can see and act on; a message marked
+        thread's messages are filed away in the archive, by the same means
+        and with the same confirmation as reviewing one -- so the row leaves
+        the queue for the same reason.  A task made and not filed shows the
+        row once more, which a person can see and act on; mail filed away
         with no task made is work that has silently left the queue.  Only
         the first of those is repairable, so the task goes first.
         """
@@ -3130,7 +3506,7 @@ class TaskApp(App[None]):
             "note": singularity.note_document(note),
         }
         client = self.client
-        config = self.mail_config
+        config = self.gateway_config
 
         def create(_tid: str) -> Any:
             # The day's own tasks, fetched here rather than read off the
@@ -3170,16 +3546,7 @@ class TaskApp(App[None]):
                 removes=True, record=False,
             )
             if config is not None and messages:
-                try:
-                    mail.mark_unread(config, messages)
-                except mail.MailboxUnwritable as exc:
-                    self.notice(
-                        f"the task is gone · the message could not be "
-                        f"put back in the queue: {exc}",
-                        True,
-                    )
-                    return False
-                self.load_mail()
+                self.put_back(config, self.by_folder(messages), title)
             return True
 
         self.submit_write(
@@ -3189,19 +3556,27 @@ class TaskApp(App[None]):
             creates=True,
             subject=title,
             undo_action=reverse,
-            undo_note="the thread is back in the inbox",
+            undo_note="the mail goes back to the folder it came from",
         )
-        if config is None or not messages:
+        if not messages:
             return
-        try:
-            mail.mark_read(config, messages)
-        except mail.MailboxUnwritable as exc:
-            # The task stands.  Saying so is the whole remedy: the row comes
-            # back at the next read, which is visible and harmless, where
-            # undoing the task would throw away the decision that made it.
-            self.notice(f"“{title}” added · but {exc}", True)
+        if config is None:
+            # The task stands, which is the half that matters.  The row
+            # comes back at the next read, which is visible and harmless,
+            # where refusing the promotion would throw away the decision
+            # that made it.
+            self.notice(
+                f"“{title}” added · no mail gateway is configured, so the "
+                f"thread is still in the queue",
+                True,
+            )
             return
-        self.load_mail()
+        dropped = self.drop_thread(task)
+        if dropped is None:
+            return
+        thread, where = dropped
+        self.repaint()
+        self.file_away(config, self.by_folder(messages), title, thread, where)
 
     @work
     async def action_project(self) -> None:

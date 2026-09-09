@@ -1,4 +1,0 @@
-A maildir must have cur/, new/ and tmp/. Git tracks no empty directory, so
-without this file the directory vanishes on clone and the mailbox stops being
-a maildir -- which is how the mail suites passed here and failed on a fresh
-checkout.

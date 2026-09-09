@@ -11,6 +11,12 @@ import os as _os, sys as _sys
 _TESTS = _os.path.dirname(_os.path.abspath(__file__))
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _REPO)
+sys.path.insert(0, _TESTS)
+# The suites' own token, adopted before any client is built: a helper that
+# reads the account is a suite for this purpose, and the account's primary
+# token stays free for the person using the board.
+import testtoken
+testtoken.adopt(_REPO)
 from datetime import datetime, timedelta
 import main as M
 from main import TaskApp

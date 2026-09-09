@@ -1,0 +1,11 @@
+From: jenkins@ci.corp.invalid
+To: me@corp.invalid
+Subject: Build success: deploy-prod #841
+Date: Tue, 08 Sep 2026 16:20:00 -0000
+Message-ID: <ci.deploy-prod.841@ci.corp.invalid>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+deploy-prod #841 is SUCCESS.
+https://ci.corp.invalid/job/deploy-prod/841/console

@@ -20,7 +20,10 @@ import main, mail, tracker, ical
 from textual.widgets import DataTable
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SAMPLE = _os.path.join(_TESTS, "fixtures", "sample_mail")
+import mailfixture as F
+#: The one folder a built mailbox puts its messages in.
+FEED = "Feed"
+FOLDERS = F.FOLDERS
 TODAY = dt.datetime.now(TZ).date()
 NOW = dt.datetime.now(TZ)
 TRK = tracker.Config(base_url="https://track.corp.invalid", token="t", assignee="me",
@@ -33,15 +36,14 @@ def check(name, got, want):
           "" if good else f"\n        got  {got!r}\n        want {want!r}")
 
 def copy_sample():
-    path = os.path.join(tempfile.mkdtemp(prefix="promote."), "mail")
-    shutil.copytree(SAMPLE, path)
-    return path
+    """A private copy of the committed mailbox, never the mailbox itself."""
+    return F.copy()
 
 def build(messages, folder=None):
-    """A throwaway maildir of invented messages."""
-    path = os.path.join(tempfile.mkdtemp(prefix="promote."), "mail")
-    box = mailbox.Maildir(path, create=True)
-    target = box.add_folder(folder) if folder else box
+    """A throwaway mailbox: one named folder inside a container."""
+    path = os.path.join(tempfile.mkdtemp(prefix="promote."), "mail_folders")
+    os.makedirs(path)
+    target = mailbox.Maildir(os.path.join(path, folder or FEED), create=True)
     for i, (subject, body, headers) in enumerate(messages):
         m = EmailMessage()
         m["From"] = headers.get("From", "sender@example.invalid")
@@ -67,7 +69,7 @@ def census(root):
 UNSET = object()
 
 @asynccontextmanager
-async def board(mail_path=UNSET, tasks=None, tracker_cfg=None, folders=(),
+async def board(mail_path=UNSET, tasks=None, tracker_cfg=None, folders=None,
                 to_inbox=True):
     app = main.TaskApp()
     app.client = StubClient(tasks if tasks is not None else [mk("t1", "a task", TODAY)],
@@ -75,7 +77,12 @@ async def board(mail_path=UNSET, tasks=None, tracker_cfg=None, folders=(),
     app.calendar_config = None
     app.tracker_config = tracker_cfg
     path = copy_sample() if mail_path is UNSET else mail_path
-    app.mail_config = None if path is None else mail.Config(path, tuple(folders))
+    # The committed mailbox holds the folders it holds; a throwaway one holds
+    # the single folder `build` made.  Either way the board reads what it is
+    # named and never discovers folders for itself.
+    named = tuple(folders) if folders is not None else (
+        F.FOLDERS if mail_path is UNSET else (FEED,))
+    app.mail_config = None if path is None else mail.Config(path, named)
     opened = []
     app.open_url = lambda url: opened.append(url)
     async with app.run_test(size=(120, 44)) as pilot:
@@ -115,7 +122,9 @@ async def becomes_a_task():
     print("a thread becomes a task on today")
     async with board(tasks=[mk("i1", "an inbox task"),
                             mk("d1", "a task", TODAY)]) as (app, pilot, path, _o):
-        row = mail_row(app)
+        # Selected explicitly: mail follows the inbox's tasks now, so the
+        # cursor starts on a task and the key would refuse.
+        row = await select(app, pilot, app.is_mail)
         subject, count = row.title, row.raw[main.MAIL_COUNT]
         await pilot.press("f")
         await settle(pilot, 30)
@@ -269,142 +278,29 @@ async def what_it_carries():
         await to_today(app, pilot)
         await select(app, pilot, lambda t: t.id.startswith("T-new-"))
         await pilot.press("n")
-        await settle(pilot, 14)
+        await settle(pilot, 18)
         screen = app.screen
         check("the editor opened", type(screen).__name__, "NoteInput")
         holding = screen.query_one(main.NoteArea).text
         check("holding what was written",
               holding == made(app)[0].note_text and "Message-ID:" in holding, True)
         await pilot.press("escape")
-        await settle(pilot, 14)
+        await settle(pilot, 18)
 
 # --------------------------------------------------------------- out of the queue
-async def out_of_the_queue():
-    print("the thread leaves the queue")
-    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
-        before = sum(1 for t in app.tasks if app.is_mail(t))
-        row = await select(app, pilot, app.is_mail)
-        gone, count = row.id, row.raw[main.MAIL_COUNT]
-        await pilot.press("f")
-        await settle(pilot, 40)
-        check("its messages are marked read",
-              len(mail.read(mail.Config(path))), 14 - count)
-        after = sum(1 for t in app.tasks if app.is_mail(t))
-        check("the row is gone from the inbox", (before - after, after), (1, before - 1))
-        check("and it is that row that went",
-              gone not in {t.id for t in app.tasks}, True)
-        # It has a date, so the inbox is exactly where it does not belong.
-        check("the task is not left in the inbox it was made from",
-              any(t.id.startswith("T-new-") for t in app.tasks), False)
-        await to_today(app, pilot)
-        check("it is on today", [t.id for t in app.tasks
-                                 if t.id.startswith("T-new-")], ["T-new-1"])
+# `out_of_the_queue` lived here: the thread leaving the queue by a read
+# flag, the flag written in the right folder, an unwritable mailbox, and
+# nothing else on disk changing.  Every one of those tested a local write
+# the board no longer makes -- reviewing moves the message on the server
+# instead -- so they are not adapted but replaced, by the suite that drives
+# a substituted gateway.  Removed here so nothing claims to cover it.
 
-    print("a thread in a named folder is marked in that folder")
-    path = build([("a report", "body https://reports.corp.invalid/1",
-                   {"Message-ID": "<r1@x.invalid>"})], folder="Reports")
-    async with board(mail_path=path, folders=("Reports",),
-                     tasks=[mk("i1", "an inbox task")]) as (app, pilot, _p, _o):
-        check("the thread was read from the folder",
-              [t.raw[main.MAIL_MESSAGES][0].folder
-               for t in app.tasks if app.is_mail(t)], ["Reports"])
-        await select(app, pilot, app.is_mail)
-        await pilot.press("f")
-        await settle(pilot, 40)
-        check("and it is out of the queue",
-              mail.read(mail.Config(path, ("Reports",))), [])
-
-    print("a mailbox that cannot be written")
-    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
-        row = await select(app, pilot, app.is_mail)
-        for area in ("new", "cur"):
-            os.chmod(os.path.join(path, area), 0o500)
-        try:
-            await pilot.press("f")
-            await settle(pilot, 40)
-            check("the task is still created", len(made(app)), 1)
-            said = status(app)
-            check("and the board says the message could not be marked",
-                  "could not be marked" in said, True)
-        finally:
-            for area in ("new", "cur"):
-                os.chmod(os.path.join(path, area), 0o700)
-        check("nothing in the mailbox was marked",
-              len(mail.read(mail.Config(path))), 14)
-
-    print("nothing else about the mailbox changed")
-    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
-        was = census(path)
-        row = await select(app, pilot, app.is_mail)
-        keys = {m.key for m in row.raw[main.MAIL_MESSAGES]}
-        await pilot.press("f")
-        await settle(pilot, 40)
-        now = census(path)
-        uniq = lambda rel: os.path.basename(rel).split(":")[0]
-        was_by = {uniq(k): (k, v) for k, v in was.items()}
-        now_by = {uniq(k): (k, v) for k, v in now.items()}
-        check("no message was added or removed", set(was_by), set(now_by))
-        check("no message's content differs",
-              all(was_by[k][1] == now_by[k][1] for k in was_by), True)
-        check("no message changed folder",
-              all(os.path.dirname(os.path.dirname(was_by[k][0]))
-                  == os.path.dirname(os.path.dirname(now_by[k][0])) for k in was_by),
-              True)
-        check("only the promoted thread's files were renamed",
-              {k for k in was_by if was_by[k][0] != now_by[k][0]}, keys)
-
-    print("nothing is remembered anywhere but the mailbox")
-    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
-        home = os.path.expanduser("~")
-        watched = [_REPO, os.getcwd()]
-        before = {w: sorted(os.listdir(w)) for w in watched}
-        await select(app, pilot, app.is_mail)
-        await pilot.press("f")
-        await settle(pilot, 40)
-        check("no file appeared beside the board",
-              {w: sorted(os.listdir(w)) for w in watched}, before)
-
-# ----------------------------------------------------------------------- undo
 async def undoing():
-    print("undoing a promotion returns the thread")
-    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
-        before = sum(1 for t in app.tasks if app.is_mail(t))
-        row = await select(app, pilot, app.is_mail)
-        gone, count = row.id, row.raw[main.MAIL_COUNT]
-        await pilot.press("f")
-        await settle(pilot, 40)
-        check("promoted", (len(made(app)), len(mail.read(mail.Config(path)))),
-              (1, 14 - count))
-        await pilot.press("u")
-        await settle(pilot, 40)
-        check("the task is gone", made(app), [])
-        check("the store was asked to delete it", app.client.count("delete_task"), 1)
-        check("the messages are unread again",
-              len(mail.read(mail.Config(path))), 14)
-        check("the row is back in the inbox",
-              (sum(1 for t in app.tasks if app.is_mail(t)),
-               gone in {t.id for t in app.tasks}),
-              (before, True))
-        check("and the board says what it reversed",
-              "undid" in status(app).lower() and "promoting" in status(app).lower(),
-              True)
-
-    print("a message put back stays in the current area")
-    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
-        row = await select(app, pilot, app.is_mail)
-        keys = [m.key for m in row.raw[main.MAIL_MESSAGES]]
-        await pilot.press("f")
-        await settle(pilot, 40)
-        await pilot.press("u")
-        await settle(pilot, 40)
-        where = []
-        for key in keys:
-            for area in ("new", "cur"):
-                for name in os.listdir(os.path.join(path, area)):
-                    if name.split(":")[0] == key:
-                        where.append((area, ":2,S" in name))
-        check("each is in cur, unflagged", set(where), {("cur", False)})
-
+    # Two parts lived here -- a promotion undone putting the thread back by
+    # clearing the read flag, and the message staying in the folder's current
+    # area.  Both are about the flag; undoing now moves the message back on
+    # the server, which the gateway suite covers.  What follows still holds:
+    # it is about the task, not the mail.
     print("undo after the creation confirms reaches the real task")
     async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
         await select(app, pilot, app.is_mail)
@@ -429,7 +325,7 @@ async def undoing():
         await pilot.press("u")
         await settle(pilot, 12)
         check("the messages are already unread again",
-              len(mail.read(mail.Config(path))), 14)
+              len(mail.read(mail.Config(path, FOLDERS))), 18)
         app.client.gate.set()
         await settle(pilot, 60)
         check("the task the store made was deleted, by its real id",
@@ -461,7 +357,7 @@ async def refusals():
         check("nothing was created on a task", made(app), [])
         check("and the board says what the key is for",
               "turns a mail thread into a task" in status(app), True)
-        check("the mailbox is untouched", len(mail.read(mail.Config(path))), 14)
+        check("the mailbox is untouched", len(mail.read(mail.Config(path, FOLDERS))), 18)
 
     print("on a calendar event")
     ev = ical.Event(title="a meeting", account="work", calendar="c",
@@ -514,7 +410,7 @@ async def saying_so():
     print("the key is named where keys are named")
     async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
         await pilot.press("question_mark")
-        await settle(pilot, 14)
+        await settle(pilot, 18)
         text = main.Help.TEXT
         check("the help overlay names f", "\n  f  " in text, True)
         check("and says what it does",
@@ -537,14 +433,19 @@ async def saying_so():
     mail_src = open(_REPO + "/mail.py").read()
     check("main.py does not say mail is read-only in the inbox",
           "Mail is read-only here" in board_src, False)
-    check("mail.py does not say nothing here writes",
-          "Nothing here writes" in mail_src, False)
-    check("and it says what the one write is",
-          "marking a message read" in mail_src, True)
+    # These two read the other way round when promoting wrote a read flag
+    # to the local store.  It does not any more -- a review is a move on the
+    # server -- so the wording they check went back to what it was, and the
+    # checks follow it rather than being dropped: what they guard is that
+    # the module says which of the two it is.
+    check("mail.py says nothing here writes",
+          "Nothing here writes" in mail_src, True)
+    check("and no longer claims a read flag is the one write",
+          "marking a message read" in mail_src, False)
 
 async def main_():
     for part in (becomes_a_task, shown_at_once, what_it_carries,
-                 out_of_the_queue, undoing, refusals, saying_so):
+                 undoing, refusals, saying_so):
         await part()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     sys.exit(0 if all(ok) else 1)

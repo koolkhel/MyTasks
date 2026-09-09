@@ -97,14 +97,15 @@ LOST = {
     "t_tension": "a probe: layout behaviour under a narrow terminal",
 }
 
-#: One shipped check does not isolate what its name claims. Recorded because
-#: fixing it means changing what a suite asserts, which the change that
+#: One shipped check did not isolate what its name claimed. Recorded because
+#: fixing it meant changing what a suite asserts, which the change that
 #: imported these forbade itself.
-WEAK = {
-    "t_mailview": (
-        '"a thread naming a configured issue opens the issue" passes with key '
-        "recognition removed entirely: the fixture's body carries the literal "
-        "issue URL beside the key, so the ordinary URL scan finds it. "
-        "t_keys2 is what actually covers recognition."
-    ),
-}
+WEAK = {}
+
+#: Resolved: `t_mailview`'s "a thread naming a configured issue opens the
+#: issue" passed with key recognition removed entirely -- the fixture's body
+#: carries the literal issue URL beside the key, so the ordinary URL scan
+#: found it. The change that made a mail row offer its earliest anchored
+#: address rewrote that section, and the check is now two: one for the issue
+#: the row names and one for the anchored address, which differ from each
+#: other. t_keys2 still covers recognition on its own.

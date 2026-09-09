@@ -32,9 +32,10 @@ def check(name, got, want):
     print(("  ok  " if good else "  FAIL"), name,
           "" if good else f"\n        got {got!r}\n        want {want!r}")
 
-path = os.path.join(tempfile.mkdtemp(prefix="prolive."), "mail")
-shutil.copytree(_os.path.join(_TESTS, "fixtures", "sample_mail"), path)
-cfg = mail.Config(path)
+import mailfixture as F
+# A copy of the committed mailbox, never the mailbox itself.
+path = F.copy()
+cfg = mail.Config(path, F.FOLDERS)
 # The thread promoted is renamed first, so the task this creates on the live
 # account cannot be mistaken for anything real and is trivially findable.
 threads = mail.threads(mail.read(cfg))
@@ -45,6 +46,13 @@ async def go():
     global made_id
     app = TaskApp()
     app.mail_config = cfg
+    # Said again here, though `testtoken.adopt` above already answers None
+    # for both: this suite hands the board a mailbox of its own, and a
+    # reader has to be able to see that it is not also handed a server.
+    # The fixture's folders are named for the real ones, so a live gateway
+    # would be asked about those -- and would ask the keychain for a
+    # password in the middle of a store run.
+    app.gateway_config = None
     async with app.run_test(size=(120, 44)) as pilot:
         app.position = Bucket.INBOX
         app.load()
@@ -65,6 +73,7 @@ async def go():
         await pilot.pause()
 
         before = len(mail.read(cfg))
+        census_before = F.census(path)
         app.action_promote()
         for _ in range(500):
             await pilot.pause()
@@ -79,8 +88,18 @@ async def go():
             made_id = new[0].id
         check("with a real id, not a placeholder",
               bool(made_id) and not made_id.startswith("tmp:"), True)
-        check("the thread left the queue", len(mail.read(cfg)), before - row.raw[M.MAIL_COUNT])
-        check("and the messages marked are the thread's",
+        # These two read the other way round when promoting wrote a read
+        # flag into the local store.  Reviewing is a move on the server now,
+        # and with no gateway configured the mail stays exactly where it is
+        # -- which is the outcome that matters: the task is made either way,
+        # and a thread still in the folder is a row seen once more rather
+        # than work lost.
+        check("nothing left the local queue", len(mail.read(cfg)), before)
+        check("and no file in the mailbox changed", F.census(path), census_before)
+        check("the board says the mail was not filed away",
+              "no mail gateway is configured" in str(
+                  app.query_one("#status").render()), True)
+        check("the messages the row stands for are still its own",
               sorted(m.key for m in row.raw[M.MAIL_MESSAGES]), sorted(marked))
 
 try:

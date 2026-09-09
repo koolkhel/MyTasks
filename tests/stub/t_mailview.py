@@ -15,6 +15,7 @@ _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 from harness import *
 import main, mail, tracker, ical
+import mailfixture as F
 from textual.widgets import DataTable
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,13 +23,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # promoting marks a thread read -- so a suite that points it at the shared
 # sample can quietly rewrite the thing every other mail suite measures
 # against.  It happened once; copying is what makes it impossible.
-_FIXTURE = _os.path.join(_TESTS, "fixtures", "sample_mail")
-SAMPLE = os.path.join(tempfile.mkdtemp(prefix="fixture."), "sample_mail")
-shutil.copytree(_FIXTURE, SAMPLE)
+#: The one folder a built mailbox puts its messages in.  The board reads the
+#: folders it is named, so a mailbox with none would read as empty.
+FEED = "Feed"
+# A copy, never the committed mailbox: the board can move messages out of one
+# now, so reading the shared fixture in place could rewrite what every other
+# mail suite measures against.
+SAMPLE = F.copy()
+FOLDERS = F.FOLDERS
 TODAY = dt.datetime.now(TZ).date()
 NOW = dt.datetime.now(TZ)
 TRK = tracker.Config(base_url="https://track.corp.invalid", token="t", assignee="me",
-                     projects=("ABC",), states=("In progress",))
+                     projects=("ZZA", "ZZB"), states=("In progress",))
 ok = []
 def check(name, got, want):
     good = got == want
@@ -36,9 +42,12 @@ def check(name, got, want):
     print(("  ok  " if good else "  FAIL"), name, "" if good else f"\n        got  {got!r}\n        want {want!r}")
 
 def build(messages):
+    """A throwaway mailbox: one named folder inside a container, which is the
+    shape the board reads."""
     root = tempfile.mkdtemp()
-    path = os.path.join(root, "mail")
-    box = mailbox.Maildir(path, create=True)
+    path = os.path.join(root, "mail_folders")
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
     for i, (subject, body, headers) in enumerate(messages):
         m = EmailMessage()
         m["From"] = headers.get("From", "sender@example.invalid")
@@ -50,7 +59,7 @@ def build(messages):
         m.set_content(body)
         box.add(mailbox.MaildirMessage(m))
     box.flush()
-    return mail.Config(path)
+    return mail.Config(path, (FEED,))
 
 #: "not specified" must be tellable from "no mailbox", or the helper cannot
 #: express the very case it is asked to test.
@@ -63,7 +72,7 @@ async def board(mail_cfg=UNSET, tasks=None, tracker_cfg=None, go_to_inbox=True):
                             reference=NOW)
     app.calendar_config = None
     app.tracker_config = tracker_cfg
-    app.mail_config = mail.Config(SAMPLE) if mail_cfg is UNSET else mail_cfg
+    app.mail_config = mail.Config(SAMPLE, FOLDERS) if mail_cfg is UNSET else mail_cfg
     opened = []
     app.open_url = lambda url: opened.append(url)
     async with app.run_test(size=(120, 44)) as pilot:
@@ -87,14 +96,17 @@ def status(app): return str(app.query_one("#status").render())
 
 # ---------------------------------------------------------------- the view
 async def the_view():
-    print("mail is shown in the inbox, leading its tasks")
+    print("mail is shown in the inbox, after its tasks")
     async with board(tasks=[mk("i1", "an inbox task"),
                             mk("d1", "a task", TODAY)]) as (app, pilot, opened):
         kinds = ["MAIL" if app.is_mail(t) else "task" for t in app.tasks]
         check("the inbox holds mail and tasks", set(kinds), {"MAIL", "task"})
-        check("mail leads, and is contiguous", kinds, ["MAIL"] * 8 + ["task"])
+        # Mail follows the tasks.  It led them until the volume was
+        # measured -- some 460 mail rows against 35 tasks -- which turned
+        # the argument for leading with it into the argument against.
+        check("mail follows, and is contiguous", kinds, ["task"] + ["MAIL"] * 9)
         check("both queues are counted",
-              ("8 thread(s)" in status(app), "14 message(s)" in status(app)),
+              ("9 thread(s)" in status(app), "18 message(s)" in status(app)),
               (True, True))
         tasks_only = sum(1 for t in app.tasks if not app.is_mail(t))
         check("and the task count counts tasks alone",
@@ -119,10 +131,12 @@ async def the_view():
         check("nor any thread count", "thread(s)" in status(app), False)
 
     print("a mailbox that cannot be read")
-    async with board(mail_cfg=mail.Config("/nonexistent/mailbox"),
+    async with board(mail_cfg=mail.Config("/nonexistent/mailbox", ("Feed",)),
                      tasks=[mk("i1", "an inbox task"),
                             mk("d1", "a task", TODAY)]) as (app, pilot, opened):
-        check("it says so", "mailbox" in status(app).lower(), True)
+        # "mail directory" now, not "mailbox": the path holds one maildir per
+        # folder and is not itself a mailbox.
+        check("it says so", "mail directory" in status(app).lower(), True)
         check("and the inbox still holds its tasks",
               [t.raw.get("title") for t in app.tasks], ["an inbox task"])
         await pilot.press("t")
@@ -223,12 +237,29 @@ async def opening():
               opened[-1:], ["https://ci.corp.invalid/job/deploy-prod/844/console"])
         check("with no choice presented",
               [type(s).__name__ for s in app.screen_stack], ["Screen"])
+        # A row whose messages carry addresses with fragments: the earliest
+        # of those is what the row offers, so a discussion is entered where
+        # it was left off rather than at the newest remark.  The issue the
+        # row names is offered beside it, as it is for a task -- so this row
+        # offers two things and the board asks which.
         issue = await select(app, pilot,
-                             lambda t: "ABC-1234" in (t.raw.get("title") or ""))
+                             lambda t: "ZZA-100" in (t.raw.get("title") or ""))
+        offers = app.openable(issue)
+        check("the issue it names is offered",
+              [url for _s, url in offers
+               if url == "https://track.corp.invalid/issue/ZZA-100"],
+              ["https://track.corp.invalid/issue/ZZA-100"])
+        check("and the earliest anchored address, not the latest",
+              [url for _s, url in offers if "#" in url],
+              ["https://track.corp.invalid/issue/ZZA-100#comment-11"])
+        check("nothing else, though the row holds five messages",
+              len(offers), 2)
         await pilot.press("o")
         for _ in range(8): await pilot.pause()
-        check("a thread naming a configured issue opens the issue",
-              opened[-1:], ["https://track.corp.invalid/issue/ABC-1234"])
+        check("two things means the board asks which",
+              [type(s).__name__ for s in app.screen_stack][-1:], ["LinkPicker"])
+        await pilot.press("escape")
+        for _ in range(6): await pilot.pause()
         human = await select(app, pilot,
                              lambda t: "quick question" in (t.raw.get("title") or ""))
         before = list(opened)
@@ -242,20 +273,29 @@ async def opening():
 
     print("an unconfigured project's key is not an issue")
     async with board(tracker_cfg=None, tasks=[]) as (app, pilot, opened):
-        t = await select(app, pilot, lambda x: "ABC-99" in (x.raw.get("title") or ""))
+        t = await select(app, pilot, lambda x: "ZZA-200" in (x.raw.get("title") or ""))
         offers = [s for s, _ in app.openable(t)]
         check("only the address is offered", offers,
-              ["https://track.corp.invalid/issue/ABC-99"])
+              ["https://track.corp.invalid/issue/ZZA-200"])
 
 # ------------------------------------------------------------- refusals
 async def refusals():
     print("a mail row cannot be changed from the board")
     before = None
     async with board(tasks=[]) as (app, pilot, opened):
-        snap = lambda: sorted(os.listdir(os.path.join(SAMPLE, "new")))
+        snap = lambda: sorted(
+            f"{folder}/{sub}/{name}"
+            for folder in os.listdir(SAMPLE)
+            for sub in ("new", "cur")
+            if os.path.isdir(os.path.join(SAMPLE, folder, sub))
+            for name in os.listdir(os.path.join(SAMPLE, folder, sub))
+            if not name.startswith("."))
         before = snap()
         await select(app, pilot, app.is_mail)
-        for key in ["space", "x", "d", "e", "n", "g", "p", "J", "K", "backspace"]:
+        # `space` is deliberately not in this list any more: on a mail row
+        # it reviews the message rather than being refused, which is what
+        # t_review covers.  Every other writing key is still refused.
+        for key in ["x", "d", "e", "n", "g", "p", "J", "K", "backspace"]:
             await pilot.press(key)
             await pilot.pause()
             check(f"{key}: nothing is asked first",
@@ -294,8 +334,9 @@ async def never_delays():
     print("a mailbox far larger than a person would read")
     import time
     big = tempfile.mkdtemp()
-    path = os.path.join(big, "mail")
-    box = mailbox.Maildir(path, create=True)
+    path = os.path.join(big, "mail_folders")
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
     for i in range(2000):
         m = EmailMessage()
         m["From"] = f"robot{i % 7}@example.invalid"
@@ -308,7 +349,7 @@ async def never_delays():
         box.add(mailbox.MaildirMessage(m))
     box.flush()
     t0 = time.perf_counter()
-    msgs = mail.read(mail.Config(path))
+    msgs = mail.read(mail.Config(path, (FEED,)))
     read_ms = (time.perf_counter() - t0) * 1000
     t0 = time.perf_counter()
     ths = mail.threads(msgs)
@@ -317,7 +358,7 @@ async def never_delays():
           f" {len(ths)} threads")
     check("two thousand messages are all read", len(msgs), 2000)
     check("and threading them is not quadratic (under a second)", thread_ms < 1000, True)
-    async with board(mail_cfg=mail.Config(path), tasks=[]) as (app, pilot, opened):
+    async with board(mail_cfg=mail.Config(path, (FEED,)), tasks=[]) as (app, pilot, opened):
         check("the board draws the big mailbox", len(app.tasks), len(ths))
         t0 = time.perf_counter()
         await pilot.press("t")
@@ -335,7 +376,7 @@ async def beside_the_other_sources():
     app.client = StubClient([mk("t1", "a task", TODAY)], reference=NOW)
     app.calendar_config = ical.Config(work="W", personal=("Me",))
     app.tracker_config = TRK
-    app.mail_config = mail.Config(SAMPLE)
+    app.mail_config = mail.Config(SAMPLE, FOLDERS)
     start = dt.datetime.combine(TODAY, dt.time(9, 0))
     saved = ical.fetch
     ical.fetch = lambda cfg, day: [ical.Event(
@@ -348,6 +389,9 @@ async def beside_the_other_sources():
                   sorted(t.raw.get("title") for t in app.tasks), ["a meeting", "a task"])
             await pilot.press("i")
             for _ in range(24): await pilot.pause()
+            # Eight, not nine: a tracker is configured here, so the two
+            # groups of messages about one of its issues fold into one row
+            # each.  The count where no tracker is configured is nine.
             check("the inbox holds the threads", sum(1 for t in app.tasks
                                                      if app.is_mail(t)), 8)
             check("and no calendar event came into it",

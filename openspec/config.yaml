@@ -10,11 +10,15 @@ context: |
     refuses the writes that would change it.
 
     Tests live in `tests/`, one directory per tier: `stub` needs nothing
-    beyond the repository, `store` talks to the task store, `tracker` to the
-    issue tracker, and `probes` holds files that assert nothing and are never
-    run. The directory is a suite's whole declaration of what it needs.
-    `python tests/run.py` runs the self-contained tier and needs no
-    credentials; the others are asked for explicitly and are paced apart.
+    beyond the repository, `config` reads the board's own `.env`, `store`
+    talks to the task store, `tracker` to the issue tracker, `gateway` moves
+    a real message on a real mail account, and `probes` holds files that
+    assert nothing and are never run. The directory is a suite's whole
+    declaration of what it needs. `python tests/run.py` runs the
+    self-contained tier and needs no credentials; the others are asked for
+    explicitly, refuse to start when what they need is not configured, and
+    the ones sharing the store's quota are paced apart. `--all` runs every
+    tier this machine can, naming the ones it skips.
 
     The account has two tokens. SINGULARITY_TOKEN is the board's;
     SINGULARITY_TEST_TOKEN is the suites', and every suite that talks to the

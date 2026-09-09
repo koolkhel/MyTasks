@@ -9,29 +9,40 @@ import os as _os, sys as _sys
 _TESTS = _os.path.dirname(_os.path.abspath(__file__))
 _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
+sys.path.insert(0, _TESTS)      # the shared support beside the suites
 sys.path.insert(0, _REPO)
 import mail
+import mailfixture as F
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# A copy, never the fixture itself.  The board can now write to a mailbox --
-# promoting marks a thread read -- so a suite that points it at the shared
-# sample can quietly rewrite the thing every other mail suite measures
-# against.  It happened once; copying is what makes it impossible.
-_FIXTURE = _os.path.join(_TESTS, "fixtures", "sample_mail")
-SAMPLE = os.path.join(tempfile.mkdtemp(prefix="fixture."), "sample_mail")
-shutil.copytree(_FIXTURE, SAMPLE)
+# A copy, never the committed mailbox: the board can move messages out of a
+# mailbox now, so a suite reading the shared one in place could rewrite what
+# every other mail suite measures against.  It happened once with a read
+# flag, when the board could not yet move anything at all.
+SAMPLE = F.copy()
+FOLDERS = F.FOLDERS
 ok = []
 def check(name, got, want):
     good = got == want
     ok.append(good)
     print(("  ok  " if good else "  FAIL"), name, "" if good else f"\n        got  {got!r}\n        want {want!r}")
 
+#: The one folder `build` puts its messages in.  The board reads folders it
+#: is named, so a mailbox with no folder in it would read as empty.
+FEED = "Feed"
+
 def build(messages, root=None):
-    """A throwaway maildir from (subject, extra headers, body) tuples."""
+    """A throwaway mailbox from (subject, extra headers, body) tuples.
+
+    One folder, named, inside a container -- which is the shape the board
+    reads.  A bare maildir is not one: it would be read as no folders named
+    and answer nothing.
+    """
     root = root or tempfile.mkdtemp()
-    path = os.path.join(root, "mail")
+    path = os.path.join(root, "mail_folders")
     if os.path.exists(path): shutil.rmtree(path)
-    box = mailbox.Maildir(path, create=True)
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
     for i, (subject, headers, body) in enumerate(messages):
         m = EmailMessage()
         m["From"] = headers.pop("From", "someone@example.invalid")
@@ -44,17 +55,23 @@ def build(messages, root=None):
         m.set_content(body)
         box.add(mailbox.MaildirMessage(m))
     box.flush()
-    return mail.Config(path)
+    return mail.Config(path, (FEED,))
 
 # ------------------------------------------------------------- reading
 print("reading the sample maildir")
-cfg = mail.Config(SAMPLE)
+cfg = mail.Config(SAMPLE, FOLDERS)
 
 def snapshot(root):
-    """Every file in the maildir with its name, size and mtime."""
+    """Every message file in every folder, with its name, size and mtime.
+
+    Walks the folders, because the mailbox is a directory holding one
+    maildir each rather than a maildir itself -- looking for new/ and cur/
+    at the root found nothing and reported no files at all.
+    """
     out = {}
-    for sub in ("new", "cur", "tmp"):
-        d = os.path.join(root, sub)
+    for folder in sorted(os.listdir(root)):
+      for sub in ("new", "cur", "tmp"):
+        d = os.path.join(root, folder, sub)
         if not os.path.isdir(d): continue
         for f in os.listdir(d):
             # Dotfiles are not messages: a maildir needs cur/ and tmp/ to
@@ -64,15 +81,15 @@ def snapshot(root):
             if f.startswith("."):
                 continue
             st = os.stat(os.path.join(d, f))
-            out[f"{sub}/{f}"] = (st.st_size, st.st_mtime_ns)
+            out[f"{folder}/{sub}/{f}"] = (st.st_size, st.st_mtime_ns)
     return out
 
 before = snapshot(SAMPLE)
 msgs = mail.read(cfg)
 after = snapshot(SAMPLE)
-# 15 files, one of them built with seen=True and one unparseable: the
-# board reads unread mail only, so 14 is the whole of the queue.
-check("every unread message is found", len(msgs), 14)
+# 18 messages across three folders read, one of them built with seen=True:
+# the board reads unread mail only, so 17 is the whole of the queue.
+check("every unread message is found", len(msgs), 18)
 check("each has a sender", all(m.sender for m in msgs), True)
 check("each has a subject", all(m.subject for m in msgs), True)
 check("each has an identity", all(m.ident for m in msgs), True)
@@ -83,7 +100,7 @@ check("the text holds subject and body",
 # maildir records "seen" by RENAMING the file, so a comparison of names is
 # what catches a library helpfully marking mail read.
 check("reading changed no file: no rename, no move, no touch", after, before)
-check("and the same number of files", len(after), 15)
+check("and the same number of files", len(after), 19)
 
 print("awkward messages")
 c = build([
@@ -115,8 +132,9 @@ HTML = ("<html><body><h2>Merge request !47 approved</h2>"
         "<script>var x=1;</script><style>p{margin:0}</style></body></html>")
 import mailbox as _m
 from email.message import EmailMessage as _E
-root = tempfile.mkdtemp(); path = os.path.join(root, "mail")
-box = _m.Maildir(path, create=True)
+root = tempfile.mkdtemp(); path = os.path.join(root, "mail_folders")
+os.makedirs(path)
+box = _m.Maildir(os.path.join(path, FEED), create=True)
 def add_html(subject, html, plain=None, mid=None):
     m = _E(); m["From"] = "gitlab@x.invalid"; m["Subject"] = subject
     m["Message-ID"] = mid or f"<{subject}@x.invalid>"
@@ -129,7 +147,7 @@ add_html("html only", HTML)
 add_html("both parts", HTML, plain="the plain one")
 add_html("broken html", "<p>unclosed <b>bits <a href='https://x.invalid/a'>link")
 box.flush()
-got = {m.subject: m for m in mail.read(mail.Config(path))}
+got = {m.subject: m for m in mail.read(mail.Config(path, (FEED,)))}
 check("an HTML-only message is readable, not empty",
       "Merge request !47 approved" in got["html only"].body, True)
 check("its script and style are not shown",
@@ -151,7 +169,7 @@ print("failures become the one type")
 for name, path in [("a path that is not there", "/nonexistent/mailbox"),
                    ("a path that is not a maildir", tempfile.mkdtemp())]:
     try:
-        mail.read(mail.Config(path))
+        mail.read(mail.Config(path, (FEED,)))
         check(name, False, True)
     except mail.MailboxUnreadable:
         check(name, True, True)
@@ -171,22 +189,22 @@ _os.environ.pop("MAIL_MAILDIR", None)
 # ------------------------------------------------------------- threading
 print("folders")
 import mailbox as _mb
-root = tempfile.mkdtemp(); path = os.path.join(root, "mail")
-box = _mb.Maildir(path, create=True)
+# A container of maildirs, not a maildir: the board reads the folders it is
+# named and never the directory holding them.
+root = tempfile.mkdtemp(); path = os.path.join(root, "mail_folders")
+os.makedirs(path)
 def put(target, subject):
     m = EmailMessage(); m["From"] = "s@x.invalid"; m["Subject"] = subject
     m["Message-ID"] = f"<{subject}@x.invalid>"; m.set_content("body")
     target.add(_mb.MaildirMessage(m))
-put(box, "in the inbox")
 for name in ("Alerts", "Reviews", "Ignored"):
-    put(box.add_folder(name), f"in {name}")
-box.flush()
+    put(mailbox.Maildir(os.path.join(path, name), create=True), f"in {name}")
 subs = lambda cfg: sorted(m.subject for m in mail.read(cfg))
-check("with no folders named, the mailbox's own inbox alone",
-      subs(mail.Config(path)), ["in the inbox"])
+check("with no folder named, nothing is read",
+      subs(mail.Config(path)), [])
 check("named folders are read, and only those",
       subs(mail.Config(path, ("Alerts", "Reviews"))),
-      ["in Alerts", "in Reviews", "in the inbox"])
+      ["in Alerts", "in Reviews"])
 check("a folder not named is not read",
       "in Ignored" in subs(mail.Config(path, ("Alerts",))), False)
 try:
@@ -197,9 +215,12 @@ except mail.MailboxUnreadable as exc:
 
 print("threads")
 ths = mail.threads(mail.read(cfg))
-check("the sample's eight unread threads", len(ths), 8)
-check("the three runs are found",
-      sorted(t.count for t in ths if t.count > 1), [2, 3, 4])
+check("the mailbox's nine unread threads", len(ths), 9)
+# Two chains for one issue, one for another, a merge-request pair and a run
+# of builds.  Most real notifications about an issue do carry the header, but
+# not all to the same message -- which is why folding beats threading here.
+check("the runs the headers give", 
+      sorted(t.count for t in ths if t.count > 1), [2, 2, 3, 3, 4])
 check("newest thread first",
       [t.newest.when for t in ths] == sorted((t.newest.when for t in ths), reverse=True), True)
 check("each thread's messages are oldest first",

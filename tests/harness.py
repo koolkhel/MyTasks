@@ -31,6 +31,16 @@ except ImportError:            # the pre-change board, which reads no mailbox
     _mail = None
 if _mail is not None:
     _mail.load_config = lambda *a, **k: None
+try:
+    import gateway as _gateway
+except ImportError:            # the pre-change board, which reaches no server
+    _gateway = None
+# Likewise, and for a stronger reason: this one holds an account's credentials
+# and can move a person's mail.  Every board built here starts with no gateway,
+# so a suite that has not deliberately substituted a server cannot reach one
+# however it presses keys.
+if _gateway is not None:
+    _gateway.load_config = lambda *a, **k: None
 
 TZ = local_tz()
 

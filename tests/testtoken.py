@@ -1,4 +1,4 @@
-"""The environment a suite that talks to the task store is launched with.
+"""What a suite acts on: the suites' own account, and nobody's real mail.
 
 The account has two tokens: the one the board uses, and one for the suites.
 A test run spends its own quota, so exhausting it -- which a full run can --
@@ -9,8 +9,15 @@ Read from `SINGULARITY_TEST_TOKEN` and handed to the suite as
 and nothing should: the suites exercise the same code path a real run takes.
 Where no test token is configured the suite's own environment is passed
 through unchanged, so a checkout with one token still works.
+
+The same call also keeps the suite out of the person's mail.  Once a mail
+directory and a gateway are configured, an ordinary board reads real folders
+and can move real messages -- so a suite that built one and pressed a key
+would archive somebody's mail.  Only the gateway tier may reach a mail
+server, and it says so by not calling this at all.
 """
 import os
+import sys
 
 from dotenv import dotenv_values
 
@@ -35,7 +42,31 @@ def adopt(repo_root=None):
         # Set, not defaulted: the board's token is very likely already in the
         # environment or in .env, and the point is to override it.
         os.environ["SINGULARITY_TOKEN"] = test_token
+    keep_out_of_mail(root)
     return which_token(root)
+
+
+def keep_out_of_mail(repo_root=None):
+    """Make a board built in this process read no mailbox and reach no server.
+
+    Done by answering None from the two functions that say where the mailbox
+    and the gateway are, which is the same "not configured" a board without
+    them has -- so nothing here is a special case the product would not meet
+    in ordinary use.
+
+    A suite that wants a mailbox sets `app.mail_config` itself, to a copy of
+    the fixture; the suites that reach a real mail server are the gateway
+    tier, and they do not call this.
+    """
+    root = repo_root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    for name in ("mail", "gateway"):
+        try:
+            module = __import__(name)
+        except ImportError:
+            continue          # a checkout predating that module
+        module.load_config = lambda *a, **k: None
 
 
 def child_env(repo_root, base=None):

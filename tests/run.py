@@ -3,7 +3,8 @@
     python tests/run.py                 the self-contained suites
     python tests/run.py --store         those that talk to the task store
     python tests/run.py --tracker       those that talk to the issue tracker
-    python tests/run.py --all           every tier, in that order
+    python tests/run.py --gateway       those that move mail on the server
+    python tests/run.py --all           every tier this machine can run
     python tests/run.py t_bands t_add   named suites, wherever they live
     python tests/run.py --list          what would run, and nothing else
 
@@ -47,6 +48,15 @@ TIERS = {
                 "YOUTRACK_BASE_URL", "YOUTRACK_TOKEN", "YOUTRACK_ASSIGNEE")),
     "store": ("the task store", ("SINGULARITY_TOKEN",)),
     "tracker": ("the issue tracker", ("YOUTRACK_BASE_URL", "YOUTRACK_TOKEN")),
+    # Its own tier because none of the others describes it: these move a
+    # real message on a real account, which no other suite here can do, and
+    # they need a mailbox to read as well as a server to move it on. Never
+    # run by default, and refused outright when either half is absent --
+    # half-configured, they would archive mail and be unable to say where
+    # it went.
+    "gateway": ("the mail gateway, and a mailbox to read",
+                ("MAIL_MAILDIR", "MAIL_FOLDERS", "MAIL_IMAP_HOST",
+                 "MAIL_IMAP_USER", "MAIL_IMAP_PASSWORD_COMMAND")),
 }
 #: What a suite calls the tasks it creates, so leftovers are recognisable.
 TEST_PREFIX = "zz"
@@ -183,16 +193,28 @@ def main():
     ap.add_argument("--config", action="store_true")
     ap.add_argument("--store", action="store_true")
     ap.add_argument("--tracker", action="store_true")
+    ap.add_argument("--gateway", action="store_true")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
 
     if args.all:
-        wanted = list(TIERS)
+        # Every tier this machine can run, and a line about each it cannot.
+        # Refusing the whole run over one unconfigured tier would mean that
+        # adding a tier took away the run everybody else was doing -- which
+        # is what adding the gateway tier did, until this.
+        wanted = []
+        for tier in TIERS:
+            absent = missing_for(tier)
+            if absent:
+                print(f"skipping {tier}: needs {', '.join(absent)}")
+            else:
+                wanted.append(tier)
     else:
         wanted = [t for t, on in (("config", args.config),
                                   ("store", args.store),
-                                  ("tracker", args.tracker)) if on] or ["stub"]
+                                  ("tracker", args.tracker),
+                                  ("gateway", args.gateway)) if on] or ["stub"]
 
     plan = []
     if args.names:
@@ -222,14 +244,17 @@ def main():
                   f"\nNothing was run.")
             return 2
 
-    if any(t != "stub" for t, _ in plan):
+    # The label is about the task store's token; a gateway run uses none.
+    if any(t not in ("stub", "gateway") for t, _ in plan):
         label, tail = which_token(REPO)
         print(f"using {label} (ending {tail})")
 
     results = {}
     for i, (tier, name) in enumerate(plan):
         # Only the tiers that share an account are paced.
-        if i and tier not in ("stub", "config"):
+        # The mail gateway is not the store and has no quota to exhaust;
+        # pacing it would only make a slow tier slower.
+        if i and tier not in ("stub", "config", "gateway"):
             time.sleep(GAP)
         got = run_one(tier, name)
         results[name] = got
