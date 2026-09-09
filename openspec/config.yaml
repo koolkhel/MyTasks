@@ -130,6 +130,20 @@ operations:
                 before writing.  A silent no-op replace once left a refusal
                 unimplemented while the parse check still passed, and the key
                 went on performing a real write.
+            - >-
+                Before naming a new attribute or method on a widget or an
+                app, check the name against the class, its bases and the
+                framework.  Two collisions landed in one change: `_closing`
+                is Textual's own message-pump flag, whose loop reads it, so
+                assigning it stopped a running app accepting messages; and a
+                new `mail_failed` attribute shadowed an existing method of
+                that name, so handing `self.mail_failed` to
+                `call_from_thread` passed a bool.  Neither read as a name
+                error -- one hung a suite with no output at all, the other
+                raised "the first argument must be callable" from inside a
+                worker.  `hasattr(App, name)` and a grep for `def <name>(`
+                cost nothing, and this file already records the same trap
+                against `_task` on a modal screen.
     archive:
         guidance:
             - >-

@@ -5,3 +5,8 @@ __pycache__/
 
 # What a live test run records about one account on one day.
 tests/local/
+
+# What the board writes down about the mail account it acts on: message
+# identities and folder names.  A log, never read back -- but a real
+# account's, and this repository is a place that gets shared.
+logs/

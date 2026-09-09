@@ -41,6 +41,19 @@ except ImportError:            # the pre-change board, which reaches no server
 # however it presses keys.
 if _gateway is not None:
     _gateway.load_config = lambda *a, **k: None
+try:
+    import journal as _journal
+except ImportError:          # the pre-change board, which logs nothing
+    _journal = None
+# And the log goes somewhere throwaway.  Suites drive reviews against a
+# substituted server, so they write entries of their own -- and those landed
+# in the board's real log, where the person's own runs are.  Found by
+# reading it: half its lines were reviews confirmed in 0.0 s.  A suite that
+# wants to read what it logged points `journal.PATH` at its own file.
+if _journal is not None:
+    import tempfile as _tempfile
+    _journal.PATH = _os.path.join(
+        _tempfile.mkdtemp(prefix="journal.harness."), "logs", "mytasks.log")
 
 TZ = local_tz()
 

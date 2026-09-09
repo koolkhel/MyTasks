@@ -133,10 +133,21 @@ def t_symmetry():
                            ("action_project","Confirm(")]:
         body=src.split(f"def {action}",1)[1].split("\n    def ",1)[0]
         chk(f"{action} asks before writing", marker in body, marker)
-    # the class definition is not a call site
-    calls=src.count("Confirm(") - src.count("class Confirm(")
-    chk("and no reversible action is behind a Confirm it does not need",
-        calls==2, f"{calls} call sites")
+    # Which functions ask, rather than how many places do: bumping a count
+    # each time something new confirms would stop the check meaning
+    # anything.  `action_leave` is here because quitting asks while the
+    # mailbox is busy -- not a reversible action on a task, which is what
+    # this is guarding.
+    asks=set()
+    for m in re.finditer(r"Confirm\(", src):
+        before=src[:m.start()]
+        if before.rstrip().endswith("class"):
+            continue
+        holder=re.findall(r"\n    (?:async )?def (\w+)", before)
+        if holder:
+            asks.add(holder[-1])
+    chk("and only these ask before writing",
+        asks=={"action_delete","action_project","action_leave"}, str(sorted(asks)))
 
 async def t_dft():
     print("4.1-4.3 done for today is undone in part")

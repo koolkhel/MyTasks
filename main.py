@@ -49,6 +49,7 @@ import email.utils
 
 import gateway
 import ical
+import journal
 import mail
 import tracker
 from singularity import (
@@ -96,6 +97,22 @@ MAIL_PREFIX = "mail:"
 #: tracker's arrow and an event's diamond: four kinds of row that cannot be
 #: ticked would otherwise look like four of the same thing.
 MAIL_ROW_MARK = "@"
+#: The three things the mailbox indicator says, in one cell at the right of
+#: the day bar.  Chosen for width as much as for looks: every glyph here is
+#: unambiguously one terminal cell, where `◐` and `◑` are width-ambiguous
+#: and would make the bar's right edge jitter between frames in a
+#: CJK-configured terminal.  `✓` and `✗` rather than `☑` and `☒`, which are
+#: already this board's ticked and cancelled task marks and would say the
+#: wrong thing in the corner of the eye.
+MAIL_IDLE_MARK = "✓"
+MAIL_FAILED_MARK = "✗"
+#: A rotating arc.  Animated because a still mark cannot be told from a
+#: stuck one, and these operations last tens of seconds -- motion is the
+#: information.
+MAIL_BUSY_MARKS = ("◜", "◝", "◞", "◟")
+#: How often the arc turns.  Fast enough to read as motion, and it runs only
+#: while there is work, so nothing moves while nothing is happening.
+MAIL_SPIN_SECONDS = 0.25
 
 #: Raw keys marking a row as the calendar's.  The same arrangement the
 #: tracker's rows use, for the same reason: a row carrying these is drawn,
@@ -804,6 +821,22 @@ class Help(ModalScreen[None]):
                      back
   backspace          delete for good (asks first)
 
+[b]Is the mailbox busy?[/b]
+  One cell at the right of the second line says so,
+  in every view:
+    ✓   nothing in flight, nothing wrong
+    ◜   turning while messages are being filed away
+    ✗   something failed since you last pressed r
+  Filing a row away takes ten seconds or more and they
+  go one at a time, so ticking several leaves the later
+  ones waiting. q asks before quitting while any of it
+  is outstanding — the ones that had not started would
+  come back at the next launch. r takes the ✗ down.
+  Everything the board does to your mail is written to
+  logs/mytasks.log: what, which folder, how many, how
+  long, and how it ended. Identities and counts only —
+  no subject, no sender, nothing from a message body.
+
 [b]Mail awaiting a decision[/b]
   The inbox also lists what the folders you configure
   hold, marked @ and newest first, below your own tasks
@@ -1061,7 +1094,12 @@ class TaskApp(App[None]):
     """
 
     BINDINGS = [
-        Binding(keys("q"), "quit", "Quit"),
+        # Not Textual's own quit: while the mailbox is busy this asks
+        # first.  Quitting mid-queue abandons the reviews that have not
+        # started -- nothing is lost, because they moved nothing, but the
+        # rows return at the next start and are then indistinguishable from
+        # a message the local mirror has not caught up on.
+        Binding(keys("q"), "leave", "Quit"),
         Binding(keys("j,down"), "cursor_down", "Down", show=False),
         Binding(keys("k,up"), "cursor_up", "Up", show=False),
         # Uppercase moves the task, lowercase the cursor: the same gesture
@@ -1215,11 +1253,18 @@ class TaskApp(App[None]):
         #: gone.  Pruned on every read to what the mailbox still holds, so it
         #: stays the size of the mirror's lag rather than growing all day.
         self.reviewed: set[str] = set()
-        #: Set when the board is closing, so a review that is part way
+        #: Set when the board is leaving, so a review that is part way
         #: through confirming gives up instead of holding the run open.
         #: Quitting used to wait five minutes on a worker blocked in the
         #: gateway, saying nothing.
-        self._closing = False
+        #:
+        #: Emphatically NOT `_closing`: that name belongs to Textual's
+        #: message pump, whose loop reads it -- `while not (self._closed or
+        #: self._closing)` -- so assigning it told the framework the app was
+        #: shutting down and stopped it accepting messages while it was
+        #: still running.  The same collision this file already records
+        #: against `_task` on the focus card.
+        self._leaving = False
         #: Held for the length of one review, so reviews reach the gateway
         #: one at a time.  Without it a person ticking ten rows in a row
         #: opened ten connections at once, each holding the archive open
@@ -1241,6 +1286,32 @@ class TaskApp(App[None]):
         #: cursor when the inbox had been scrolled to row 300, and then
         #: carried that back into the inbox as row 20.
         self._drawn_for: "date | Bucket | None" = None
+        #: How many operations on the mail account are in flight.  Counted
+        #: here rather than asked of the worker manager, which offers no
+        #: count by group: a number the board owns is a number a suite can
+        #: drive, and the board already counts its store writes this way.
+        #:
+        #: Every path on which an operation ends must bring this down --
+        #: there are six, and one missed would leave the board saying "wait"
+        #: for the rest of the session, which is worse than saying nothing.
+        self.mail_busy = 0
+        #: Set by any failed operation, cleared by an explicit reload.  Not
+        #: cleared by a later success: a failure among ten reviews would
+        #: otherwise be painted over before it was seen, which is the whole
+        #: reason for showing it.
+        #:
+        #: `mail_broken`, not `mail_failed`: that name is already a method
+        #: on this class -- the one that reports an unreadable mailbox --
+        #: and an attribute of the same name shadowed it, so
+        #: `call_from_thread(self.mail_failed, ...)` was handed `False` and
+        #: raised.  The second name collision in this one change; the first
+        #: was Textual's `_closing`.
+        self.mail_broken = False
+        #: Which frame of the arc is showing, and the timer turning it.  The
+        #: timer exists only while there is work: the clock's requirement
+        #: already says nothing here may move for nothing.
+        self._spin = 0
+        self._spinner = None
         self.mail_threads: list = []
         #: Why the mailbox could not be read, when it could not be.  Kept
         #: apart from the day's own errors for the reason the tracker's and
@@ -1934,6 +2005,7 @@ class TaskApp(App[None]):
         self.notice(f"Reviewing “{title}” · filing {len(messages)} away")
         self.repaint()
         self.remember_review(task, title, messages)
+        self.mail_started()
         self.file_away(config, self.by_folder(messages), title, thread, where)
 
     def remember_review(self, task: Task, title: str,
@@ -1949,6 +2021,7 @@ class TaskApp(App[None]):
         def reverse(_wrote: dict[str, Task]) -> bool:
             if config is None:
                 return False
+            self.mail_started()
             self.put_back(config, self.by_folder(messages), title)
             return True
 
@@ -1973,24 +2046,71 @@ class TaskApp(App[None]):
         search a message, about a second each, and the board must stay under
         a person's hands throughout.
         """
+        started = monotonic()
+        count = sum(len(idents) for idents in by_folder.values())
+        where_from = ", ".join(sorted(by_folder))
+        journal.ok(f"review of {count} message(s) from {where_from}: starting")
         try:
             with self._mail_gate:
-                if self._closing:
+                if self._leaving:
+                    # Given up: the board is going.  What was moved is in
+                    # the archive either way and the next run finds it.
+                    journal.warn(
+                        f"review of {count} message(s) from {where_from}: "
+                        f"given up, the board is closing")
                     return
                 outcome = gateway.archive(config, by_folder,
                                           connect=self.gateway_connect,
-                                          stop=lambda: self._closing)
+                                          stop=lambda: self._leaving)
         except (gateway.MoveFailed, gateway.GatewayUnreachable) as exc:
             # The row comes back.  A row retired on an unconfirmed move is a
             # message a person believes they have dealt with.
+            journal.error(f"review of {count} message(s) from {where_from} "
+                          f"after {monotonic() - started:.1f}s: {exc}")
             self.call_from_thread(self.review_failed, title, thread, where,
                                   str(exc))
             return
+        finally:
+            self.call_from_thread(self.mail_settled)
+        journal.ok(
+            f"review of {count} message(s) from {where_from} confirmed in "
+            f"{monotonic() - started:.1f}s: {len(outcome.archived)} archived, "
+            f"{len(outcome.already)} already there, "
+            f"{len(outcome.missing)} in neither")
+        for ident in outcome.missing:
+            journal.warn(f"{ident} is in neither {where_from} nor the archive")
         self.call_from_thread(self.review_done, title, outcome)
 
     def forget_reviewed(self, idents: "set[str]") -> None:
         """Stop holding these back from the queue.  UI thread only."""
         self.reviewed -= idents
+
+    def mail_started(self) -> None:
+        """One more operation on the account is in flight.  UI thread only."""
+        self.mail_busy += 1
+        self.update_daybar()
+        self.turn_indicator()
+
+    def mail_broke(self) -> None:
+        """Remember that something went wrong.  UI thread only.
+
+        Not cleared by a later operation succeeding: a failure among ten
+        reviews would otherwise be painted over before it was seen.
+        """
+        self.mail_broken = True
+        self.update_daybar()
+
+    def mail_settled(self) -> None:
+        """One fewer, however it ended.  UI thread only.
+
+        Called from a `finally`, so that the six ways an operation can end
+        -- confirmed, unconfirmed, already archived, in neither place,
+        unreachable, and given up because the board is closing -- all reach
+        it by one route rather than six that could each be forgotten.
+        """
+        self.mail_busy = max(0, self.mail_busy - 1)
+        self.update_daybar()
+        self.turn_indicator()
 
     def on_unmount(self) -> None:
         """Tell whatever is still confirming a review to stop waiting.
@@ -2000,7 +2120,7 @@ class TaskApp(App[None]):
         on it, with the board gone and nothing said.  What was moved is in
         the archive either way, and the next run finds it there.
         """
-        self._closing = True
+        self._leaving = True
 
     def review_done(self, title: str, outcome: Any) -> None:
         """Say what became of a reviewed row's messages."""
@@ -2019,12 +2139,19 @@ class TaskApp(App[None]):
         # there when we looked.
         self.reviewed |= set(outcome.archived) | set(outcome.already)
         said = " · ".join(parts) or "nothing to file away"
+        if outcome.missing:
+            # Not the move failing, but not nothing either: something else
+            # moved that message, and the mark should say so.
+            self.mail_broke()
+        else:
+            self.update_daybar()
         self.notice(f"Reviewed “{title}” · {said}", bool(outcome.missing))
 
     def review_failed(self, title: str, thread: Any, where: int,
                       why: str) -> None:
         """Put a row back, and say why it is back."""
         self.restore_thread(thread, where)
+        self.mail_broke()
         self.notice(f"“{title}” is back in the queue · {why}", True)
 
     @work(thread=True, group="mail-write")
@@ -2037,16 +2164,29 @@ class TaskApp(App[None]):
         # that is back in the folder.
         self.call_from_thread(self.forget_reviewed,
                               {i for idents in by_folder.values() for i in idents})
+        started = monotonic()
+        count = sum(len(idents) for idents in by_folder.values())
+        where_to = ", ".join(sorted(by_folder))
+        journal.ok(f"undo of {count} message(s) to {where_to}: starting")
         try:
             with self._mail_gate:
                 outcome = gateway.restore(config, by_folder,
                                           connect=self.gateway_connect)
         except (gateway.MoveFailed, gateway.GatewayUnreachable) as exc:
+            journal.error(f"undo of {count} message(s) to {where_to} after "
+                          f"{monotonic() - started:.1f}s: {exc}")
+            self.call_from_thread(self.mail_broke)
             self.call_from_thread(
                 self.notice,
                 f"“{title}” could not be put back in the mailbox: {exc}", True)
             return
+        finally:
+            self.call_from_thread(self.mail_settled)
+        journal.ok(f"undo of {count} message(s) to {where_to} done in "
+                   f"{monotonic() - started:.1f}s: {len(outcome.archived)} "
+                   f"moved back, {len(outcome.missing)} not in the archive")
         if outcome.missing:
+            self.call_from_thread(self.mail_broke)
             self.call_from_thread(
                 self.notice,
                 f"“{title}”: {len(outcome.missing)} were not in the archive "
@@ -3074,6 +3214,36 @@ class TaskApp(App[None]):
 
     # -- chrome ------------------------------------------------------------
 
+    def mail_mark(self) -> str:
+        """The one cell at the right of the day bar.
+
+        Three things, in order of what a person needs to know: something is
+        happening, something went wrong, or neither.  In flight wins over
+        failed, because what is running now is what they are waiting on.
+        """
+        if self.mail_busy:
+            return MAIL_BUSY_MARKS[self._spin % len(MAIL_BUSY_MARKS)]
+        return MAIL_FAILED_MARK if self.mail_broken else MAIL_IDLE_MARK
+
+    def turn_indicator(self) -> None:
+        """Start the arc turning while there is work, and stop it after.
+
+        A timer that ran always would move a mark in the corner of the eye
+        for nothing, which is what the clock's requirement forbids of
+        anything that animates on this board.
+        """
+        if self.mail_busy and self._spinner is None:
+            self._spinner = self.set_interval(MAIL_SPIN_SECONDS, self.spin)
+        elif not self.mail_busy and self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+            self._spin = 0
+
+    def spin(self) -> None:
+        """Advance the arc by one frame, and redraw nothing but the bar."""
+        self._spin += 1
+        self.update_daybar()
+
     def work_note(self) -> list[str]:
         """What the daybar says about the work filter, if anything.
 
@@ -3096,7 +3266,7 @@ class TaskApp(App[None]):
                 parts.append(f"{len(self.tasks)} shown")
                 parts.append(f"{self.filed_out} filed, hidden")
             parts += self.work_note()
-            bar.update("  ·  ".join(parts))
+            bar.update(self.with_mark("  ·  ".join(parts), bar))
             return
         today = datetime.now(self.tz).date()
         delta = (self.position - today).days
@@ -3104,7 +3274,26 @@ class TaskApp(App[None]):
             delta, f"{abs(delta)} days {'ahead' if delta > 0 else 'ago'}"
         )
         parts = [f"{self.position:%A %d %B %Y}", relative, *self.work_note()]
-        bar.update("  ·  ".join(parts))
+        bar.update(self.with_mark("  ·  ".join(parts), bar))
+
+    def with_mark(self, said: str, bar: Static) -> str:
+        """The bar's text with the mailbox mark pushed to its right edge.
+
+        Shown in every view: mailbox work outstands whichever view is being
+        looked at, and whether it is safe to leave is the same question in
+        all of them.
+
+        Padded rather than laid out, because the bar is one `Static` and the
+        board already owns it -- a second widget would be a layout change
+        for one cell.  Where the terminal is too narrow for both, the text
+        wins and the mark is dropped: a truncated day bar reads as a fault,
+        where a missing mark reads as nothing at all.
+        """
+        mark = self.mail_mark()
+        room = bar.content_size.width or bar.size.width
+        if not room or len(said) + 2 > room:
+            return said
+        return said + " " * (room - len(said) - len(mark)) + mark
 
     def update_detail(self) -> None:
         task = self.selected
@@ -3234,6 +3423,11 @@ class TaskApp(App[None]):
 
 
     def action_refresh(self) -> None:
+        # Asking for a reload is the gesture that already means "start
+        # again", so it is what takes the mailbox's failure mark down.  Not
+        # a later success: a failure among ten reviews would otherwise be
+        # painted over before it was seen.
+        self.mail_broken = False
         self.projects = {}
         self.load()
 
@@ -3681,6 +3875,7 @@ class TaskApp(App[None]):
                 removes=True, record=False,
             )
             if config is not None and messages:
+                self.mail_started()
                 self.put_back(config, self.by_folder(messages), title)
             return True
 
@@ -3711,6 +3906,7 @@ class TaskApp(App[None]):
             return
         thread, where = dropped
         self.repaint()
+        self.mail_started()
         self.file_away(config, self.by_folder(messages), title, thread, where)
 
     @work
@@ -4026,6 +4222,24 @@ class TaskApp(App[None]):
         """Scroll the note pane down.  The same, in the other direction."""
         self.query_one("#notes").scroll_relative(
             y=self.note_step(), animate=False)
+
+    @work
+    async def action_leave(self) -> None:
+        """Quit, asking first if the mailbox is busy.
+
+        Nothing in flight and it goes at once: a question asked every time
+        is a question that stops being read.  Declining leaves everything
+        as it was, work included.
+        """
+        busy = self.mail_busy
+        if busy:
+            outstanding = f"{busy} mailbox operation{'' if busy == 1 else 's'}"
+            if not await self.push_screen_wait(
+                Confirm(f"{outstanding} still finishing.  Quit anyway?")
+            ):
+                return
+            journal.warn(f"quit with {busy} operation(s) still in flight")
+        self.exit()
 
     def action_help(self) -> None:
         self.push_screen(Help())

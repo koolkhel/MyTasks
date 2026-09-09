@@ -29,7 +29,11 @@ def patch(stub):
 # ---------------- 2.1 every TaskApp letter binding, Russian side ----------
 async def t_app():
     print("2.1 TaskApp: each Russian character runs the same action")
-    cases=[("й","quit"),("о","cursor_down"),("л","cursor_up"),("Л","move_up"),("О","move_down"),
+    # `leave`, not `quit`: the board binds its own action there now, which
+    # asks before quitting while the mailbox is busy.  What this checks is
+    # unchanged -- that the Russian key reaches the same action as its Latin
+    # twin -- and the name it reaches is the board's.
+    cases=[("й","leave"),("о","cursor_down"),("л","cursor_up"),("Л","move_up"),("О","move_down"),
            ("р","prev_day"),("д","next_day"),("е","today"),("ш","inbox"),("ы","someday"),
            ("к","refresh"),("ю","done_for_today"),("ф","add"),("у","rename"),("ч","cancel_task"),
            ("в","schedule"),("щ","open_link"),("comma","help")]
