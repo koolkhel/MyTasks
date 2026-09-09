@@ -623,9 +623,94 @@ async def saying_so():
           ("mark_read" in board_src, "mark_unread" in board_src), (False, False))
 
 
+# ------------------------------------------------------- the line goes down
+async def dropped_line():
+    """The crash that happened on the real account, as an ordinary failure.
+
+    `imaplib.IMAP4.abort` out of an EXAMINE, part way through the archive-side
+    confirmation -- the half that costs a search a message and so holds the
+    connection open longest.  It was neither of the two exceptions the worker
+    caught, so it ended the session and the log fell silent with a `starting`
+    line and no counterpart.
+
+    The whole point of these checks is what does *not* happen: no crash file,
+    because this is no longer a crash.
+    """
+    print("a line that drops part way through a review")
+    import imaplib, tempfile
+    import journal
+    journal.PATH = os.path.join(tempfile.mkdtemp(prefix="journal."),
+                                "logs", "mytasks.log")
+    room = os.path.dirname(journal.PATH)
+
+    def lines():
+        try:
+            with open(journal.PATH, encoding="utf-8") as fh:
+                return [l.rstrip("\n") for l in fh if l.strip()]
+        except OSError:
+            return []
+
+    def crash_files():
+        return [f for f in os.listdir(room)
+                if f.startswith("crash-")] if os.path.isdir(room) else []
+
+    # The moves are answered; the line goes down on the archive-side
+    # confirmation, which is where it went down on the account.
+    def drop_confirming(name, args):
+        if name == "SELECT" and args and args[0] == F.ARCHIVE:
+            raise imaplib.IMAP4.abort("command: EXAMINE => socket error: EOF")
+        return None
+
+    path = F.copy()
+    imap = server_for(path, fail=drop_confirming)
+    async with board(mail_cfg=mail.Config(path, tuple(F.FOLDERS)),
+                     imap=imap) as (app, pilot, _p, _i, _o):
+        before = len(rows(app))
+        row = max(rows(app), key=lambda t: t.raw[main.MAIL_COUNT])
+        held = row.raw[main.MAIL_COUNT]
+        folders = {m.folder for m in row.raw[main.MAIL_MESSAGES]}
+        await select(app, pilot, lambda t: t.id == row.id)
+        await pilot.press("space")
+        for _ in range(60):
+            await settle(pilot, 4)
+            if not app.mail_busy:
+                break
+        check("the row is back in the queue", len(rows(app)), before)
+        check("and it is the same row",
+              any(t.id == row.id for t in rows(app)))
+        # The mark: the failure is sticky until a reload, so a failure among
+        # ten reviews is not painted over before it is seen.
+        check("the mailbox is marked as having failed", app.mail_broken)
+        check("and the cell says so", app.mail_mark(), main.MAIL_FAILED_MARK)
+        check("nothing is left in flight", app.mail_busy, 0)
+        check("the board is still running", app.is_running)
+        # The point of the change.  This exact failure used to end the
+        # session, so a crash file here would mean it still does.
+        check("no crash file was written", crash_files(), [])
+        said = lines()
+        starting = [l for l in said if "starting" in l]
+        failed = [l for l in said if "ERROR" in l]
+        check("one line says the review started", len(starting), 1)
+        check("and one says it failed", len(failed), 1)
+        # The signature the account showed: a start with no counterpart. What
+        # made the crash undiagnosable was this pair not existing.
+        check("so the start is no longer orphaned",
+              len(starting) == len(failed))
+        check("the failure names the folder it came from",
+              bool(failed) and any(f in failed[0] for f in folders))
+        check("and how many messages", str(held) in failed[0] if failed else False)
+        check("and how long it took before giving up",
+              bool(failed) and "s:" in failed[0])
+        check("and says the line went down rather than the move being refused",
+              bool(failed) and "closed the line" in failed[0])
+        check("the person is told, naming the row",
+              "back in the queue" in status(app))
+
+
 async def main_():
     for part in (folding, ordering, opens, reviewing, confirming,
-                 stays_gone, nothing_written, configuration, saying_so):
+                 stays_gone, nothing_written, dropped_line, configuration,
+                 saying_so):
         await part()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1

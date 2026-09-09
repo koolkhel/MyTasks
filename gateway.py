@@ -220,8 +220,47 @@ class Server:
             pass
         return False
 
+    def _talk(self, command: str, call):
+        """Run one request, and answer for it in this module's own terms.
+
+        The one place `imaplib`'s exceptions are allowed to end.  Whatever
+        happens underneath -- the gateway closing the line mid-command, a
+        socket error, a protocol refusal -- leaves here as one of this
+        module's two exceptions, so that nothing calling this class has to
+        know a protocol is involved.
+
+        Only `__enter__` used to do this, for connect and login, which
+        covers a review that cannot start.  Nothing covered the connection
+        dying part way through, and against this gateway that is the likeliest
+        of the three: an operation stays open for tens of seconds, and the
+        longer it is open the better its chance of being cut.
+
+        `abort` is caught before `error` because it is a subclass of it.
+        imaplib raises `abort` when the connection is gone and `error` when
+        the server answered and would not do it; read the other way round,
+        every dropped line would be reported as a refusal.
+
+        One call, never a method body.  An `OSError` raised by something
+        else in the same method is a bug in this file, and reporting it as
+        an unreachable mailbox would hide it.
+        """
+        try:
+            return call()
+        except imaplib.IMAP4.abort as exc:
+            raise GatewayUnreachable(
+                f"the gateway closed the line during {command}: {exc}") from exc
+        except imaplib.IMAP4.error as exc:
+            raise MoveFailed(f"the gateway refused {command}: {exc}") from exc
+        except OSError as exc:
+            raise GatewayUnreachable(
+                f"the line to the gateway failed during {command}: "
+                f"{type(exc).__name__}") from exc
+
     def _select(self, folder: str, readonly=False):
-        typ, _ = self.imap.select(f'"{utf7_encode(folder)}"', readonly=readonly)
+        typ, _ = self._talk(
+            "EXAMINE" if readonly else "SELECT",
+            lambda: self.imap.select(f'"{utf7_encode(folder)}"',
+                                     readonly=readonly))
         if typ != "OK":
             raise MoveFailed(f"the folder {folder} could not be opened")
 
@@ -264,7 +303,9 @@ class Server:
         if not wanted:
             return []
         self._select(folder, readonly=True)
-        typ, data = self.imap.uid("FETCH", ",".join(wanted), "(FLAGS)")
+        typ, data = self._talk(
+            "FETCH", lambda: self.imap.uid("FETCH", ",".join(wanted),
+                                           "(FLAGS)"))
         if typ != "OK":
             # A fetch of numbers that have all gone is answered OK with
             # nothing; a refusal is something else, and is not "absent".
@@ -283,8 +324,9 @@ class Server:
         if not wanted:
             return
         self._select(folder)
-        typ, resp = self.imap.uid("MOVE", ",".join(wanted),
-                                  f'"{utf7_encode(target)}"')
+        typ, resp = self._talk(
+            "MOVE", lambda: self.imap.uid("MOVE", ",".join(wanted),
+                                          f'"{utf7_encode(target)}"'))
         if typ != "OK":
             raise MoveFailed(f"the move was refused: {resp}")
 
@@ -300,8 +342,10 @@ class Server:
 
     def _number_here(self, folder: str, message_id: str) -> bytes | None:
         """The same, for a folder already open.  Saves re-selecting it."""
-        typ, data = self.imap.uid(
-            "SEARCH", None, "HEADER", "Message-ID", f'"{message_id}"')
+        typ, data = self._talk(
+            "SEARCH",
+            lambda: self.imap.uid("SEARCH", None, "HEADER", "Message-ID",
+                                  f'"{message_id}"'))
         if typ != "OK":
             raise MoveFailed(f"the folder {folder} could not be searched")
         found = (data[0].split() if data and data[0] else [])
@@ -330,8 +374,11 @@ class Server:
         # Writable: a read-only mailbox refuses a store, and this is the one
         # flag the board sets anywhere.
         self._select(folder)
-        typ, resp = self.imap.uid("STORE", ",".join(wanted),
-                                  "+FLAGS" if seen else "-FLAGS", r"(\Seen)")
+        typ, resp = self._talk(
+            "STORE",
+            lambda: self.imap.uid("STORE", ",".join(wanted),
+                                  "+FLAGS" if seen else "-FLAGS",
+                                  r"(\Seen)"))
         if typ != "OK":
             raise MoveFailed(
                 f"the messages could not be marked "

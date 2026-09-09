@@ -25,9 +25,12 @@ the row returns when the mailbox next catches up.
 import asyncio
 import builtins
 import functools
+import imaplib
 import os
 import re
+import socket
 import sys
+import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -209,6 +212,35 @@ async def main_():
         back = gateway.restore(gw, where)
         check("the message is back in its folder", len(back.archived), 1)
 
+    # -- the line goes down part way through, against the real gateway ----
+    # The crash this change exists for, reproduced on the account it happened
+    # on: the socket is closed under the client after the move and before the
+    # archive-side confirmation, so imaplib reads EOF from a connection it
+    # still believes is open.  That is what the gateway did.
+    #
+    # The log goes to a throwaway directory for this half, unlike the one
+    # above.  Two reasons: proving that no crash file was written needs a
+    # directory that did not already have one, and a synthetic failure has no
+    # business in the log a person reads to find real ones.
+    print("the line goes down part way through a real review")
+    single = next((t for t in rows if t.count == 1), None)
+    if single is None:
+        print("  no row stands for a single message; skipping this half")
+    else:
+        room = tempfile.mkdtemp(prefix="gwlive.")
+        journal.PATH = os.path.join(room, "logs", "mytasks.log")
+        where = {single.newest.folder: [single.newest.ident]}
+        try:
+            await _board_review_cut(single, mailbox, gw)
+        finally:
+            # The move succeeded before the cut, so the message is in the
+            # archive whatever the checks said.  In a finally, and reported:
+            # an interrupt here must still put somebody's mail back.
+            back = gateway.restore(gw, where)
+            check("the message is back in its folder after the cut",
+                  len(back.archived), 1)
+        journal.PATH = REAL_LOG
+
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1
 
@@ -219,6 +251,156 @@ def _lines_in_log():
             return [l.rstrip("\n") for l in fh if l.strip()]
     except OSError:
         return []
+
+
+async def _board_review_cut(row, mailbox, gw):
+    """Tick one real row, and cut the line before the confirmation lands."""
+    #: Command names in order, for saying what happened if a check fails.
+    #: Names only -- an argument would carry a folder name.
+    seq = []
+    made = []
+
+    def cut_after_the_move(name, args):
+        """Cut on the second select after the move.
+
+        Counting rather than matching a folder name.  The sequence after the
+        move is fixed: a readonly select of the folder just emptied and a
+        flags fetch, which prove the messages left, and then a select of the
+        archive per message, which is the half that proves they arrived and
+        the half the line went down in on the account.  So the second select
+        after the move is the archive-side confirmation, whatever the account
+        happens to call its archive -- and matching the name was tried first,
+        did not fire, and cost a live run to find out.
+        """
+        seq.append(name)
+        if name != "SELECT":
+            return False
+        return seq.count("MOVE") >= 1 and \
+            seq.count("SELECT") - _selects_before_move(seq) == 2
+
+    def _selects_before_move(names):
+        return names[:names.index("MOVE")].count("SELECT") \
+            if "MOVE" in names else names.count("SELECT")
+
+    app = main.TaskApp()
+    app.client = StubClient([mk("zz-stub-cut", "a stubbed task")],
+                            reference=__import__("datetime").datetime.now(TZ))
+    app.calendar_config = app.tracker_config = None
+    app.mail_config = mailbox
+    app.gateway_config = gw
+    def connect():
+        one = Guillotine(gw, cut_after_the_move)
+        made.append(one)
+        return one
+
+    app.gateway_connect = connect
+    async with app.run_test(size=(120, 44)) as pilot:
+        for _ in range(20):
+            await pilot.pause()
+        await pilot.press("i")
+        for _ in range(40):
+            await pilot.pause()
+        wanted = f"{main.MAIL_PREFIX}{row.newest.ident}"
+        at = next((i for i, t in enumerate(app.tasks) if t.id == wanted), None)
+        check("the row is on the board", at is not None)
+        if at is None:
+            return
+        was = len([t for t in app.tasks if main.TaskApp.is_mail(t)])
+        table = app.query_one(DataTable)
+        table.move_cursor(row=at)
+        app._selected_id = wanted
+        for _ in range(6):
+            await pilot.pause()
+        app.review(app.tasks[at])
+        started = time.monotonic()
+        for _ in range(1800):
+            await asyncio.sleep(0.1)
+            if app.mail_busy == 0:
+                break
+        took = time.monotonic() - started
+        print(f"  the line went down after {took:.1f}s")
+        check("the line was actually cut",
+              any(one.cut for one in made))
+        if not any(one.cut for one in made):
+            print(f"  commands in order: {seq}")
+        check("nothing is left in flight", app.mail_busy, 0)
+        check("the board is still running", app.is_running)
+        # The whole point.  This failure used to end the session.
+        check("no crash file was written",
+              [f for f in os.listdir(os.path.dirname(journal.PATH))
+               if f.startswith("crash-")]
+              if os.path.isdir(os.path.dirname(journal.PATH)) else [], [])
+        check("the mailbox is marked as having failed", app.mail_broken)
+        check("and the cell says so", app.mail_mark(), main.MAIL_FAILED_MARK)
+        check("the row came back to the queue",
+              len([t for t in app.tasks if main.TaskApp.is_mail(t)]), was)
+        said = _lines_in_log()
+        failed = [l for l in said if "ERROR" in l]
+        check("one line says it failed", len(failed), 1)
+        check("naming how many messages",
+              bool(failed) and "1 message(s)" in failed[0])
+        check("and that the line went down rather than a move being refused",
+              bool(failed) and "closed the line" in failed[0])
+        check("no subject or sender reached the log",
+              any(row.newest.subject[:18] in l for l in said), False)
+        for line in failed:
+            print(f"  logged: {line.split(' ', 1)[1][:76]}")
+
+
+class Guillotine:
+    """A real connection whose socket is closed under it, on cue.
+
+    Shutting the socket down under the client rather than closing the client:
+    imaplib then reads EOF from a connection it still believes is open,
+    raises `IMAP4.abort`, and that is precisely the shape of the failure that
+    ended a session on this account.  Nothing else about the conversation is
+    changed -- every request before the cut goes to the real gateway and is
+    answered by it.
+    """
+
+    def __init__(self, config, cut_when):
+        self.real = imaplib.IMAP4(config.host, config.port,
+                                  timeout=config.timeout)
+        self.cut_when = cut_when
+        self.cut = False
+
+    def _maybe_cut(self, name, args):
+        if not self.cut and self.cut_when(name, args):
+            self.cut = True
+            try:
+                # `shutdown`, not `close`.  A socket with a `makefile`
+                # outstanding -- which imaplib always has -- keeps its
+                # descriptor open on `close`: the method sets a flag and
+                # defers the real close until the last reader is gone.  So
+                # closing it changed nothing, the conversation carried on,
+                # and a live run reported a review that succeeded.  A
+                # shutdown ends the line for real, and the next read returns
+                # nothing, which is the EOF the gateway actually produced.
+                self.real.socket().shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self.real.socket().close()
+            except Exception:
+                pass
+
+    def login(self, *args):
+        return self.real.login(*args)
+
+    def logout(self):
+        # A line already down has nothing left to say goodbye on.
+        try:
+            return self.real.logout()
+        except Exception:
+            return ("BYE", [b"gone"])
+
+    def select(self, mailbox, readonly=False):
+        self._maybe_cut("SELECT", (mailbox, readonly))
+        return self.real.select(mailbox, readonly=readonly)
+
+    def uid(self, command, *args):
+        self._maybe_cut(command.upper(), args)
+        return self.real.uid(command, *args)
 
 
 async def _board_review(row, mailbox, gw):

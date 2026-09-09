@@ -329,5 +329,163 @@ check("a message not in the archive is reported rather than invented",
       gateway.restore(fakeimap.CONFIG, {"Alerts": [ident(7)]},
                       connect=lambda: imap).missing, (ident(7),))
 
+# -- the protocol's exceptions do not leave this module --------------------
+# The board crashed on the real account with `imaplib.IMAP4.abort` from an
+# EXAMINE, part way through confirming a seven-message row: neither
+# `MoveFailed` nor `GatewayUnreachable`, so the worker's except did not hold
+# it and the session ended.  Everything below is about that never being
+# possible again -- whatever happens underneath, a caller of this class sees
+# one of two exceptions.
+print("a protocol failure leaves as one of the gateway's own exceptions")
+
+import imaplib
+
+#: `abort` is a subclass of `error`, so the order the two are caught in is
+#: the whole difference between "the line is gone" and "the server said no".
+KINDS = (
+    ("abort", imaplib.IMAP4.abort("socket error: EOF"),
+     gateway.GatewayUnreachable),
+    ("error", imaplib.IMAP4.error("BAD command unrecognised"),
+     gateway.MoveFailed),
+    ("OSError", ConnectionResetError("reset by peer"),
+     gateway.GatewayUnreachable),
+)
+
+
+def raising_on(command, exc):
+    """A fail hook that raises from one command and lets the rest through."""
+    def fail(name, args):
+        if name == command:
+            raise exc
+        return None
+    return fail
+
+
+def caught(command, exc, act):
+    """What `act` raises when `command` fails underneath it."""
+    imap = fakeimap.FakeIMAP({"Alerts": [ident(1), ident(2)], "Archive": []},
+                             fail=raising_on(command, exc))
+    try:
+        with fakeimap.server(fakeimap.CONFIG, imap) as srv:
+            act(srv)
+    except BaseException as caught_exc:
+        return caught_exc
+    return None
+
+
+#: One per verb the class sends, with something that exercises it.  A raw
+#: `imaplib` type reaching a caller is the failure being guarded against, so
+#: every case asserts the type as well as the message.
+#: (which command fails, the word the gateway's message must carry, what to
+#: run).  The two differ for a readonly select: the fake records SELECT, and
+#: the product distinguishes it as EXAMINE -- which is the command today's
+#: crash died in, so the name reaching a person matters.
+VERBS = (
+    ("SELECT", "SELECT", lambda s: s.move("Alerts", [b"101"], "Archive")),
+    ("SELECT", "EXAMINE", lambda s: s.number("Archive", ident(1))),
+    ("FETCH", "FETCH", lambda s: s.present("Alerts", [b"101"])),
+    ("MOVE", "MOVE", lambda s: s.move("Alerts", [b"101"], "Archive")),
+    ("SEARCH", "SEARCH", lambda s: s.number("Archive", ident(1))),
+    ("STORE", "STORE", lambda s: s.mark_seen("Alerts", [b"101"])),
+)
+
+for command, named, act in VERBS:
+    for kind, exc, want in KINDS:
+        got = caught(command, exc, act)
+        check(f"{named} raising {kind} is reported as {want.__name__}",
+              type(got), want)
+        check(f"{named} raising {kind} names the command",
+              named in str(got), True)
+
+# The point of the type check above, stated once on its own: what escaped
+# before was the library's, and nothing of the library's may escape now.
+for command, named, act in VERBS:
+    for kind, exc, _ in KINDS:
+        got = caught(command, exc, act)
+        check(f"no imaplib type escapes {named} raising {kind}",
+              isinstance(got, (imaplib.IMAP4.error, OSError)), False)
+
+print("today's crash, reproduced at the gateway")
+# The shape it actually took: the moves succeed, and the line drops on the
+# archive-side confirmation -- the half that costs a search a message and so
+# holds the connection open longest.
+seen = []
+
+
+def drop_on_second_examine(name, args):
+    # The fake records both forms as SELECT; this is the readonly one, on the
+    # archive, which is the per-message half of the confirmation.
+    if name == "SELECT" and args and args[0] == "Archive":
+        seen.append(name)
+        if len(seen) >= 2:
+            raise imaplib.IMAP4.abort("command: EXAMINE => socket error: EOF")
+    return None
+
+
+imap = fakeimap.FakeIMAP({"Alerts": [ident(i) for i in range(1, 4)],
+                          "Archive": []},
+                         fail=drop_on_second_examine)
+try:
+    gateway.archive(fakeimap.CONFIG,
+                    {"Alerts": [ident(1), ident(2), ident(3)]},
+                    connect=lambda: imap)
+    fell_over = None
+except BaseException as exc:
+    fell_over = exc
+check("the review fails as the gateway being unreachable",
+      type(fell_over), gateway.GatewayUnreachable)
+check("and says which command the line dropped on",
+      "EXAMINE" in str(fell_over), True)
+# Half a review is a row to look at again; un-archiving what was confirmed
+# to make the report tidy is the one thing that loses mail.
+check("what was already confirmed stays in the archive",
+      len(imap.ids("Archive")), 3)
+check("and nothing was marked read, the confirmation being unfinished",
+      imap.commands().count("STORE"), 0)
+
+print("a gateway that is down at the start still says so with host and port")
+# `__enter__` converts connect and login itself, more broadly than the
+# per-command helper does, and its message is the one worth reading: a
+# review that cannot start is a different fault from one cut off part way.
+for kind, exc, _ in KINDS:
+    def refuse():
+        raise exc
+    try:
+        with gateway.Server(fakeimap.CONFIG, connect=refuse):
+            pass
+        got = None
+    except BaseException as exc_out:
+        got = exc_out
+    check(f"connect raising {kind} is GatewayUnreachable",
+          type(got), gateway.GatewayUnreachable)
+    check(f"and names where it tried ({kind})",
+          fakeimap.CONFIG.host in str(got) and str(fakeimap.CONFIG.port) in str(got),
+          True)
+
+imap = fakeimap.FakeIMAP({"Alerts": [ident(1)], "Archive": []},
+                         fail=raising_on("LOGIN", imaplib.IMAP4.abort("EOF")))
+try:
+    with fakeimap.server(fakeimap.CONFIG, imap):
+        pass
+    got = None
+except BaseException as exc_out:
+    got = exc_out
+check("login raising abort is GatewayUnreachable",
+      type(got), gateway.GatewayUnreachable)
+check("and names where it tried",
+      fakeimap.CONFIG.host in str(got), True)
+
+# LOGOUT is inside `__exit__`, which swallows everything: a line that drops
+# on the way out has nothing left to fail.
+imap = fakeimap.FakeIMAP({"Alerts": [ident(1)], "Archive": []},
+                         fail=raising_on("LOGOUT", imaplib.IMAP4.abort("EOF")))
+try:
+    with fakeimap.server(fakeimap.CONFIG, imap) as srv:
+        srv.holds("Alerts", ident(1))
+    left_quietly = True
+except BaseException:
+    left_quietly = False
+check("a line that drops on logout is not a failure", left_quietly, True)
+
 print(f"\n{sum(ok)}/{len(ok)} checks passed")
 sys.exit(0 if all(ok) else 1)

@@ -6,7 +6,24 @@ __pycache__/
 # What a live test run records about one account on one day.
 tests/local/
 
-# What the board writes down about the mail account it acts on: message
-# identities and folder names.  A log, never read back -- but a real
-# account's, and this repository is a place that gets shared.
+# What the board writes down about the mail account it acts on.  Two kinds of
+# file, and the second is why this line is load-bearing rather than tidy.
+#
+# The log holds message identities, folder names, counts and durations, and is
+# forbidden a subject, a sender or any part of a body.
+#
+# A crash file holds the whole failure: every frame and the values in it.  A
+# failure part way through a review means the messages being reviewed -- so
+# subjects, senders and bodies, in full.  It is allowed to hold that on this
+# condition and no other, which makes this exclusion the thing the content
+# rests on.  Anything that would move these files somewhere committable has to
+# answer for that first.
 logs/
+
+# A traceback saved out of the terminal by hand lands where the person was
+# standing, which is here.  Same content, same reason.
+crash*.txt
+
+# An editor's swap file holds the content of what is open in it, so a swap of
+# one of the above is one of the above.
+*.swp

@@ -2112,6 +2112,28 @@ class TaskApp(App[None]):
         self.update_daybar()
         self.turn_indicator()
 
+    def _handle_exception(self, error: Exception) -> None:
+        """Write a failure down before the session goes.
+
+        Deliberately overriding the framework's own name -- the one place
+        every unhandled exception arrives, worker failures included, and the
+        only one that sees a failure raised on a worker thread.  A
+        `sys.excepthook` never fires for those, and wrapping `run()` never
+        sees them either: the framework handles them itself and re-raises
+        only under a test pilot.
+
+        The session still ends, by the same route it ended by before.  A
+        failure nothing anticipated is evidence of a defect, not a state to
+        keep working in, and a board that carried on after one could not be
+        trusted afterwards about what it had done to the account.
+
+        Which file, and what may be said about the failure in the log
+        beside it, is `journal`'s business: it owns both files and the rule
+        about what each may hold.
+        """
+        journal.crash(error)
+        super()._handle_exception(error)
+
     def on_unmount(self) -> None:
         """Tell whatever is still confirming a review to stop waiting.
 
