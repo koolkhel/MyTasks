@@ -5,15 +5,21 @@ context: |
     We use conventional commits
     Domain: todo app
 
-    The board draws rows from four sources -- the task store (the only one it
-    writes freely), the issue tracker, the calendar, and a maildir.  A row from
+    The board draws rows from several sources. A row from
     a source carries a marker, is drawn and counted like any other row, and
     refuses the writes that would change it.
 
-    Tests are not in the repo.  They are standalone scripts in the session's
-    scratchpad, run one at a time with the venv's Python, each printing its own
-    checks and an "N/M checks passed" line.  Some drive the UI through
-    Textual's Pilot against a stubbed store; others talk to the real account.
+    Tests live in `tests/`, one directory per tier: `stub` needs nothing
+    beyond the repository, `store` talks to the task store, `tracker` to the
+    issue tracker, and `probes` holds files that assert nothing and are never
+    run. The directory is a suite's whole declaration of what it needs.
+    `python tests/run.py` runs the self-contained tier and needs no
+    credentials; the others are asked for explicitly and are paced apart.
+
+    The account has two tokens. SINGULARITY_TOKEN is the board's;
+    SINGULARITY_TEST_TOKEN is the suites', and every suite that talks to the
+    store adopts it before building a client. Both live in the gitignored
+    `.env`.
 
 # Per-artifact rules (optional)
 rules:
@@ -30,6 +36,10 @@ rules:
         - >-
             Where a task reads a fixture the code under test can now write to,
             say that the fixture is copied per run.
+        - >-
+            A task that runs a suite against the task store says it uses the
+            suites' token rather than the board's, so that checking it off
+            means the quota spent was the right one.
 
 # Per-operation guidance (optional)
 operations:
@@ -42,6 +52,26 @@ operations:
                 fails for a reason that has nothing to do with the change.
                 Run the stubbed suites as a batch; pace the live ones about
                 25 seconds apart.
+            - >-
+                A suite that talks to the task store uses the account's second
+                token, never the board's.  `.env` holds SINGULARITY_TEST_TOKEN
+                beside SINGULARITY_TOKEN; a suite sets the former as its own
+                SINGULARITY_TOKEN before it builds a client, and the runner
+                also hands it to every suite it launches.  A full run can spend
+                the quota, and when it does it must be the suites' quota gone,
+                not the one the board being worked in depends on.
+            - >-
+                Make that hold for a suite run on its own, not only through the
+                runner: narrowing a failure down means running one suite
+                directly, and that is exactly when reaching for the board's
+                token would go unnoticed.  Prove it by setting the board's
+                token to an invalid value and running a live suite directly --
+                if it still reaches the account, it used the right one.
+            - >-
+                Never read a test token from the product.  The suites exercise
+                the same code path a real run takes, so nothing in the board
+                may know that a second token exists; the swap happens in the
+                suite's own environment before the client is built.
             - >-
                 Count throttle errors in a run and report them, so a quota
                 failure is never read as a regression.  A live suite that
@@ -110,9 +140,12 @@ operations:
                 lost, and that every untouched requirement is unchanged.  That
                 check caught a splitter quietly losing 3 of 104 requirements.
             - >-
-                Stage explicitly with `git add -- '*.py' openspec`.  Never
-                `git add -A` -- the scratchpad, the captures and .env sit
-                nearby.
+                Stage explicitly with `git add -- '*.py' openspec tests`.
+                Never `git add -A` -- the scratchpad, the captures and .env
+                sit nearby.  `tests` is named because the pathspec `'*.py'`
+                matches no maildir fixture file, so without it the mail
+                suites land without the data they read and fail on a fresh
+                clone.
             - >-
                 Grep the staged diff for scrubbed identifiers, project keys and
                 credentials before committing.  A real tracker key was removed

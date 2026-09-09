@@ -1,0 +1,11 @@
+From: youtrack@track.corp.invalid
+To: me@corp.invalid
+Subject: ABC-99: mentioned you in a comment
+Date: Tue, 08 Sep 2026 14:20:00 -0000
+Message-ID: <sample-14@corp.invalid>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+See ABC-99.
+https://track.corp.invalid/issue/ABC-99

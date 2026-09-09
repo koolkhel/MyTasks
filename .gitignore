@@ -2,3 +2,6 @@
 .env
 __pycache__/
 *.pyc
+
+# What a live test run records about one account on one day.
+tests/local/
