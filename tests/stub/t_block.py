@@ -151,6 +151,17 @@ async def unchanged():
               ("1 tracked" in hidden, "2 work hidden" in hidden), (False, True))
         check("what is left is the own task and the done one",
               [t.raw.get("title") for t in app.tasks], ["own task", "done"])
+        # The invariant, not only the case: with the mode on, nothing on
+        # screen counts as work.  It is what catches a source appended past
+        # the work filter -- which happened to the mail rows -- for whichever
+        # sources a board happens to hold.  Not "shown plus hidden is what
+        # there was": a source that escapes the filter adds nothing to the
+        # hidden count either, so that sum balances while the rows are still
+        # on screen.
+        check("nothing on screen counts as work",
+              [t.raw.get("title") for t in app.tasks if app.is_work(t)], [])
+        check("and shown plus hidden is what there was",
+              len(app.tasks) + app.hidden_work, 4)
         await pilot.press("w")
         for _ in range(10): await pilot.pause()
         check("pressing again brings them back", len(app.tasks), 4)

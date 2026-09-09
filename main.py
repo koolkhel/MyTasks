@@ -2827,7 +2827,28 @@ class TaskApp(App[None]):
         return bool(task is not None and task.raw.get(TRACKER_MARK))
 
     def is_work(self, task: Task) -> bool:
-        """Whether a task belongs to the project configured as work."""
+        """Whether a row counts as work, and so is hidden by the key for it.
+
+        Two ways of counting, and this is the one place that decides.
+
+        A task counts by its project.  A mail row counts because it is mail:
+        every message the board reads comes from a corporate account, so
+        there is no mail it reads that is not work.  Not gated on a work
+        project being configured -- that setting says which *task* project
+        counts, and mail does not need it to be work.  The key refuses to
+        turn on without one anyway, so nothing on screen turns on this.
+
+        A rule rather than a project stamped onto the row, which is how the
+        tracker's rows and the work account's events are recognised.  The
+        focus card is why: enter opens it on any row, mail rows included, and
+        it is handed the name of the row's project -- so a stamped mail row
+        would announce the work project on its card.  A tracker row's card
+        already does that; this declines to spread it rather than matching
+        it.  `row_for` would not have minded either way, returning its own
+        tuple for a mail row before it reads a project at all.
+        """
+        if self.is_mail(task):
+            return True
         return self.work_project is not None and task.project_id == self.work_project
 
     def belongs(self, task: Task) -> bool:
@@ -2895,33 +2916,43 @@ class TaskApp(App[None]):
         issues = self.tracker_rows()
         self.shown_issues = len(issues)
         events = self.event_rows()
-        # The filter is applied to both, because appending afterwards would
-        # otherwise carry the tracker rows -- the most work-like rows on
-        # screen -- straight past the key that hides work.
+        # Every source is built before the filter and filtered with the
+        # day's tasks, because a source appended afterwards is a source the
+        # key cannot reach however its rows are marked.  That was written
+        # here for the tracker's rows -- the most work-like on screen -- and
+        # then mail was appended afterwards anyway and went unhidden for
+        # three changes.  So: build them all here, filter them all here, and
+        # let the placing below arrange what survives.
+        mails = self.mail_rows()
         self.hidden_work = (
-            sum(1 for t in tasks + issues + events if self.is_work(t))
+            sum(1 for t in tasks + issues + events + mails if self.is_work(t))
             if self.hiding_work else 0
         )
         if self.hiding_work:
             tasks = [t for t in tasks if not self.is_work(t)]
             issues = [t for t in issues if not self.is_work(t)]
             events = [t for t in events if not self.is_work(t)]
+            mails = [t for t in mails if not self.is_work(t)]
             self.shown_issues = len(issues)
         # The events take their place among the day's tasks by when they
         # happen; the tracker's block goes in whole, where the day's
         # unfinished work ends.
         self.shown_events = len(events)
         tasks = self.place_issues(self.place_events(tasks, events), issues)
+        # Counted after the filter, as the issues are: both numbers say what
+        # is on screen, which is what the inbox undertakes to report -- how
+        # many rows of mail it is showing.  Filtering the rows carries the
+        # message count with them, the sum being taken over what is left.
+        self.shown_mail = len(mails)
+        self.shown_messages = sum(t.raw.get(MAIL_COUNT, 1) for t in mails)
         # Mail follows the inbox's tasks.  It once led them, so that the
         # daily processing started at the top rather than after a scroll --
         # and that reasoning is why it now goes last: mail arrives in far
         # greater quantity than a person files tasks, some 460 rows against
         # 35, so leading with it guarantees the scroll it was meant to
         # avoid.  Appended, never sorted in, so the tasks keep exactly the
-        # order they had alone.
-        mails = self.mail_rows()
-        self.shown_mail = len(mails)
-        self.shown_messages = sum(t.raw.get(MAIL_COUNT, 1) for t in mails)
+        # order they had alone -- and filtered before this, so hiding work
+        # cannot disturb that order either.
         tasks = tasks + mails
         self.tasks = tasks
         self.past_due = (

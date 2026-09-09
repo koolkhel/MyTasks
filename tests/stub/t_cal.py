@@ -172,6 +172,14 @@ async def work_filter():
                   titles(app), ["my thing", "own task"])
             status = str(app.query_one("#status").render())
             check("the hidden count includes the event", "2 work hidden" in status, True)
+            # And the invariant behind that count: with the mode on, nothing
+            # on screen counts as work.  That is what catches a source
+            # appended past the filter -- a sum of shown and hidden would
+            # balance even then, the escaped source adding to neither.
+            check("nothing on screen counts as work",
+                  [t.raw.get("title") for t in app.tasks if app.is_work(t)], [])
+            check("and shown plus hidden is what there was",
+                  len(app.tasks) + app.hidden_work, 4)
             await pilot.press("w")
             await pilot.pause()
             check("pressing again brings them back", len(app.tasks), 4)

@@ -45,6 +45,19 @@ async def t_hide():
         await pilot.press("w"); await pilot.pause()
         chk("the two work rows are gone", ids(app)==["T-a","T-b","T-o"], str(ids(app)))
         chk("the other project's task stays", "T-o" in ids(app))
+        # The invariant behind the count, asserted here for a board of plain
+        # tasks: with the mode on, nothing on screen counts as work.  Its
+        # point is sources -- a source appended after the filter escapes the
+        # key, which is what happened to the mail rows -- and it is checked
+        # for each source where that source's own board is built.  A sum of
+        # shown and hidden would not do: an escaped source is missing from
+        # both sides of it.
+        chk("nothing on screen counts as work",
+            [t.id for t in app.tasks if app.is_work(t)]==[],
+            str([t.id for t in app.tasks if app.is_work(t)]))
+        chk("and shown plus hidden is what there was",
+            len(app.tasks)+app.hidden_work==len(before),
+            f"{len(app.tasks)}+{app.hidden_work} vs {len(before)}")
         await pilot.press("w"); await pilot.pause()
         chk("pressing again restores them exactly", ids(app)==before, str(ids(app)))
 
@@ -130,7 +143,12 @@ async def t_every_view():
         chk("and says so", "work hidden" in daybar(app), daybar(app))
 
 async def t_inbox():
-    print("3.1 the inbox is unaffected by construction")
+    # No mailbox is configured here, which is why this still holds whole.
+    # The inbox's *tasks* are unaffected by construction -- a task with a
+    # project is already outside the inbox -- but mail is work, and an inbox
+    # with mail in it does change.  That half is in t_mailview, on a board
+    # that has a mailbox.
+    print("3.1 the inbox's tasks are unaffected by construction")
     inbox=[mk("T-i1","aaa"), mk("T-i2","bbb")]
     filed=mk("T-i3","filed", project=WORK)
     app=prep(TaskApp(D), StubClient(inbox+[filed]))
@@ -143,7 +161,8 @@ async def t_inbox():
             if app.position is Bucket.INBOX and "task(s)" in status(app): break
         off=ids(app)
         await pilot.press("w"); await pilot.pause()
-        chk("the inbox shows the same rows either way", ids(app)==off, f"{off} -> {ids(app)}")
+        chk("the inbox shows the same tasks either way, there being no mail here",
+            ids(app)==off, f"{off} -> {ids(app)}")
         chk("because a filed task was never in it", "T-i3" not in off, str(off))
 
 async def t_no_writes():

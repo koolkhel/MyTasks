@@ -16,7 +16,7 @@ sys.path.insert(0, _TESTS)
 from harness import *
 import main, mail, tracker, ical
 import mailfixture as F
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Static
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # A copy, never the fixture itself.  The board can now write to a mailbox --
@@ -66,7 +66,8 @@ def build(messages):
 UNSET = object()
 
 @asynccontextmanager
-async def board(mail_cfg=UNSET, tasks=None, tracker_cfg=None, go_to_inbox=True):
+async def board(mail_cfg=UNSET, tasks=None, tracker_cfg=None, go_to_inbox=True,
+                size=(120, 44)):
     app = main.TaskApp()
     app.client = StubClient(tasks if tasks is not None else [mk("t1", "a task", TODAY)],
                             reference=NOW)
@@ -75,7 +76,7 @@ async def board(mail_cfg=UNSET, tasks=None, tracker_cfg=None, go_to_inbox=True):
     app.mail_config = mail.Config(SAMPLE, FOLDERS) if mail_cfg is UNSET else mail_cfg
     opened = []
     app.open_url = lambda url: opened.append(url)
-    async with app.run_test(size=(120, 44)) as pilot:
+    async with app.run_test(size=size) as pilot:
         for _ in range(14): await pilot.pause()
         if go_to_inbox:
             await pilot.press("i")
@@ -406,6 +407,158 @@ async def beside_the_other_sources():
         ical.fetch = saved
 
 
+# ------------------------------------------------------- mail counts as work
+#: A project that exists nowhere but here.
+WORK = "P-zzwork"
+
+
+async def counting_as_work():
+    """Every message the board reads is work, so the key for work hides it.
+
+    It did not.  The rows carried no project, and -- the half that matters --
+    they were appended after the filter ran, which is the trap the comment
+    above that filter already warned about for the tracker's rows.  So the
+    inbox was the one view where the key did nothing at all: a task with a
+    project is already outside the inbox, so there was never a task there to
+    hide, and the board announced a mode that removed no row.
+    """
+    print("mail counts as work")
+    async with board(tasks=[mk("i1", "an inbox task"),
+                            mk("d1", "a dated task", TODAY)]) as (app, pilot, _o):
+        app.work_project = WORK
+        app.projects = {WORK: "Work"}
+        rows_before = len(app.tasks)
+        mail_before = [t.id for t in app.tasks if app.is_mail(t)]
+        order_before = [t.id for t in app.tasks]
+        check("the inbox holds mail to hide", len(mail_before) > 0, True)
+        check("every mail row counts as work",
+              all(app.is_work(t) for t in app.tasks if app.is_mail(t)), True)
+        # A rule, not a stamped project: the focus card reads a row's project
+        # for any row, so a stamp would make a mail row's card name the work
+        # project.
+        check("and none of them was given a project to make that true",
+              any(t.project_id for t in app.tasks if app.is_mail(t)), False)
+        check("a task in the work project still counts",
+              app.is_work(mk("w1", "a work task", TODAY, project=WORK)), True)
+        check("and one outside it still does not",
+              app.is_work(mk("o1", "another task", TODAY)), False)
+
+        print("hiding work empties the inbox of mail")
+        writes_before = list(app.client.calls)
+        read_before = [0]
+        real_read = mail.read
+        mail.read = lambda *a, **k: (read_before.__setitem__(0, read_before[0] + 1),
+                                     real_read(*a, **k))[1]
+        try:
+            await pilot.press("w")
+            for _ in range(12): await pilot.pause()
+            check("no mail row is left",
+                  [t.id for t in app.tasks if app.is_mail(t)], [])
+            check("and the inbox's own task is what remains",
+                  [t.raw.get("title") for t in app.tasks], ["an inbox task"])
+            # The invariant, rather than the case: with the mode on, nothing
+            # on screen counts as work.  That is what catches a source
+            # appended past the filter, whichever source it is.
+            #
+            # It has to be this and not "shown plus hidden is what there
+            # was": a source that escapes the filter entirely contributes
+            # nothing to the hidden count either, so the sum still balances.
+            # Checked against the unfixed board, the sum passed and this
+            # failed.
+            check("nothing on screen counts as work",
+                  [t.id for t in app.tasks if app.is_work(t)], [])
+            check("and shown plus hidden is still what there was",
+                  len(app.tasks) + app.hidden_work, rows_before)
+            check("the hidden count is the mail that went",
+                  app.hidden_work, len(mail_before))
+
+            print("and says how much, where it used to say only that")
+            bar = str(app.query_one("#daybar", Static).render())
+            check("the daybar carries the count",
+                  f"work hidden ({len(mail_before)})" in bar, True)
+            check("the counts of what is shown fall away",
+                  ("thread(s)" in status(app), "message(s)" in status(app)),
+                  (False, False))
+            check("and the hidden count is in the status line too",
+                  f"{len(mail_before)} work hidden" in status(app), True)
+
+            print("nothing was asked of anything to do it")
+            check("no request was made about a task",
+                  app.client.calls[len(writes_before):], [])
+            check("and the mailbox was not read again", read_before[0], 0)
+
+            print("pressing it again brings every row back")
+            await pilot.press("w")
+            for _ in range(12): await pilot.pause()
+            check("all of them", [t.id for t in app.tasks if app.is_mail(t)],
+                  mail_before)
+            check("in the order they were, tasks first",
+                  [t.id for t in app.tasks], order_before)
+            check("and the counts are reported again",
+                  ("thread(s)" in status(app), "message(s)" in status(app)),
+                  (True, True))
+            check("with nothing said about hiding",
+                  "work hidden" in status(app), False)
+        finally:
+            mail.read = real_read
+
+        print("a mail row's focus card still names no project")
+        # What decided the rule over the stamp.  Enter opens this card on any
+        # row, mail rows included.
+        row = await select(app, pilot, app.is_mail)
+        app.action_focus_task()
+        for _ in range(4): await pilot.pause()
+        top = app.screen_stack[-1]
+        check("the card is open", type(top).__name__, "TaskFocus")
+        check("and the project it names is empty",
+              getattr(top, "shown_project", None), "")
+        await pilot.press("escape")
+        for _ in range(4): await pilot.pause()
+
+
+async def still_in_the_inbox():
+    """`belongs()` keeps project-bearing tasks out of the inbox.
+
+    Which would evict every mail row if a row carried the work project, mail
+    being inbox-only.  It cannot reach them -- it is asked of the store's
+    tasks, and mail rows are built afterwards -- but the rule chosen here is
+    what makes that irrelevant rather than merely true today.
+    """
+    print("the inbox still holds all of its mail")
+    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, _o):
+        app.work_project = WORK
+        app.projects = {WORK: "Work"}
+        app.repaint()
+        await pilot.pause()
+        # Nine, the sample's threads with no tracker configured to fold them.
+        check("every thread is there with the mode off",
+              sum(1 for t in app.tasks if app.is_mail(t)), 9)
+        check("and none of them claims a project",
+              [t.project_id for t in app.tasks if app.is_mail(t)], [None] * 9)
+
+
+async def legible_together():
+    print("the two numbers read together on one bar")
+    for width in (120, 80):
+        # The width has to reach `run_test`: reading it back off a board
+        # built at the default would label two runs at one size as two sizes,
+        # and both would pass.
+        async with board(tasks=[mk("i1", "an inbox task")],
+                         size=(width, 44)) as (app, pilot, _o):
+            check(f"the board really is {width} columns wide",
+                  app.size.width, width)
+            app.work_project = WORK
+            app.projects = {WORK: "Work"}
+            await pilot.press("w")
+            for _ in range(12): await pilot.pause()
+            bar = str(app.query_one("#daybar", Static).render())
+            check(f"at {width} columns the hidden count is whole",
+                  "work hidden (9)" in bar, True)
+            # The mailbox mark is padded to the right edge of the same bar.
+            check(f"at {width} columns the mailbox mark is still there",
+                  bar.rstrip()[-1:], main.MAIL_IDLE_MARK)
+
+
 async def main_():
     await beside_the_other_sources()
     await never_delays()
@@ -414,6 +567,9 @@ async def main_():
     await the_body()
     await opening()
     await refusals()
+    await counting_as_work()
+    await still_in_the_inbox()
+    await legible_together()
     print()
     print(f"{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1
