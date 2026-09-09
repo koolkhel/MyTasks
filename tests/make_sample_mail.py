@@ -1,5 +1,10 @@
 """Build a sample maildir shaped like a corporate notification inbox.
 
+Builds into a temporary directory and swaps it into place only once it is
+complete, so a failure part way through leaves the committed fixture alone.
+It used to delete the fixture as its first act, which made running it a risk
+and so nobody did -- and it had been broken for a day without anyone noticing.
+
 Everything here is invented: .invalid domains, made-up project keys, made-up
 people.  No real message, address or project key appears.
 
@@ -12,10 +17,13 @@ from email.message import EmailMessage
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = _os.path.join(_TESTS, "fixtures", "sample_mail")
-if os.path.exists(ROOT):
-    shutil.rmtree(ROOT)
-box = mailbox.Maildir(ROOT, create=True)
+ROOT = os.path.join(HERE, "fixtures", "sample_mail")
+#: Built here first.  The fixture is only replaced once everything below has
+#: run, so an error leaves what is committed untouched.
+BUILD = ROOT + ".building"
+if os.path.exists(BUILD):
+    shutil.rmtree(BUILD)
+box = mailbox.Maildir(BUILD, create=True)
 
 # A maildir's cur/ and tmp/ are empty here -- every message is delivered to
 # new/ -- and git tracks no empty directory, so a clone would arrive without
@@ -106,10 +114,16 @@ print(f"built {len(box)} messages in {ROOT}")
 print("  folders:", box.list_folders())
 print("  unread :", sum(1 for k in box.keys() if "S" not in box[k].get_flags()))
 
-for _sub in ("cur", "tmp", ".Archive/cur", ".Archive/new", ".Archive/tmp"):
-    _d = os.path.join(ROOT, _sub)
+KEPT = ("cur", "tmp", ".Archive/cur", ".Archive/new", ".Archive/tmp")
+for _sub in KEPT:
+    _d = os.path.join(BUILD, _sub)
     os.makedirs(_d, exist_ok=True)
     if not os.listdir(_d):
         open(os.path.join(_d, ".gitkeep"), "w").write(KEEP)
-print("  kept:", ", ".join(("cur", "tmp", ".Archive/cur", ".Archive/new",
-                            ".Archive/tmp")))
+print("  kept:", ", ".join(KEPT))
+
+# Everything succeeded: swap the new mailbox in.
+if os.path.exists(ROOT):
+    shutil.rmtree(ROOT)
+os.rename(BUILD, ROOT)
+print(f"  installed at {os.path.relpath(ROOT, os.path.dirname(HERE))}")
