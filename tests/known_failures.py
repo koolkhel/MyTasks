@@ -57,6 +57,12 @@ REPAIRED = {
 FLAKY = {
     "t_label6": ("reads live tracker issues; failed on a missing issue key "
                  "earlier the same day it passed 8/8"),
+    "t_perf2": ("times the board with writes in flight, so it fails under a "
+                "full tier run where the store is busy and passes alone "
+                "minutes later -- observed 3/4 in a --store run and 4/4 on "
+                "its own directly afterwards. Its own docstring says the "
+                "timings are of this machine; they are also of what else is "
+                "talking to the account at the time"),
 }
 
 

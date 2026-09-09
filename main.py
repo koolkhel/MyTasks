@@ -28,7 +28,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.markup import escape
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
@@ -714,7 +714,13 @@ class TaskFocus(ModalScreen[None]):
             yield Static("  ·  ".join(facts), id="focus-facts")
             note = task.note_text
             if note:
-                yield Static(note, id="focus-note")
+                # Escaped, as the pane below the list escapes it and for the
+                # same reason: a note holding square brackets is a note
+                # holding square brackets, and the two places a note is
+                # shown must not disagree about that.  This card did not
+                # escape it until the pane was given a fixed height, which
+                # is when the disagreement was noticed.
+                yield Static(escape(note), id="focus-note")
             yield Label("esc to close", id="dialog-hint")
 
     def action_close(self) -> None:
@@ -748,6 +754,16 @@ class Help(ModalScreen[None]):
 
 [b]Looking at a task[/b]
   enter              show the selected task in full
+  [ / ]              scroll the note area up / down —
+                     the area below the list keeps one
+                     height whatever the note is, so the
+                     list never moves under the cursor,
+                     and a note taller than it scrolls
+                     rather than being cut. A scrollbar
+                     appears when there is more to see.
+                     Reading a note changes nothing, so
+                     these work on a mail, calendar or
+                     tracker row too
 
 [b]Changing tasks[/b]
   space              tick / untick the selected task —
@@ -794,7 +810,9 @@ class Help(ModalScreen[None]):
   decision rather than five. Only unread mail: a message
   dealt with, here or in whatever program you read mail
   with, is out of the queue.
-  What the newest message says is shown below the list,
+  What the newest message says is shown in the area
+  below the list — [ and ] scroll it, and it is where a
+  notification longer than the area is read —
   HTML rendered as text. o opens what the row points at
   — where its messages carry an address with a #fragment
   it offers the earliest of them, so a discussion reads
@@ -984,13 +1002,21 @@ class TaskApp(App[None]):
     }
     DataTable > .datatable--cursor { background: $accent; color: $text; }
 
-    #detail {
-        height: auto;
+    #notes {
+        /* Nine, for eight rows of text: `border-top` counts inside the
+           height box.  Fixed against the note, which is the whole point --
+           an area sized to its content moves the list under the hand that
+           is moving through it.  Capped against the window as well, because
+           eight rows of note on a twelve-row terminal would leave a list of
+           four; the cap bites below about 22 rows and never above. */
+        height: 9;
         max-height: 40%;
         border-top: solid $panel;
         padding: 0 1;
         color: $text-muted;
     }
+    /* Free to be taller than the pane: that is what there is to scroll. */
+    #detail { height: auto; }
 
     #status { height: 1; padding: 0 1; color: $text-muted; }
     #keybar { padding: 0 1; background: $panel; color: auto; }
@@ -1068,6 +1094,13 @@ class TaskApp(App[None]):
         Binding(keys("p"), "project", "Project"),
         Binding(keys("g"), "green", "Green"),
         Binding(keys("o"), "open_link", "Link"),
+        # The note pane's own two keys, so reading a note that does not fit
+        # never costs the list its arrows.  Plain characters, for the reason
+        # the movement keys are: a terminal cannot swallow them the way it
+        # can a modified arrow.  Both already have Cyrillic twins in the key
+        # table, so `keys()` needs nothing new.
+        Binding(keys("left_square_bracket"), "note_up", "Note up"),
+        Binding(keys("right_square_bracket"), "note_down", "Note down"),
         Binding(keys("f"), "promote", "To task"),
         # Both keys, and deliberately NOT priority: a Mac laptop has no
         # forward-delete, so its Delete key arrives as backspace, while an
@@ -1190,6 +1223,13 @@ class TaskApp(App[None]):
         #: ask for.  The rows have already left the screen, so waiting here
         #: costs a person nothing.
         self._mail_gate = threading.Lock()
+        #: Which row the note pane was last drawn for.  The pane returns to
+        #: the top when that changes and not otherwise: the text is written
+        #: on every repaint, and repaints happen for reasons that are
+        #: nothing to do with the person -- a mail load returning, a write
+        #: confirming, a timer noticing an event has ended.  Resetting on
+        #: each of those would yank a half-read note back to its beginning.
+        self._detail_for: str | None = None
         self.mail_threads: list = []
         #: Why the mailbox could not be read, when it could not be.  Kept
         #: apart from the day's own errors for the reason the tracker's and
@@ -1233,7 +1273,19 @@ class TaskApp(App[None]):
             # which stops the ground being the ground.  Turbo C++ had no
             # alternating rows either.
             yield DataTable(id="tasks", cursor_type="row")
-            yield Static("", id="detail")
+            # The pane scrolls, and the text still goes to `#detail`.  Two
+            # widgets rather than one scrollable `Static` because that id is
+            # an interface: four suites read the note back through it, and
+            # the pane is a new thing that deserves a new name rather than
+            # a change to what has always held the text.
+            # Not focusable, and not merely by default: a scrollable
+            # container takes focus willingly, and a pane that could hold it
+            # would take the arrow keys off the list the moment it was
+            # tabbed into -- a mode, which this board does not have.  Its
+            # own keys reach it while the table keeps focus.
+            with VerticalScroll(id="notes", can_focus=False,
+                                can_focus_children=False):
+                yield Static("", id="detail")
         yield Static("", id="status")
         yield KeyBar(id="keybar")
 
@@ -2991,6 +3043,7 @@ class TaskApp(App[None]):
         detail = self.query_one("#detail", Static)
         if task is None:
             detail.update("")
+            self.rewound("")
             return
         bits = []
         if task.recurring:
@@ -3011,6 +3064,20 @@ class TaskApp(App[None]):
         note = escape(task.note_text)
         sections = [part for part in ("  ·  ".join(bits), note) if part]
         detail.update("\n".join(sections))
+        self.rewound(task.id)
+
+    def rewound(self, task_id: str) -> None:
+        """Show the top of this row's note if it is not the row we were on.
+
+        A note carried over at the offset the last one was read to would open
+        part way through, at a place that means nothing.
+        """
+        if task_id == self._detail_for:
+            return
+        self._detail_for = task_id
+        pane = next(iter(self.query("#notes")), None)
+        if pane is not None:
+            pane.scroll_to(y=0, animate=False)
 
     def notice(self, message: str, error: bool = False) -> None:
         """Say something that survives the next repaint.
@@ -3867,6 +3934,30 @@ class TaskApp(App[None]):
             return
         self.open_url(url)
         self.set_status(f"Opening {url}")
+
+    def note_step(self) -> int:
+        """How far one press of a scrolling key moves the pane.
+
+        A page less one line.  A whole page drops the line being read off
+        the top; keeping one is what a pager does, and for the same reason.
+        Never less than one, so a pane squeezed to a single row still moves.
+        """
+        return max(1, self.query_one("#notes").size.height - 1)
+
+    def action_note_up(self) -> None:
+        """Scroll the note pane up.  Writes nothing, and moves no selection.
+
+        Reading is not a change, so this is offered on every row the board
+        draws -- a mail row, a calendar row, a tracker row included.  Those
+        are the rows whose notes least often fit.
+        """
+        self.query_one("#notes").scroll_relative(
+            y=-self.note_step(), animate=False)
+
+    def action_note_down(self) -> None:
+        """Scroll the note pane down.  The same, in the other direction."""
+        self.query_one("#notes").scroll_relative(
+            y=self.note_step(), animate=False)
 
     def action_help(self) -> None:
         self.push_screen(Help())

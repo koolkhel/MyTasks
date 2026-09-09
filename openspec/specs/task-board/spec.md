@@ -112,6 +112,16 @@ The board SHALL show, for the currently selected task, whether it recurs, whethe
 
 A note SHALL be shown as the characters it contains. The area draws its text as markup, so a note is escaped before it is drawn; otherwise a note holding square brackets would lose them on screen while remaining whole in the store, and a person who had just typed them would be told the board had destroyed their work.
 
+The detail area SHALL keep the same height whatever the selected row carries, and whether or not anything is selected at all. Its height SHALL NOT depend on the length of the note. A person stepping down a list is moving through rows whose notes differ from nothing at all to many screens; an area sized to each of them in turn moves the list under the hand that is moving through it, and the row a person is about to press a key on is not where they saw it.
+
+Where the window is too short for that height to leave a usable list, the area SHALL take a share of the height instead. The height is fixed against the *content*, which is what makes the list still; being fixed against the window as well would make a short window unusable.
+
+The area SHALL scroll, so that a note longer than the area can be read in full without leaving the list. Scrolling SHALL be by its own keys and SHALL NOT move the selection: the person is reading the row they have chosen, not choosing another.
+
+While the area holds more than it can show, it SHALL say so. An area that is always the same height gives a person no way to tell a note that ends from one that continues, and a note read as complete when it was cut is worse than one that plainly runs on.
+
+When the selection changes, the area SHALL show the beginning of the newly selected row's note. A note carried over at the offset the last one was read to would open part way through, at a place that means nothing.
+
 #### Scenario: A recurring task with a note
 
 - **WHEN** the selected task recurs and carries a note
@@ -127,9 +137,61 @@ A note SHALL be shown as the characters it contains. The area draws its text as 
 - **WHEN** the selected task's note contains square brackets or text that reads as markup
 - **THEN** every character of it appears, no styling is applied by it, and the rest of the board is drawn as it was
 
+#### Scenario: The area is the same height whatever the note
+
+- **WHEN** the selection moves between a row with no note, a row with a one-line note, and a row whose note is many times the area's height
+- **THEN** the area is the same height each time
+
+#### Scenario: The list does not move under the cursor
+
+- **WHEN** the selection moves down a list of rows whose notes differ in length
+- **THEN** the list shows the same number of rows throughout, and no row changes position because of the note being shown
+
+#### Scenario: Nothing selected
+
+- **WHEN** the shown view holds no rows at all
+- **THEN** the area is still the same height, showing nothing
+
+#### Scenario: A window too short for the fixed height
+
+- **WHEN** the window is too short for the area's height to leave a usable list
+- **THEN** the area takes a share of the window's height instead, and is still the same height whatever the note
+
+#### Scenario: A long note can be read in full
+
+- **WHEN** the selected row's note is longer than the area can show and a person scrolls the area down
+- **THEN** the rest of the note is shown, and the selection has not moved
+
+#### Scenario: Scrolling back
+
+- **WHEN** a person scrolls the area down and then up again
+- **THEN** the beginning of the note is shown again
+
+#### Scenario: Scrolling a note that fits
+
+- **WHEN** the selected row's note is shorter than the area and a person presses a scrolling key
+- **THEN** nothing moves, and the selection has not moved
+
+#### Scenario: There is more below
+
+- **WHEN** the selected row's note is longer than the area can show
+- **THEN** the area shows that it holds more than it is showing
+
+#### Scenario: There is nothing more below
+
+- **WHEN** the selected row's note fits in the area
+- **THEN** the area shows no such indication
+
+#### Scenario: A new selection starts at the beginning
+
+- **WHEN** a person scrolls part way through one row's note and then selects another row
+- **THEN** the beginning of the newly selected row's note is shown
+
 ### Requirement: Actions available on the selected task
 
-The board SHALL let a person add a task to the shown view, tick and untick the selected task, mark it done for today, cancel it, rename it, edit its note, assign or clear its date, assign it to a project, open its link, move it up or down within a calendar day, undo the last write it made, delete it behind a confirmation, and turn a mail thread into a task on today. The board SHALL NOT offer any action that changes a task's priority.
+The board SHALL let a person add a task to the shown view, tick and untick the selected task, mark it done for today, cancel it, rename it, edit its note, assign or clear its date, assign it to a project, open its link, move it up or down within a calendar day, scroll the detail area up and down, undo the last write it made, delete it behind a confirmation, and turn a mail thread into a task on today. The board SHALL NOT offer any action that changes a task's priority.
+
+Scrolling the detail area SHALL write nothing and SHALL be offered on every row the board draws, a row from a source included: reading is not a change, and the rows whose notes least often fit are the ones the board does not own.
 
 #### Scenario: No key cycles priority
 
@@ -170,6 +232,11 @@ The board SHALL let a person add a task to the shown view, tick and untick the s
 
 - **WHEN** a person presses the key that turns a mail thread into a task, with a task selected rather than a mail thread
 - **THEN** nothing is created, and the board says what the key is for
+
+#### Scenario: Scrolling the detail area writes nothing
+
+- **WHEN** a person scrolls the detail area on any row, including one from the mailbox, the calendar or the tracker
+- **THEN** the area scrolls, nothing is written anywhere, and the row is not refused as unownable
 
 ### Requirement: Only opening acts on a tracker issue
 
@@ -395,6 +462,8 @@ Moving to the previous or next day SHALL apply only while a calendar day is show
 
 The board SHALL offer a focus view of the selected task, showing its title in full without truncation, when it is due, its project when it has one, its deadline when it has one, and its note when it has one. The view SHALL be dismissable, and dismissing it SHALL return to the same view and the same selected task.
 
+The focus view SHALL show a note as the characters it contains, by the same rule the detail area follows and for the same reason. The two places a note is shown SHALL agree: a note holding square brackets is a note holding square brackets in both.
+
 #### Scenario: Opening the focus view
 
 - **WHEN** a person opens the focus view on a selected task
@@ -430,6 +499,10 @@ The board SHALL offer a focus view of the selected task, showing its title in fu
 - **WHEN** a person asks for the focus view while the shown view holds no tasks
 - **THEN** no focus view opens and the board is left as it was
 
+#### Scenario: A note is shown as written here too
+
+- **WHEN** the selected task's note contains square brackets or text that reads as markup and a person opens the focus view
+- **THEN** every character of it appears there, and no styling comes from it
 ### Requirement: The focus view changes nothing
 
 Opening, viewing, or dismissing the focus view SHALL leave the task exactly as it was, and SHALL send no request that modifies anything. In particular the key that opens the focus view SHALL NOT also tick the task, so a task cannot be completed by looking at it.
