@@ -104,5 +104,61 @@ chk("both states come back", {i.state for i in issues}<=set(c.states) and len(is
 chk("the first-configured state leads",
     [c.rank(i.state) for i in issues]==sorted(c.rank(i.state) for i in issues),
     str([i.state for i in issues][:3]))
+print("\n1.4 the priority arrives with the issue")
+# The board shows a tracker priority as one letter, taken from the word the
+# tracker itself uses for it.  The request already asks for every custom
+# field, so the priority was arriving all along -- only the localised word had
+# to be asked for, which is what these check.
+chk("the request asks for the tracker's own word for a value",
+    "localizedName" in tracker.ISSUE_FIELDS, tracker.ISSUE_FIELDS)
+chk("and asks for nothing else new",
+    tracker.ISSUE_FIELDS.count("customFields") == 1
+    and tracker.ISSUE_FIELDS.replace(",localizedName", "")
+    == "idReadable,summary,project(shortName),updated,"
+       "customFields(name,value(name,login))",
+    tracker.ISSUE_FIELDS)
+
+def with_priority(key, value):
+    """One issue, with whatever Priority field `value` describes."""
+    r = raw(key, c.assignee, c.states[0], P)
+    if value is not None:
+        r["customFields"].append({"name": "Priority", "value": value})
+    return r
+
+#: Both names, the tracker's word and the API's English one.
+both = tracker.parse([with_priority(
+    "P-1", {"name": "Show-stopper", "localizedName": "Неотложная"})], c)[0]
+chk("the tracker's own word is kept", both.priority == "Неотложная", both.priority)
+chk("and the API's English name beside it",
+    both.priority_value == "Show-stopper", both.priority_value)
+
+#: A tracker with no localisation still names its own priorities.
+english = tracker.parse([with_priority("P-2", {"name": "Critical"})], c)[0]
+chk("with no localised word, the English name stands in",
+    english.priority == "Critical", english.priority)
+chk("and is still reported as the value it is",
+    english.priority_value == "Critical", english.priority_value)
+
+#: No priority set, and no Priority field at all.
+unset = tracker.parse([with_priority("P-3", None)], c)[0]
+chk("an issue with no priority field reports nothing",
+    (unset.priority, unset.priority_value) == ("", ""),
+    f"{unset.priority!r} {unset.priority_value!r}")
+# A field present but empty is how the tracker says "not set": its value is
+# null, which `_custom_fields` drops for being no dict at all.
+null = tracker.parse([{"idReadable": "P-4", "summary": "s",
+                       "project": {"shortName": P},
+                       "customFields": [
+                           {"name": "Assignee", "value": {"login": c.assignee}},
+                           {"name": "State", "value": {"name": c.states[0]}},
+                           {"name": "Priority", "value": None}]}], c)[0]
+chk("nor does one whose priority is unset",
+    (null.priority, null.priority_value) == ("", ""),
+    f"{null.priority!r} {null.priority_value!r}")
+
+chk("an Issue built without a priority still builds",
+    tracker.Issue(key="K", summary="s", project=P, state=c.states[0],
+                  assignee=c.assignee, base_url="https://t.invalid").priority == "")
+
 print(f"\n{sum(ok)}/{len(ok)} checks passed")
 sys.exit(0 if all(ok) else 1)

@@ -24,11 +24,17 @@ from typing import Any, Sequence
 import requests
 from dotenv import load_dotenv
 
-#: Asked of every issue.  `customFields` carries the assignee and the state,
-#: which is where the tracker keeps them rather than at the top level.
+#: Asked of every issue.  `customFields` carries the assignee, the state and
+#: the priority, which is where the tracker keeps them rather than at the top
+#: level.
+#:
+#: `localizedName` is the tracker's own word for a value, which is what the
+#: board shows a priority by.  One extra token on a request that already asks
+#: for every custom field, so it costs no call and no page: the priority was
+#: arriving all along and being thrown away for want of the word.
 ISSUE_FIELDS = (
     "idReadable,summary,project(shortName),updated,"
-    "customFields(name,value(name,login))"
+    "customFields(name,value(name,localizedName,login))"
 )
 TIMEOUT_SECONDS = 15
 #: Issues are read one page at a time; far more than a person has in progress.
@@ -114,6 +120,16 @@ class Issue:
     state: str
     assignee: str
     base_url: str
+    #: What the tracker calls this issue's priority, in its own words -- the
+    #: localised name where there is one.  The board shows a priority by the
+    #: first letter of this, so that nothing here enumerates the priorities a
+    #: tracker happens to define.
+    priority: str = ""
+    #: The same value's name in the API's own English, which does not change
+    #: with the tracker's language.  Not shown to anybody: it is how the board
+    #: recognises the least urgent priority, whose word begins with the same
+    #: letter as the most urgent one's.
+    priority_value: str = ""
 
     @property
     def url(self) -> str:
@@ -179,6 +195,12 @@ def parse(payload: Any, config: Config) -> list[Issue]:
         assignee = (fields.get("Assignee") or {}).get("login") or ""
         state = (fields.get("State") or {}).get("name") or ""
         project = (raw.get("project") or {}).get("shortName") or ""
+        priority_field = fields.get("Priority") or {}
+        # The tracker's own word, falling back to the API's English name: a
+        # tracker with no localisation still names its own priorities, and
+        # either way the word is the tracker's rather than the board's.
+        priority_value = priority_field.get("name") or ""
+        priority = priority_field.get("localizedName") or priority_value
         if assignee != config.assignee:
             continue
         if state not in config.states:
@@ -193,6 +215,8 @@ def parse(payload: Any, config: Config) -> list[Issue]:
                 state=state,
                 assignee=assignee,
                 base_url=config.base_url,
+                priority=priority,
+                priority_value=priority_value,
             )
         )
     return sorted(issues, key=lambda i: (config.rank(i.state), i.key))

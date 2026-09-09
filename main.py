@@ -70,6 +70,8 @@ TRACKER_MARK = "_tracker"
 TRACKER_URL = "_tracker_url"
 TRACKER_PROJECT = "_tracker_project"
 TRACKER_STATE = "_tracker_state"
+TRACKER_PRIORITY = "_tracker_priority"
+TRACKER_PRIORITY_VALUE = "_tracker_priority_value"
 #: Prefixes a tracker row's id so it can never collide with a task's.
 TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
@@ -216,6 +218,45 @@ def _state_label(state: str) -> str:
     """
     words = state.split()
     return words[-1].lower()[:_WHEN_WIDTH] if words else ""
+
+
+#: The API's name for the least urgent priority a tracker defines.  The board
+#: needs to know which one that is, and only that one, because two of the
+#: tracker's own words begin with the same letter -- the most urgent and the
+#: least -- so the letter alone cannot tell them apart.  The English name is
+#: never shown; it decides a case and nothing else.  A tracker without this
+#: priority lower-cases nothing, which is right.
+LEAST_URGENT = "Minor"
+
+
+def _priority_letter(priority: str, value: str) -> str:
+    """A tracker priority, as the one letter that names it.
+
+    The tracker words its own priorities, and the first letter is what a
+    person already reads off its interface.  Taken from the word rather than
+    from a list here, for the reason the state's last word is: a priority the
+    tracker renames or adds needs no change in this file.  It is also the only
+    part that means the same thing twice -- the same priority is worded
+    Обычный in one of this tracker's definitions and Обычная in another, and
+    Серьезная against Серьезный, the gender differing while the letter does
+    not.
+
+    Upper case, except the least urgent, which is lower.  Неотложн-- (drop
+    everything) and Незначительн-- (ignore) both begin with Н, and they are
+    the most urgent priority and the least, so a row read wrongly reads as its
+    opposite.  The same letter said quietly is the quiet one: it keeps every
+    letter meaning what the tracker's word means and does not pretend the two
+    words begin differently.
+
+    Not colour, and this is the third reason: the tracker gives one priority
+    different colours in different definitions, a person may not read colour
+    at all, and the board has two themes against which a fixed hex has already
+    measured 2.18:1 once.  A letter reads on both because it is not a colour.
+    """
+    if not priority:
+        return ""
+    first = priority[:1]
+    return first.lower() if value == LEAST_URGENT else first.upper()
 
 
 def _mail_who(sender: str) -> str:
@@ -2818,6 +2859,8 @@ class TaskApp(App[None]):
                 TRACKER_URL: issue.url,
                 TRACKER_PROJECT: issue.project,
                 TRACKER_STATE: issue.state,
+                TRACKER_PRIORITY: issue.priority,
+                TRACKER_PRIORITY_VALUE: issue.priority_value,
             }))
         return rows
 
@@ -3154,8 +3197,13 @@ class TaskApp(App[None]):
             # pressing a key; and the tracker's project rather than the work
             # project the row belongs to, because that is what names the
             # issue to a person.
+            # The leftmost cell carries the configured tag's mark for a
+            # task, and a tracker row carries no tags at all -- so it is free
+            # here, and the priority takes it rather than costing a column of
+            # every view for a value only these rows have.
             return (
-                mark,
+                _priority_letter(task.raw.get(TRACKER_PRIORITY) or "",
+                                 task.raw.get(TRACKER_PRIORITY_VALUE) or ""),
                 TRACKER_ROW_MARK,
                 _state_label(task.raw.get(TRACKER_STATE) or ""),
                 self.shortened(escape(task.raw.get("title") or ""), self.title_width),

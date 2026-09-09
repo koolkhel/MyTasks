@@ -253,8 +253,150 @@ async def t_unconfigured():
         chk("and no failure reported", "could not reach" not in status(app), status(app))
         chk("the day is normal", "3 task(s)" in status(app), status(app))
 
+# ------------------------------------------------------------- the priority
+#: The tracker's own words, and the API's English names beside them.  Both
+#: come from the real tracker's vocabulary; the letters are what a person
+#: already reads off its interface.
+PRIORITIES = (
+    ("Неотложная",     "Show-stopper", "Н"),
+    ("Критический",    "Critical",     "К"),
+    ("Серьезная",      "Major",        "С"),
+    ("Обычный",        "Normal",       "О"),
+    ("Незначительный", "Minor",        "н"),
+)
+
+
+def prio_issue(k, word="", value="", proj="TASKR"):
+    i = issue(k, proj=proj)
+    return tracker.Issue(key=i.key, summary=i.summary, project=i.project,
+                         state=i.state, assignee=i.assignee,
+                         base_url=i.base_url, priority=word,
+                         priority_value=value)
+
+
+def cell(app, key, i):
+    t = next(x for x in app.tasks if x.id == f"yt:{key}")
+    return str(app.row_for(t)[i])
+
+
+async def t_priority():
+    print("2.9 a tracker row says how urgent the tracker calls it")
+    issues = [prio_issue(f"TASKR-{n}", w, v)
+              for n, (w, v, _) in enumerate(PRIORITIES, start=1)]
+    app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)), issues)
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint(); await pilot.pause()
+        for n, (word, value, letter) in enumerate(PRIORITIES, start=1):
+            chk(f"{value} shows as {letter!r}",
+                cell(app, f"TASKR-{n}", 0) == letter,
+                f"{cell(app, f'TASKR-{n}', 0)!r}")
+        # The pair that share a letter: the most urgent and the least.
+        top, low = cell(app, "TASKR-1", 0), cell(app, "TASKR-5", 0)
+        chk("the two priorities sharing a letter are told apart", top != low,
+            f"{top!r} vs {low!r}")
+        chk("and differ only in case", top.lower() == low.lower(),
+            f"{top!r} vs {low!r}")
+        # Legible from the text alone: the cell carries the letter, not a style.
+        import re as _re
+        for n, (_, value, letter) in enumerate(PRIORITIES, start=1):
+            plain = _re.sub(r"\[/?[^\]]*\]", "", cell(app, f"TASKR-{n}", 0))
+            chk(f"{value} is legible without colour", plain == letter,
+                f"{plain!r}")
+        chk("no markup is used in that cell at all",
+            all("[" not in cell(app, f"TASKR-{n}", 0)
+                for n in range(1, len(PRIORITIES) + 1)))
+        # One character each: the column is one cell wide, and a Cyrillic
+        # capital is East Asian Width Ambiguous, which design.md records as a
+        # deliberate departure from the rule the mailbox marks follow.
+        chk("every letter is a single character",
+            all(len(cell(app, f"TASKR-{n}", 0)) == 1
+                for n in range(1, len(PRIORITIES) + 1)))
+
+    print("2.10 an issue with no priority shows nothing there")
+    app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)), [prio_issue("TASKR-9")])
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint(); await pilot.pause()
+        chk("the cell is empty", cell(app, "TASKR-9", 0) == "",
+            f"{cell(app, 'TASKR-9', 0)!r}")
+
+    print("2.11 nothing else about the row changes")
+    #: The same issue with and without a priority: every other cell identical.
+    plain_app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)), [prio_issue("TASKR-7")])
+    async with plain_app.run_test() as pilot:
+        await pilot.pause(); plain_app.repaint(); await pilot.pause()
+        without = [cell(plain_app, "TASKR-7", i) for i in range(1, 5)]
+    with_app = prep(TaskApp(TODAY), StubClient(day_tasks()),
+                    [prio_issue("TASKR-7", "Критический", "Critical")])
+    async with with_app.run_test() as pilot:
+        await pilot.pause(); with_app.repaint(); await pilot.pause()
+        withp = [cell(with_app, "TASKR-7", i) for i in range(1, 5)]
+        chk("mark, state, title and project are untouched", withp == without,
+            f"{withp} vs {without}")
+
+    print("2.12 the block's order is what it was")
+    #: Ordered by state then key, and priority must not reach that.
+    mixed = [prio_issue("TASKR-3", "Обычный", "Normal"),
+             prio_issue("TASKR-1", "Неотложная", "Show-stopper"),
+             prio_issue("TASKR-2", "Незначительный", "Minor")]
+    app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)), mixed)
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint(); await pilot.pause()
+        withp = [t.id for t in app.tasks if app.is_tracker(t)]
+    app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)),
+               [prio_issue(k) for k in ("TASKR-3", "TASKR-1", "TASKR-2")])
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint(); await pilot.pause()
+        without = [t.id for t in app.tasks if app.is_tracker(t)]
+        chk("priorities do not reorder the block", withp == without,
+            f"{withp} vs {without}")
+
+    print("2.13 a task's leftmost cell is still the tag's")
+    #: The one cell now means two things, and the two cannot meet on one row:
+    #: a task has no priority and a tracker row has no tags.
+    #: A tag id, shaped the way the green suites shape one.
+    GREEN = "A-zzgreen"
+    tagged = mk("T-tag", "a tagged task", TODAY)
+    tagged.raw["tags"] = [GREEN]
+    app = prep(TaskApp(TODAY), StubClient([tagged] + day_tasks(), reference=datetime.now(TZ)),
+               [prio_issue("TASKR-1", "Неотложная", "Show-stopper")])
+    app.green_tag = GREEN
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint(); await pilot.pause()
+        task_cell = str(app.row_for(
+            next(t for t in app.tasks if t.id == "T-tag"))[0])
+        chk("the tagged task still shows the tag's mark",
+            task_cell == M.GREEN_MARK, f"{task_cell!r}")
+        chk("and the tracker row still shows its priority",
+            cell(app, "TASKR-1", 0) == "Н", f"{cell(app, 'TASKR-1', 0)!r}")
+
+    print("2.14 the letter is the same at any width")
+    #: The column is one cell wide and a Cyrillic capital is East Asian Width
+    #: Ambiguous -- the class the mailbox marks avoid, and a deliberate
+    #: departure here.  So the letter must not be clipped or padded by the
+    #: width the board happens to be at, and the row must keep its five cells.
+    seen = {}
+    for width in (120, 80):
+        app = prep(TaskApp(TODAY),
+                   StubClient(day_tasks(), reference=datetime.now(TZ)),
+                   [prio_issue("TASKR-1", "Неотложная", "Show-stopper"),
+                    prio_issue("TASKR-5", "Незначительный", "Minor")])
+        async with app.run_test(size=(width, 40)) as pilot:
+            await pilot.pause(); app.repaint(); await pilot.pause()
+            chk(f"{width} cols: the board really is that wide",
+                app.size.width == width, str(app.size.width))
+            row = app.row_for(next(t for t in app.tasks
+                                   if t.id == "yt:TASKR-1"))
+            chk(f"{width} cols: the row still has its five cells",
+                len(row) == 5, str(len(row)))
+            seen[width] = (str(row[0]), cell(app, "TASKR-5", 0))
+    chk("the letters read the same at both widths",
+        seen[120] == seen[80], f"{seen}")
+    chk("and are still one character each",
+        all(len(c) == 1 for pair in seen.values() for c in pair), f"{seen}")
+
+
 for fn in (t_block, t_only_today, t_unmoved, t_work_filter, t_counts, t_readonly,
-           t_reorder, t_tasks_still_work, t_open, t_down, t_unconfigured):
+           t_reorder, t_tasks_still_work, t_open, t_down, t_unconfigured, t_priority):
     asyncio.run(fn())
 print(f"\n{sum(ok)}/{len(ok)} checks passed")
 sys.exit(0 if all(ok) else 1)

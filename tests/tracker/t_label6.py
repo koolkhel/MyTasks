@@ -61,5 +61,45 @@ chk("the block is contiguous, wherever it sits",
 chk("the issues are counted separately", f"{len(issues)} tracked" in st, st)
 print(f"\n  states seen: {sorted(set(labels))}")
 print(f"  status: {st}")
+# -- the priority letter, against whatever the tracker actually holds -------
+# The letter is the first character of the tracker's own word for a priority,
+# upper case except for the least urgent, whose word begins with the same
+# letter as the most urgent one's.  Checked against the live vocabulary rather
+# than against a list here, since not carrying such a list is the point.
+#
+# Reported as counts and letters only.  No issue key, summary, project or
+# person's name is printed by this suite.
+letters = {i[len(M.TRACKER_PREFIX):]: str(r[0]) for i, r in yt}
+by_key_issue = {i.key: i for i in issues}
+wrong = []
+for key, shown in letters.items():
+    got = by_key_issue.get(key)
+    if got is None:
+        continue
+    want = M._priority_letter(got.priority, got.priority_value)
+    if shown != want:
+        wrong.append(f"{shown!r} vs {want!r}")
+chk("every row's letter is the one its priority gives", wrong == [], str(wrong))
+chk("each is one character or empty",
+    all(len(l) <= 1 for l in letters.values()), str(sorted(set(letters.values()))))
+chk("a letter is shown exactly where the tracker holds a priority",
+    {k for k, v in letters.items() if v}
+    == {k for k, i in by_key_issue.items() if i.priority and k in letters},
+    f"{sum(1 for v in letters.values() if v)} shown, "
+    f"{sum(1 for k, i in by_key_issue.items() if i.priority and k in letters)} held")
+chk("every letter comes from the tracker's own word",
+    all(not v or v.lower() == by_key_issue[k].priority[:1].lower()
+        for k, v in letters.items() if k in by_key_issue),
+    str(sorted(set(letters.values()))))
+chk("the least urgent reads lower case, and nothing else does",
+    all((v.islower() if by_key_issue[k].priority_value == M.LEAST_URGENT
+         else v.isupper())
+        for k, v in letters.items() if v and k in by_key_issue),
+    str(sorted(set(letters.values()))))
+seen = sorted({v for v in letters.values() if v})
+print(f"\n  priority letters seen: {seen}")
+print(f"  rows with a letter: {sum(1 for v in letters.values() if v)}"
+      f" of {len(letters)}")
+
 print(f"\n{sum(ok)}/{len(ok)} checks passed")
 sys.exit(0 if all(ok) else 1)
