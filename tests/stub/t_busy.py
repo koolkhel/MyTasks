@@ -350,18 +350,71 @@ async def the_cell():
                for m in main.MAIL_BUSY_MARKS}), 1)
 
     print("a terminal too narrow for both keeps the text")
-    for width, expect in ((120, True), (60, True), (40, False)):
+
+    async def bar_at(width):
         elsewhere()
         app, size = await board(server(), size=(width, 24))
         async with app.run_test(size=size) as pilot:
             await settle(pilot)
-            shown = str(app.query_one("#daybar", Static).render())
-            check(f"{width} cols: the mark is "
-                  f"{'shown' if expect else 'dropped'}",
-                  shown.rstrip().endswith(main.MAIL_IDLE_MARK), expect)
-            check(f"{width} cols: and the bar still says what it said",
-                  "Inbox" in shown or "no date" in shown
-                  or len(shown.strip()) > 3, True)
+            return str(app.query_one("#daybar", Static).render())
+
+    # Measured, not assumed.  This bar is a date, and a day name and a month
+    # name are of different lengths on different days: the mark goes only once
+    # the line reaches 37 characters, and in September only a Wednesday's name
+    # is long enough.  Written on a Wednesday, this case asked whether today
+    # was called something long rather than whether the mark is dropped when it
+    # will not fit, and it failed on the other six days.
+    wide = (await bar_at(200)).rstrip()
+    if wide.endswith(main.MAIL_IDLE_MARK):
+        wide = wide[:-1].rstrip()
+    room = len(wide)
+    check("the bar says something to measure", room > 8, True)
+    # The board pads the mark on and drops it when `len(text) + 2 > room`,
+    # with `room` two columns narrower than the terminal -- so it fits from
+    # four columns above the text's own length.  Both sides of that boundary
+    # are asserted, so a change to the padding fails one of them rather than
+    # passing quietly.
+    for width, expect in ((room + 4, True), (room + 3, False)):
+        shown = await bar_at(width)
+        check(f"{width - room:+d} columns from the text: the mark is "
+              f"{'shown' if expect else 'dropped'}",
+              shown.rstrip().endswith(main.MAIL_IDLE_MARK), expect)
+        check(f"{width - room:+d}: and the bar still says what it said",
+              wide[:12] in shown, True)
+
+    # And well away from the boundary, where the ordinary answers live.
+    for width, expect in ((200, True), (max(room - 10, 12), False)):
+        shown = await bar_at(width)
+        check(f"{width} cols: the mark is {'shown' if expect else 'dropped'}",
+              shown.rstrip().endswith(main.MAIL_IDLE_MARK), expect)
+        check(f"{width} cols: and the bar still says what it said",
+              len(shown.strip()) > 3, True)
+
+    print("and the boundary sits at the same place whatever the bar says")
+    # The bracket above measures today's bar, so it holds today by
+    # construction.  What has to hold on any day is that the offset is the
+    # same for a text of any length -- a Wednesday's name is two characters
+    # longer than a Friday's, and that difference is what broke this case.
+    # So: the rule, asked about two supplied texts rather than about today.
+    SAID = ("Friday 11 September 2026  ·  tomorrow",
+            "Wednesday 09 September 2026  ·  yesterday")
+    check("the two texts really are of different lengths",
+          len(SAID[0]) != len(SAID[1]), True)
+    for said in SAID:
+        for width, expect in ((len(said) + 4, True), (len(said) + 3, False)):
+            elsewhere()
+            app, size = await board(server(), size=(width, 24))
+            async with app.run_test(size=size) as pilot:
+                await settle(pilot)
+                # Not `bar`: this suite has a module-level `bar(app)` helper,
+                # and a local of that name shadows it for the whole function.
+                widget = app.query_one("#daybar", Static)
+                got = app.with_mark(said, widget).rstrip()
+                check(f"{len(said)} chars at {width} cols: the mark is "
+                      f"{'shown' if expect else 'dropped'}",
+                      got.endswith(main.MAIL_IDLE_MARK), expect)
+                check(f"{len(said)} chars at {width} cols: the text is kept",
+                      got.startswith(said), True)
 
     print("in flight while a review runs, and at rest after")
     elsewhere()
