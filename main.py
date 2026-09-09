@@ -357,10 +357,15 @@ class KeyBar(Static):
     names keep reaching the app.
     """
 
-    #: Textual's key names are not what a person presses.
+    #: Textual's key names are not what a person presses.  Every key bound
+    #: for display whose name is words rather than its character belongs
+    #: here; the brackets were bound without being added, and the bar
+    #: advertised `left_square_bracket` until somebody saw it on screen.
     KEY_NAMES = {
         "full_stop": ".",
         "question_mark": "?",
+        "left_square_bracket": "[",
+        "right_square_bracket": "]",
         "space": "space",
         "enter": "enter",
     }
@@ -1230,6 +1235,12 @@ class TaskApp(App[None]):
         #: confirming, a timer noticing an event has ended.  Resetting on
         #: each of those would yank a half-read note back to its beginning.
         self._detail_for: str | None = None
+        #: Which view the table was last drawn for.  A different one is a
+        #: different list, so the row NUMBER the cursor was on means
+        #: nothing in it -- carrying it over put today's last row under the
+        #: cursor when the inbox had been scrolled to row 300, and then
+        #: carried that back into the inbox as row 20.
+        self._drawn_for: "date | Bucket | None" = None
         self.mail_threads: list = []
         #: Why the mailbox could not be read, when it could not be.  Kept
         #: apart from the day's own errors for the reason the tracker's and
@@ -2467,6 +2478,36 @@ class TaskApp(App[None]):
         self.reference = listing.reference
         self.repaint()
 
+    def hold_view(self, table, was_at: int, index: int) -> None:
+        """Put the view back where it was, and move it only to find a row.
+
+        The list moves when a person moves it and at no other time.  A
+        redraw happens for reasons that are nothing to do with them -- a
+        write confirming, mail arriving, the calendar or the tracker
+        answering -- and a view that scrolled on each of those would move
+        under the hand that was working it.
+
+        Two things it must still do.  A list that has become shorter than
+        the position it was scrolled to shows its end rather than an empty
+        area past it, which `scroll_to` handles by clamping.  And a selected
+        row that the restored view does not show is brought into view --
+        which is what ticking a task creates, completion being the first
+        ordering key, so the ticked task moves away among the finished ones.
+
+        It is centred when that happens, not merely revealed: revealing by
+        the shortest distance is exactly what put a row on the last line
+        with nothing after it.
+        """
+        table.scroll_to(y=was_at, animate=False)
+        # Read back rather than assumed: a shorter list clamps this, and
+        # what decides whether the row is visible is where the view
+        # actually ended up.
+        top = int(table.scroll_y)
+        height = table.size.height
+        if not height or top <= index < top + height:
+            return
+        table.scroll_to(y=max(0, index - height // 2), animate=False)
+
     def patched(self) -> list[Task]:
         """The fetched tasks with every pending write applied on top.
 
@@ -2669,6 +2710,14 @@ class TaskApp(App[None]):
         # first paint is where it learns how wide it really is.
         self.fit_columns()
         previous = table.cursor_row
+        # Where the view was, because rebuilding the table loses it:
+        # `DataTable.clear()` sets its scroll position to zero, and
+        # `move_cursor` then scrolls the minimum distance that reveals the
+        # cursor's row -- which, from the top, puts that row on the last
+        # visible line.  Measured on a 600-row inbox: ticking a row on line
+        # 7 of 20 scrolled the view thirteen rows and left the cursor on
+        # line 20, with nothing below it.
+        was_at = int(table.scroll_y)
         keep = self._selected_id
         shown = [t for t in self.patched() if self.belongs(t)]
         tasks = singularity.sort_for_display(
@@ -2728,14 +2777,33 @@ class TaskApp(App[None]):
             index = next(
                 (i for i, t in enumerate(tasks) if t.id == keep), None
             )
-            if index is None:
-                # The task is gone.  Take the nearest surviving position
-                # rather than whatever has moved into the old row.
+            if index is None and self.position != self._drawn_for:
+                # A different view.  It begins at its beginning: its rows
+                # have nothing to do with the last one's, so neither the
+                # row the cursor was on nor the position it was scrolled
+                # to carries any meaning here.
+                #
+                # Both are said, though the reveal below would reach the
+                # top on its own from row 0.  Saying it is the rule; the
+                # reveal reaching the same place is arithmetic, and a
+                # reader who removed this would be depending on it.
+                index, was_at = 0, 0
+            elif index is None:
+                # The same view, and the task is gone.  Take the nearest
+                # surviving position rather than whatever has moved into
+                # the old row.
                 index = min(max(previous, 0), len(tasks) - 1)
-            table.move_cursor(row=index)
+            # Not scrolling: the view is put back below instead, so that a
+            # redraw a person did not ask for does not move the list they
+            # are working down.
+            table.move_cursor(row=index, scroll=False)
             self._selected_id = tasks[index].id
+            self.hold_view(table, was_at, index)
         else:
             self._selected_id = None
+        # Recorded after the rows are drawn, so the next redraw compares
+        # against the view these rows belong to.
+        self._drawn_for = self.position
         # Recorded after the rows are built, so the timer compares what is
         # on screen rather than what was on screen a fetch ago.
         self._ended_shown = self.ended_count()
