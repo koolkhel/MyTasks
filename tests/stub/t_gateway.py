@@ -173,14 +173,210 @@ check("a command that reads its input gets nothing and returns",
           password_command=("sh", "-c", "cat; echo zzread"))),
       "zzread")
 
+# -- putting a row back opens it three times ------------------------------
+print("an undo opens the archive three times, whatever the row's size")
+
+
+def one_undo(size):
+    ids = [ident(i) for i in range(size)]
+    imap = fakeimap.FakeIMAP({"Alerts": ids[:], "Archive": []})
+    gateway.archive(fakeimap.CONFIG, {"Alerts": ids}, connect=lambda: imap)
+    mark = len(imap.calls)
+    out = gateway.restore(fakeimap.CONFIG, {"Alerts": ids},
+                          connect=lambda: imap)
+    return imap, imap.calls[mark:], out
+
+
+for size in (1, 2, 3, 7):
+    imap, undo, out = one_undo(size)
+    opens = sum(1 for name, args in undo
+                if name == "SELECT" and args and args[0] == "Archive")
+    #: Once to find them, once to mark them unread, once to move them back.
+    #: A message at a time this was three openings each: 3, 6, 9 and 21.
+    check(f"a row of {size}: three openings", opens, 3)
+    check(f"a row of {size}: one move, not one a message",
+          sum(1 for name, _ in undo if name == "MOVE"), 1)
+    check(f"a row of {size}: one store, not one a message",
+          sum(1 for name, _ in undo if name == "STORE"), 1)
+    check(f"a row of {size}: all of them came back",
+          sorted(out.archived), sorted(ident(i) for i in range(size)))
+    check(f"a row of {size}: unread again",
+          len(imap.unread_in("Alerts")), size)
+
+check("and the count no longer grows with the row",
+      len({sum(1 for name, args in one_undo(n)[1]
+               if name == "SELECT" and args and args[0] == "Archive")
+           for n in (1, 2, 3, 7)}), 1)
+
+print("one move per folder a row came from, not one per message")
+imap = fakeimap.FakeIMAP({"Alerts": [ident(1), ident(2)],
+                          "Notes": [ident(3)], "Archive": []})
+gateway.archive(fakeimap.CONFIG,
+                {"Alerts": [ident(1), ident(2)], "Notes": [ident(3)]},
+                connect=lambda: imap)
+mark = len(imap.calls)
+out = gateway.restore(fakeimap.CONFIG,
+                      {"Alerts": [ident(1), ident(2)], "Notes": [ident(3)]},
+                      connect=lambda: imap)
+undo = imap.calls[mark:]
+check("all three came back", len(out.archived), 3)
+check("each to the folder it came from",
+      (sorted(imap.ids("Alerts")), imap.ids("Notes")),
+      (sorted([ident(1), ident(2)]), [ident(3)]))
+check("two moves, one a folder", sum(1 for n, _ in undo if n == "MOVE"), 2)
+
+print("a message not in the archive is still reported, not invented")
+imap = fakeimap.FakeIMAP({"Alerts": [], "Archive": []})
+out = gateway.restore(fakeimap.CONFIG, {"Alerts": [ident(9)]},
+                      connect=lambda: imap)
+check("it is reported missing", out.missing, (ident(9),))
+check("and nothing was moved", imap.commands().count("MOVE"), 0)
+check("nor marked", imap.commands().count("STORE"), 0)
+
+print("a row half in the archive reports both halves")
+imap = fakeimap.FakeIMAP({"Alerts": [ident(1)], "Archive": []})
+gateway.archive(fakeimap.CONFIG, {"Alerts": [ident(1)]}, connect=lambda: imap)
+out = gateway.restore(fakeimap.CONFIG, {"Alerts": [ident(1), ident(9)]},
+                      connect=lambda: imap)
+check("the one there came back", out.archived, (ident(1),))
+check("the one that was not is reported missing", out.missing, (ident(9),))
+
+print("an undo is all or nothing")
+# The failure window is between one store and one move, and the move carries
+# the whole row -- so either the row comes back or none of it does.  A row
+# split between a folder and the archive is the state hardest to reason about.
+ids = [ident(i) for i in range(4)]
+imap = fakeimap.FakeIMAP({"Alerts": ids[:], "Archive": []})
+gateway.archive(fakeimap.CONFIG, {"Alerts": ids}, connect=lambda: imap)
+imap.fail = lambda name, args: ("NO", [b"refused"]) if name == "MOVE" else None
+try:
+    gateway.restore(fakeimap.CONFIG, {"Alerts": ids}, connect=lambda: imap)
+    check("a refused move is reported", "no exception", "MoveFailed")
+except gateway.MoveFailed:
+    check("a refused move is reported", True)
+check("no message reached the folder", imap.ids("Alerts"), [])
+check("all four are still in the archive", len(imap.ids("Archive")), 4)
+# Marked unread before the move was tried, so a retry finds them as it left
+# them rather than having to undo a half-done marking.
+check("and all four are unread, ready to be tried again",
+      len(imap.unread_in("Archive")), 4)
+
+
+# -- the archive is opened a fixed number of times ------------------------
+# Opening the archive was measured on the real account at about fourteen
+# seconds, against about one to search it -- it holds everything the account
+# has ever kept.  Opening it once a message made a folded row cost minutes:
+# a row of seven spent two of them confirming what it had just moved.  Now it
+# is opened twice whatever the row's size, once to confirm and once to mark
+# the row read.
+print("confirming a row opens the archive twice, whatever its size")
+
+
+def opens_of(imap, folder):
+    return sum(1 for name, args in imap.calls
+               if name == "SELECT" and args and args[0] == folder)
+
+
+def one_review(size):
+    ids = [ident(i) for i in range(size)]
+    imap = fakeimap.FakeIMAP({"Alerts": ids[:], "Archive": []})
+    gateway.archive(fakeimap.CONFIG, {"Alerts": ids}, connect=lambda: imap)
+    return imap
+
+
+for size in (1, 2, 3, 7):
+    imap = one_review(size)
+    check(f"a row of {size}: the archive is opened twice",
+          opens_of(imap, "Archive"), 2)
+    # Searches are untouched: one a message, which is what this gateway
+    # supports.  An OR of the row would be one round trip and it answers an OR
+    # of eight identities with two of them.
+    check(f"a row of {size}: one search a message, both halves",
+          imap.commands().count("SEARCH"), size * 2)
+
+#: What it was before, so the change is legible from the suite alone: 2, 3, 4
+#: and 8 openings for these four sizes.
+check("and the count no longer grows with the row",
+      len({opens_of(one_review(n), "Archive") for n in (1, 2, 3, 7)}), 1)
+
+print("both groups are asked about in the same opening")
+# A row can hold messages that moved and messages that had already gone.  They
+# concern one folder, so they are asked together.
+imap = fakeimap.FakeIMAP({"Alerts": [ident(1)], "Archive": [ident(2)]})
+out = gateway.archive(fakeimap.CONFIG, {"Alerts": [ident(1), ident(2)]},
+                      connect=lambda: imap)
+check("the moved one is reported archived", out.archived, (ident(1),))
+check("the absent one is reported already done", out.already, (ident(2),))
+check("and the archive was still opened twice", opens_of(imap, "Archive"), 2)
+
+print("a row that moved nothing is still confirmed, and still marked read")
+imap = fakeimap.FakeIMAP({"Alerts": [], "Archive": [ident(3)]})
+out = gateway.archive(fakeimap.CONFIG, {"Alerts": [ident(3)]},
+                      connect=lambda: imap)
+check("it is reported already done", out.already, (ident(3),))
+check("nothing was moved", imap.commands().count("MOVE"), 0)
+# Twice, not once: a message found already in the archive is still marked
+# read, so the number the confirmation found is still used.  The queue is
+# what has not been dealt with, and a reviewed message the account calls new
+# is not that -- whether this run moved it or an earlier one did.
+check("the archive is opened twice all the same", opens_of(imap, "Archive"), 2)
+check("and it is marked read", imap.commands().count("STORE"), 1)
+check("so an already-archived message ends up read",
+      imap.unread_in("Archive"), [])
+
+print("giving up part way is still possible, and sooner")
+# The board is required to let an operation give up cleanly when it is forced
+# to end.  That check used to sit between messages, each of which cost an
+# opening and a search -- about fifteen seconds.  It now sits between
+# searches, about one.
+asked = []
+
+
+def leaving():
+    asked.append(1)
+    return len(asked) > 2
+
+
+imap = fakeimap.FakeIMAP({"Alerts": [ident(i) for i in range(5)],
+                          "Archive": []})
+try:
+    gateway.archive(fakeimap.CONFIG,
+                    {"Alerts": [ident(i) for i in range(5)]},
+                    connect=lambda: imap, stop=leaving)
+    check("it stops rather than finishing", "no exception", "MoveFailed")
+except gateway.MoveFailed as exc:
+    check("it stops rather than finishing", "the board is closing" in str(exc))
+check("it was asked between searches, not once", len(asked) >= 3, True)
+check("what had moved is in the archive", len(imap.ids("Archive")), 5)
+check("and nothing was marked read, the confirmation being unfinished",
+      imap.commands().count("STORE"), 0)
+
+
 print("nothing the gateway knows is written to the repository")
+# This reads git's index, so it sees a file only once it is tracked -- which
+# makes it the one check here whose answer changes at the commit.  A suite
+# added and run before committing passes it and starts failing after, which is
+# how `t_trace.py` shipped tripping it: the tier was green, honestly, and the
+# check could not yet see the file.  Run it again after committing.
 tracked = subprocess.run(["git", "-C", _REPO, "grep", "-lIE",
                           r"zzsecret|MAIL_IMAP_PASSWORD=|password_command *= *\("],
                          capture_output=True, text=True)
 found = [line for line in tracked.stdout.split() if line]
+#: The files allowed to name a credential command, each because it must build
+#: a configuration to exercise one: this suite, the gateway itself, the server
+#: standing in for it, and the trace suite, which constructs one precisely to
+#: prove a password cannot reach the trace.
+MAY_NAME_ONE = ("t_gateway.py", "gateway.py", "fakeimap.py", "t_trace.py")
 check("no tracked file holds a password or a literal one to use",
-      [f for f in found if not f.endswith(("t_gateway.py", "gateway.py",
-                                           "fakeimap.py"))], [])
+      [f for f in found if not f.endswith(MAY_NAME_ONE)], [])
+# The allowance is not a licence to hold a real one.  Whatever these files
+# name must be a marker, not a secret.
+import re as _re
+for f in found:
+    body = open(os.path.join(_REPO, f), encoding="utf-8").read()
+    for hit in _re.findall(r"password_command *= *\(([^)]*)\)", body):
+        check(f"what {f.split('/')[-1]} names is plainly not a real password",
+              bool(_re.search(r"printf|echo|false|sh|ZZ|zz|secret", hit)), True)
 check("the module holds no password itself",
       subprocess.run(["git", "-C", _REPO, "grep", "-cIE",
                       r"[\"'][A-Za-z0-9+/]{16,}[\"']", "--", "gateway.py"],

@@ -282,7 +282,7 @@ class Server:
         if typ != "OK":
             raise MoveFailed(f"the folder {folder} could not be opened")
 
-    def numbers(self, folder: str, idents) -> dict[str, bytes]:
+    def numbers(self, folder: str, idents, stop=None) -> dict[str, bytes]:
         """The server's number for each of these messages in one folder.
 
         One search a message, bounded by the row rather than by the folder.
@@ -304,6 +304,13 @@ class Server:
         self._select(folder, readonly=True)
         out: dict[str, bytes] = {}
         for ident in idents:
+            # Asked between searches, so a board being forced to end waits out
+            # one search rather than a folder opening and a search.  The
+            # confirmation used to ask this between messages, where each
+            # message cost an opening as well -- about fifteen seconds against
+            # about one now.
+            if stop is not None and stop():
+                raise MoveFailed("gave up part way: the board is closing")
             found = self._number_here(folder, ident)
             if found is not None:
                 out[ident] = found
@@ -484,28 +491,35 @@ def archive(config: Config, by_folder: dict, connect=None,
                     raise MoveFailed(
                         f"{len(stayed)} of {len(here)} are still in {folder} "
                         f"after the move")
-                for ident in here:
-                    if stop is not None and stop():
-                        raise MoveFailed("gave up part way: the board is closing")
-                    # The number is kept, not just the yes-or-no: it is what
-                    # marks the message read below, and finding it again
-                    # would cost another search of the archive.
-                    landed = srv.number(config.archive, ident)
-                    if landed is None:
-                        raise MoveFailed(
-                            f"a message left {folder} and is not in "
-                            f"{config.archive}")
-                    archived.append(ident)
-                    arrived.append(landed)
+            # One opening of the archive for the whole confirmation, and for
+            # both groups: those just moved, and those that turned out to be
+            # elsewhere already.  They concern one folder, and opening it was
+            # measured on this account at about fourteen seconds against about
+            # one to search it -- so opening it per message made a folded row
+            # cost minutes where it costs seconds.  A row of seven spent two
+            # minutes here; it spends half of one.
+            #
+            # The numbers are kept, not just the yes-or-no: they are what
+            # marks the messages read below, and finding them again would cost
+            # another search of the archive.
+            #
+            # Searches are still one a message.  An OR of the row would be one
+            # round trip and this gateway answers an OR of eight identities
+            # with two of them -- see `numbers`.
+            landed = srv.numbers(config.archive, here + elsewhere, stop=stop)
+            for ident in here:
+                if ident not in landed:
+                    raise MoveFailed(
+                        f"a message left {folder} and is not in "
+                        f"{config.archive}")
+                archived.append(ident)
+                arrived.append(landed[ident])
             for ident in elsewhere:
-                if stop is not None and stop():
-                    raise MoveFailed("gave up part way: the board is closing")
-                landed = srv.number(config.archive, ident)
-                if landed is None:
+                if ident not in landed:
                     missing.append(ident)
                 else:
                     already.append(ident)
-                    arrived.append(landed)
+                    arrived.append(landed[ident])
         # Read, now that they are where they belong: one request for the
         # whole row, on numbers the confirmation already found.  Last, so a
         # message is never marked read on the strength of a move that could
@@ -526,15 +540,30 @@ def restore(config: Config, by_folder: dict, connect=None) -> Outcome:
     missing: list[str] = []
     with Server(config, connect=connect) as srv:
         for folder, idents in by_folder.items():
-            for ident in [i for i in idents if i]:
-                number = srv.number(config.archive, ident)
-                if number is None:
-                    missing.append(ident)
-                    continue
-                # Unread again before it goes back: the queue is what has
-                # not been dealt with, and a message that returned read
-                # would return to a queue that does not show it.
-                srv.mark_seen(config.archive, [number], seen=False)
-                srv.move(config.archive, [number], folder)
-                back.append(ident)
+            wanted = [i for i in idents if i]
+            if not wanted:
+                continue
+            # Three openings of the archive for the row, not three a message.
+            # Written a message at a time this cost 3n openings at about
+            # fourteen seconds each -- a row of seven spent nearly five
+            # minutes of an undo doing nothing but opening one folder.
+            found = srv.numbers(config.archive, wanted)
+            missing += [i for i in wanted if i not in found]
+            here = [i for i in wanted if i in found]
+            if not here:
+                continue
+            moving = [found[i] for i in here]
+            # Unread again before they go back, and in that order: after a
+            # move a message is in another folder with another number, so
+            # marking it afterwards would mean finding it again.
+            #
+            # The queue is what has not been dealt with, and a message that
+            # returned read would return to a queue that does not show it.
+            srv.mark_seen(config.archive, moving, seen=False)
+            # One move for the row, which is what makes the undo all or
+            # nothing: either the row comes back or none of it does.  A row
+            # split between a folder and the archive is the state hardest to
+            # reason about and the one a person can do least about.
+            srv.move(config.archive, moving, folder)
+            back += here
     return Outcome(tuple(back), (), tuple(missing))

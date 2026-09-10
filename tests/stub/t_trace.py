@@ -301,14 +301,24 @@ def nothing_secret():
 # -- what it costs --------------------------------------------------------
 def costs_nothing():
     print("tracing asks the account for nothing extra")
-    #: The counts measured before this change: a row of one message, three,
-    #: and seven.  Tracing must not move them.
-    for size, want in ((1, 12), (3, 18), (7, 30)):
+    #: Stated as the invariant rather than as totals.  Written as totals --
+    #: 12, 18 and 30 requests for rows of one, three and seven -- it also
+    #: became a check on the request shape, and drifted the moment the
+    #: confirmation stopped opening the archive once a message.  What "costs
+    #: nothing" actually means is that every request the account sees is one
+    #: the gateway would have made anyway, and that the trace holds those and
+    #: no others.
+    UNTRACED = ("LOGIN", "LOGOUT")
+    for size in (1, 3, 7):
         imap, lines, _ = review(size)
-        check(f"a row of {size} still makes {want} requests",
-              len(imap.commands()), want)
-        check(f"and {want - 2} of them are traced",
-              len(lines), want - 2)
+        asked = imap.commands()
+        check(f"a row of {size}: the trace holds every request but "
+              f"{' and '.join(UNTRACED).lower()}",
+              len(lines), len([c for c in asked if c not in UNTRACED]))
+        check(f"a row of {size}: and holds nothing the account never saw",
+              len(lines) <= len(asked), True)
+        check(f"a row of {size}: those two are the only ones untraced",
+              sorted({c for c in asked if c in UNTRACED}), ["LOGIN", "LOGOUT"])
 
     print("nothing on the board is drawn from it")
     room = elsewhere()
@@ -328,34 +338,39 @@ def costs_nothing():
 
 
 # -- the repetition it makes visible --------------------------------------
-def the_repetition():
-    print("a folded row re-selects the archive once a message")
+def no_repetition():
+    print("a folded row opens the archive twice, not once a message")
     imap, lines, _ = review(7)
     selects = [l for l in lines if " SELECT " in l or " EXAMINE " in l]
     archive = [l for l in selects if "Archive" in l]
     #: Readonly opens are EXAMINE, writable ones SELECT.  The gateway opens
-    #: the archive readonly to confirm each message arrived, and writably
-    #: once at the end to mark the row read.
+    #: the archive readonly once to confirm the whole row arrived, and
+    #: writably once to mark it read.
     reading = [l for l in archive if " EXAMINE " in l]
     writing = [l for l in archive if " SELECT " in l]
-    check("eleven folder selects for seven messages", len(selects), 11)
-    check("eight of them open the archive", len(archive), 8)
-    #: Seven readonly, one per message, where the gateway already has a
-    #: helper for searching a folder that is open -- so six are repetition.
-    #: On the real account an archive open measured about ten seconds, which
-    #: puts about a minute of it in a folded row, most of the nine minutes
-    #: the crash spent before the line dropped.
-    #:
-    #: Recorded as a check rather than as a comment, so the separate change
-    #: that removes the repetition has an assertion to move instead of a
-    #: claim to re-establish.  The writable one is not repetition: a store
-    #: needs the folder open for writing.
-    check("seven of those are readonly, one a message", len(reading), 7)
-    check("so six are repetition", len(reading) - 1, 6)
-    check("and one is writable, for the flag, which is not",
-          len(writing), 1)
-    check("the searches are one a message too",
+    #: This assertion has moved rather than been written afresh.  It used to
+    #: record the repetition as present: eleven folder openings for seven
+    #: messages, eight of them the archive, seven readonly and six of those
+    #: repetition -- about a minute of a folded row spent opening one folder,
+    #: most of the nine minutes the crash spent before the line dropped.  It
+    #: was written as a check so that removing the repetition would have an
+    #: assertion to move instead of a claim to re-establish.  This is that.
+    check("five folder openings for seven messages", len(selects), 5)
+    check("two of them open the archive", len(archive), 2)
+    check("one readonly, for the whole confirmation", len(reading), 1)
+    check("and one writable, for the flag", len(writing), 1)
+    check("the searches are still one a message",
           len([l for l in lines if " SEARCH " in l and "Archive" in l]), 7)
+    #: The point of the shape: it does not grow with the row.
+    opens = {}
+    for size in (1, 3, 7):
+        _, some, _ = review(size)
+        opens[size] = len([l for l in some
+                           if ("Archive" in l)
+                           and (" SELECT " in l or " EXAMINE " in l)])
+    check("and the count is the same for any row size", set(opens.values()),
+          {2})
+    print(f"      archive openings by row size: {opens}")
 
 
 # -- the directory it lands in --------------------------------------------
@@ -380,7 +395,7 @@ a_day_at_a_time()
 nothing_identifying()
 nothing_secret()
 costs_nothing()
-the_repetition()
+no_repetition()
 not_committable()
 
 print(f"\n{sum(ok)}/{len(ok)} checks passed")

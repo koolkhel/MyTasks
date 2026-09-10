@@ -3354,10 +3354,30 @@ Where the archive cannot be confirmed, the row SHALL come back and the board
 SHALL say why. A row retired on an unconfirmed move is a message a person
 believes they have dealt with.
 
+Confirming SHALL cost a number of folder openings that does not grow with the
+row. The archive holds everything the account has ever kept and opening it was
+measured on this account at about fourteen seconds against about one to search
+it, so opening it once per message makes a folded row cost minutes where it
+could cost seconds. This is not only a matter of waiting: an operation is
+exposed to the line being dropped for as long as it is open, and the failure
+that made that concrete happened on a row of seven.
+
+Where a confirmation asks the archive about more than one group of messages —
+those just moved, and those that turned out already to be elsewhere — it SHALL
+ask in the same opening. They concern one folder and there is no reason to
+open it twice.
+
 Undoing a review SHALL move the messages back to the folder they came from
 and SHALL mark them unread again, or the row would return to a queue that no
 longer counts it. The board SHALL say that the row returns only once the
 mirror next catches up, and SHALL NOT pretend the row is back before it is.
+
+An undo SHALL be all or nothing. Where it fails, every message SHALL be left
+where it was and the row SHALL NOT come back, rather than some messages
+reaching the folder and the rest staying in the archive. A row split across
+two places is the state hardest to reason about and the one a person can do
+least about; one outcome and one notice is worth more here than salvaging part
+of an undo.
 
 #### Scenario: A confirmed archive retires the row
 
@@ -3383,6 +3403,26 @@ mirror next catches up, and SHALL NOT pretend the row is back before it is.
 
 - **WHEN** a person undoes a review
 - **THEN** the messages are moved back to the folder they came from, unread again, and the board says the row returns when the mirror next catches up
+
+#### Scenario: Confirming a folded row costs no more openings than a single one
+
+- **WHEN** rows of one message and of many are reviewed
+- **THEN** confirming each opens the archive the same number of times
+
+#### Scenario: One opening answers about both groups
+
+- **WHEN** a row holds messages that were moved and messages already elsewhere
+- **THEN** the archive is opened once to ask about both
+
+#### Scenario: An undo that fails leaves the row whole
+
+- **WHEN** putting a row back fails part way
+- **THEN** none of its messages have reached the folder, all are still in the archive, and the board says the undo failed
+
+#### Scenario: Giving up is still possible while confirming
+
+- **WHEN** the board is ended without being asked while a row is being confirmed
+- **THEN** the confirmation gives up cleanly rather than running to the end
 
 ### Requirement: A promoted task carries the message it came from
 
@@ -3493,7 +3533,7 @@ what makes it safe to keep, and it is required separately.
 
 ### Requirement: The board shows whether the mailbox is busy
 
-Reviewing a mail row is the slowest thing the board does — measured at about 13 seconds for a row of one message and 25 seconds a message for a folded one — and reviews are done one at a time, so ticking several leaves the later ones waiting. The board SHALL show whether any of that work is in flight, so that a person can tell whether what they have ticked has landed before they tick more or leave.
+Reviewing a mail row is the slowest thing the board does — measured at about 13 seconds for a row of one message, and for a folded row about 8 seconds a message at four messages falling to about 3 at sixteen, the cost of a row being mostly what it takes to open the archive rather than what it takes per message — and reviews are done one at a time, so ticking several leaves the later ones waiting. The board SHALL show whether any of that work is in flight, so that a person can tell whether what they have ticked has landed before they tick more or leave.
 
 The indication SHALL be one cell at the right of the day bar, shown in every view. Mailbox work outstands regardless of which view is being looked at, and whether it is safe to quit is the same question in all of them.
 
