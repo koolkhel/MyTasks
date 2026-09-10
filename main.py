@@ -3977,6 +3977,24 @@ class TaskApp(App[None]):
             "useTime": False,
             "note": singularity.note_document(note),
         }
+        # Filed as work in the request that makes the task.  Pressing this key
+        # is the declaration that a message is work, and the task it makes
+        # should not be the one task the key for work cannot hide.
+        #
+        # In the creation rather than a filing afterwards, which the store
+        # would take as readily: a task created filed holds a group belonging
+        # to its project, so every later write to it is accepted, and there is
+        # no moment at which a promoted task is on the board unfiled.  It also
+        # keeps this from being a *first filing* -- the irreversible action the
+        # board confirms before performing -- because no task exists yet to
+        # file, and undoing a promotion deletes the task outright.
+        #
+        # Added as a key rather than assigned a value that might be missing:
+        # the store refuses both "" and null for this field, and where no work
+        # project is configured a promotion is an ordinary unfiled task.  The
+        # key that hides work is where that setting is answered for.
+        if self.work_project is not None:
+            fields["projectId"] = self.work_project
         client = self.client
         config = self.gateway_config
 

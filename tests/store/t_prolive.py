@@ -19,7 +19,7 @@ _tt.adopt(_REPO)
 import main as M
 import mail
 from main import TaskApp
-from singularity import SingularityClient, Bucket
+from singularity import SingularityClient, Bucket, load_work_project
 from textual.widgets import DataTable
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +116,18 @@ try:
                   note == mine[0].note_text, True)
             print(f"       note length: {len(note)} chars")
             check("all day", mine[0].raw.get("useTime"), False)
+            # Filed by the creation itself, which is the half of this the
+            # stubs cannot answer: the store has to accept `projectId` on the
+            # request that makes the task, and hand the task back filed.
+            # Compared against the configured project rather than a literal,
+            # and never printed -- a project identifier is nobody else's.
+            work = load_work_project()
+            if work is None:
+                check("no work project configured, so it comes back unfiled",
+                      mine[0].project_id, None)
+            else:
+                check("filed under the configured work project by the creation",
+                      mine[0].project_id == work, True)
             order = mine[0].schedule_order
             others = [t.schedule_order for t in fetched if t.id != made_id]
             check("ordered past everything else the day held",

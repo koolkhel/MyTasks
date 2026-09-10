@@ -23,6 +23,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 import mailfixture as F
 #: The one folder a built mailbox puts its messages in.
 FEED = "Feed"
+#: The project that counts as work here.  Named by the suite rather than read
+#: from `.env`, which is what the board itself does: this tier runs on a
+#: checkout with no configuration at all, and a check comparing against a real
+#: identifier would pass or fail by whose machine it ran on.
+WORK = "P-work"
 FOLDERS = F.FOLDERS
 TODAY = dt.datetime.now(TZ).date()
 NOW = dt.datetime.now(TZ)
@@ -70,12 +75,18 @@ UNSET = object()
 
 @asynccontextmanager
 async def board(mail_path=UNSET, tasks=None, tracker_cfg=None, folders=None,
-                to_inbox=True):
+                to_inbox=True, work_project=WORK):
     app = main.TaskApp()
     app.client = StubClient(tasks if tasks is not None else [mk("t1", "a task", TODAY)],
                             reference=NOW)
     app.calendar_config = None
     app.tracker_config = tracker_cfg
+    # Set here rather than left to `TaskApp.__init__`, which reads the board's
+    # own `.env`: a promotion now files the task it makes, and what it files
+    # under must be this suite's own value on any checkout.  `None` is the
+    # board of somebody who has configured no work project.
+    app.work_project = work_project
+    app.projects = {work_project: "Work"} if work_project is not None else {}
     path = copy_sample() if mail_path is UNSET else mail_path
     # The committed mailbox holds the folders it holds; a throwaway one holds
     # the single folder `build` made.  Either way the board reads what it is
@@ -287,6 +298,78 @@ async def what_it_carries():
         await pilot.press("escape")
         await settle(pilot, 18)
 
+# ------------------------------------------------------------------ filed as work
+async def filed_as_work():
+    print("the task is filed under the work project")
+    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
+        await select(app, pilot, app.is_mail)
+        await pilot.press("f")
+        await settle(pilot, 30)
+        new = made(app)
+        check("the task belongs to the work project",
+              bool(new) and new[0].project_id, WORK)
+        check("it counts as work by the board's own reckoning",
+              bool(new) and app.is_work(new[0]), True)
+        # One request, and no filing after it.  This is the whole difference
+        # between the two ways of doing it: creating the task already filed,
+        # or creating it and then moving it into the project.
+        check("created in one request", app.client.count("create_task"), 1)
+        check("and never filed afterwards", app.client.count("set_project"), 0)
+        check("nor restored into a project", app.client.count("restore"), 0)
+
+    print("with no work project configured it is an ordinary unfiled task")
+    async with board(tasks=[mk("i1", "an inbox task")], work_project=None) as (
+            app, pilot, path, _o):
+        await select(app, pilot, app.is_mail)
+        await pilot.press("f")
+        await settle(pilot, 30)
+        new = made(app)
+        check("a task was still created", len(new), 1)
+        # Absent, not empty: the store refuses "" and null for this field, so
+        # sending either would lose the task rather than leave it unfiled.
+        check("with no project field at all", "projectId" in new[0].raw, False)
+        check("which reads as having no project", new[0].project_id, None)
+        check("and the board says nothing about a work project",
+              "work project" in status(app).lower(), False)
+
+    print("the placeholder is filed before the store has answered")
+    async with board(tasks=[mk("i1", "an inbox task")]) as (app, pilot, path, _o):
+        app.client.gate = threading.Event()
+        await select(app, pilot, app.is_mail)
+        await pilot.press("f")
+        await settle(pilot, 12)
+        held = [t for t in app._base if t.id.startswith("tmp:")]
+        check("a placeholder is in the base", len(held), 1)
+        check("carrying the project the creation will send",
+              bool(held) and held[0].project_id, WORK)
+        check("so the view already counts it as work",
+              bool(held) and app.is_work(held[0]), True)
+        app.client.gate.set()
+        await settle(pilot, 30)
+        check("and the real task is filed too",
+              bool(made(app)) and made(app)[0].project_id, WORK)
+
+    print("the key that hides work hides it")
+    async with board(tasks=[mk("i1", "an inbox task"),
+                            mk("d1", "a personal task", TODAY)]) as (
+            app, pilot, path, _o):
+        row = await select(app, pilot, app.is_mail)
+        subject = row.title
+        await pilot.press("f")
+        await settle(pilot, 30)
+        await to_today(app, pilot)
+        shown = [t.title for t in app.tasks]
+        check("the promoted task is on today", subject in shown, True)
+        await pilot.press("w")
+        await settle(pilot, 20)
+        hidden = [t.title for t in app.tasks]
+        check("hiding work takes it away", subject in hidden, False)
+        check("and leaves the personal task", "a personal task" in hidden, True)
+        await pilot.press("w")
+        await settle(pilot, 20)
+        check("showing work brings it back", subject in [t.title for t in app.tasks],
+              True)
+
 # --------------------------------------------------------------- out of the queue
 # `out_of_the_queue` lived here: the thread leaving the queue by a read
 # flag, the flag written in the right folder, an unwritable mailbox, and
@@ -445,7 +528,7 @@ async def saying_so():
 
 async def main_():
     for part in (becomes_a_task, shown_at_once, what_it_carries,
-                 undoing, refusals, saying_so):
+                 filed_as_work, undoing, refusals, saying_so):
         await part()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     sys.exit(0 if all(ok) else 1)
