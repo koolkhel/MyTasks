@@ -29,6 +29,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.markup import escape
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
@@ -473,12 +474,27 @@ class KeyBar(Static):
         width = max(self.size.width or self.app.size.width, 1)
         rows = self.pack(self.entries(), width)
         self.styles.height = len(rows)
-        self.update(
-            "\n".join(
-                "  ".join(f"[b]{k}[/b] [dim]{d}[/dim]" for k, d in row)
-                for row in rows
-            )
-        )
+        # Assembled as styled text, not written as markup.  One of the keys
+        # the bar names is a `[`, and a bracket put into a markup string
+        # opens a tag: the bar read `[[/b] Note up` where it should have read
+        # `[ Note up`.  Rich's parser had tolerated it and Textual's own does
+        # not, so the string stopped meaning what it said with no change
+        # here.
+        #
+        # Escaping does not fix this one.  `textual.markup.escape` escapes a
+        # bracket that begins something tag-shaped, which is what text needs;
+        # a lone `[` begins nothing, so it comes back unchanged and then
+        # merges with the `[/b]` written after it.  Text that carries its own
+        # styles is never parsed at all, so no key can break the bar again,
+        # whatever character it turns out to be.
+        drawn = [
+            Content("  ").join([
+                Content.assemble((key, "bold"), " ", (desc, "dim"))
+                for key, desc in row
+            ])
+            for row in rows
+        ]
+        self.update(Content("\n").join(drawn))
 
     def on_mount(self) -> None:
         self.rebuild()
@@ -604,7 +620,10 @@ class LinkPicker(ModalScreen[str]):
                 # Numbered by position, not keyed: a task can hold more
                 # links than there are comfortable keys, and the list moves
                 # by arrows anyway.
-                *(Option(shown, id=str(i)) for i, (shown, _url) in enumerate(self.choices)),
+                # Escaped: a label comes from a task's title, its note or
+                # a message, and the list draws its options as markup.
+                *(Option(escape(shown), id=str(i))
+                  for i, (shown, _url) in enumerate(self.choices)),
                 id="link-list",
             )
             yield Label("enter to open · esc to leave it", id="dialog-hint")
@@ -719,7 +738,9 @@ class ProjectPicker(ModalScreen[str]):
                 # The task's own project is marked rather than left out, so
                 # the list always reads the same way and choosing it again
                 # is harmless.
-                Option(f"{'* ' if pid == self.current else '  '}{title}", id=pid)
+                # The name is the store's, and the list draws it as markup.
+                Option(f"{'* ' if pid == self.current else '  '}{escape(title)}",
+                       id=pid)
                 for pid, title in sorted(self.projects.items(), key=lambda kv: kv[1])
             ]
             yield OptionList(*options, id="project-list")
@@ -3498,7 +3519,13 @@ class TaskApp(App[None]):
         if status is None:
             return
         status.set_class(error, "error")
-        status.update(message)
+        # Escaped here, once, rather than at each of the calls that reach
+        # this: the board's messages quote a task's title, and a title
+        # holding square brackets lost them on screen while remaining whole
+        # in the store.  Nothing that arrives here is markup -- every caller
+        # passes a sentence -- and the error colour is a CSS class rather
+        # than markup, so escaping the message takes nothing away.
+        status.update(escape(message))
 
     @on(DataTable.RowHighlighted)
     def row_changed(self, event: DataTable.RowHighlighted) -> None:
@@ -3826,7 +3853,7 @@ class TaskApp(App[None]):
             return
         today = datetime.now(self.tz).date()
         choice = await self.push_screen_wait(
-            DatePicker(f"Date for “{task.title}”", today)
+            DatePicker(f"Date for “{escape(task.title)}”", today)
         )
         if choice is None:
             return
@@ -4090,14 +4117,16 @@ class TaskApp(App[None]):
             self.set_status("No projects to file into", True)
             return
         chosen = await self.push_screen_wait(
-            ProjectPicker(f"Project for “{task.title}”", self.projects, task.project_id)
+            ProjectPicker(f"Project for “{escape(task.title)}”", self.projects,
+                          task.project_id)
         )
         if chosen is None or chosen == task.project_id:
             return
         if task.project_id is None:
             ok = await self.push_screen_wait(
                 Confirm(
-                    f"File “{task.title}” under {self.projects[chosen]}? "
+                    f"File “{escape(task.title)}” under "
+                    f"{escape(self.projects[chosen])}? "
                     "It cannot be un-filed here."
                 )
             )
@@ -4249,7 +4278,7 @@ class TaskApp(App[None]):
             return
         before = task.note_text
         written = await self.push_screen_wait(
-            NoteInput(f"Note for “{task.title}”", before)
+            NoteInput(f"Note for “{escape(task.title)}”", before)
         )
         if written is None:
             return
@@ -4282,7 +4311,7 @@ class TaskApp(App[None]):
         # The API deletes for real -- a deleted task 404s afterwards, it does
         # not land in the basket -- so this always asks first.
         ok = await self.push_screen_wait(
-            Confirm(f"Delete “{task.title}” for good?")
+            Confirm(f"Delete “{escape(task.title)}” for good?")
         )
         if not ok:
             return
@@ -4343,7 +4372,7 @@ class TaskApp(App[None]):
             self.hand_over(choices[0][1] if choices else None, task)
             return
         chosen = await self.push_screen_wait(
-            LinkPicker(f"Open from “{task.title}”", choices)
+            LinkPicker(f"Open from “{escape(task.title)}”", choices)
         )
         if chosen:
             self.hand_over(chosen, task)

@@ -288,6 +288,15 @@ async def the_key_bar():
         entries = dict((desc, key) for key, desc in bar.entries())
         check("the note keys are shown as characters",
               (entries.get("Note up"), entries.get("Note down")), ("[", "]"))
+        # And as drawn, not only as entries.  The check above passed through
+        # a build in which the bar read `[[/b] Note up` on screen: the entry
+        # was right and the drawing of it was not, so the entry alone is the
+        # wrong instrument.  What the toolkit draws is `bar.visual.plain`.
+        painted = bar.visual.plain
+        check("and the drawn bar shows them the same way",
+              ("[ Note up" in painted, "] Note down" in painted), (True, True))
+        check("with none of the bar's own styling left as text",
+              [t for t in ("[b]", "[/b]", "[dim]", "[/dim]") if t in painted], [])
         named = [key for key, _desc in bar.entries()]
         check("no entry anywhere is a toolkit name",
               [k for k in named if "_" in k], [])
