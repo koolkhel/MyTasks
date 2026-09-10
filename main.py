@@ -2518,8 +2518,25 @@ class TaskApp(App[None]):
         )
         entry.tasks[task.id] = task
 
+    def _group_in_flight(self, group: str) -> int:
+        """How many of one action's writes are still queued.  UI thread only.
+
+        Counted from the queues that hold them rather than kept as a number
+        of its own.  The board already derives its in-flight total this way
+        for the status line, and the one count it does keep carries a warning
+        worth heeding here: every path an operation can end on has to bring
+        it down, there are six of them, and one missed lasts the session.  A
+        number read off the queues has no path to miss.
+
+        Writes abandoned behind a refusal do not count, the refusal having
+        taken them out of the queue: they can never settle, so waiting for
+        them would wait forever.
+        """
+        return sum(1 for queue in self._pending.values()
+                   for pending in queue if pending.group == group)
+
     def forget(self, group: str) -> None:
-        """Drop an entry whose action left nothing behind.
+        """Drop an entry whose action left nothing behind.  UI thread only.
 
         A refused write is not something to undo, because it never
         happened.  But an action can take several writes -- a move that
@@ -2528,7 +2545,32 @@ class TaskApp(App[None]):
         succeeds on a retry, so a single refusal among five would otherwise
         throw away the ability to undo the four that landed.  The entry goes
         only when nothing of it was applied.
+
+        Which is a question that cannot be answered while any of the action's
+        writes is still in flight, and answering it anyway is what this used
+        to do.  Called at the first refusal, with three writes still out, it
+        read `applied` as nothing and dropped the entry -- and the three then
+        landed and counted themselves against a list that no longer held it.
+        Three writes succeeded, the board went on showing them, and the undo
+        key could not reach them.  Which of the answers came back first was
+        the whole of the difference.
+
+        So the decision waits.  Where the action still has writes outstanding
+        this does nothing at all; the last of them to settle comes back here
+        and decides on a complete answer.  No note of the refusal is kept
+        because none is needed: the rule is to keep the entry if anything
+        landed, and that does not mention refusals.
+
+        Nor does the confirmed-write path call this, though it looks as
+        though it should have to.  A write that has just applied something
+        cannot cause a drop: the call would return early while writes remain
+        and keep the entry once they do not -- a no-op reading as though it
+        were load-bearing.  Every case works out on the refusals alone,
+        whichever of them settles last asking the question once the answer
+        is complete.
         """
+        if self._group_in_flight(group):
+            return
         self._undo = [
             e for e in self._undo if e.group != group or e.applied
         ]

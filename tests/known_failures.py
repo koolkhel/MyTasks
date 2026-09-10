@@ -57,19 +57,6 @@ REPAIRED = {
 FLAKY = {
     "t_label6": ("reads live tracker issues; failed on a missing issue key "
                  "earlier the same day it passed 8/8"),
-    "t_undo1": (
-        '"the entry survives the one refusal" depends on which of an '
-        "action's writes settles first, and nothing orders them. Forced "
-        "either way -- see tests/probes/t_race.py -- the product loses the "
-        "undo entry when the refusal settles before any success and keeps "
-        "it when it settles after; both orderings behaved identically on "
-        "the commit before the change that made the first one common, so "
-        "this is a product race rather than a suite fault, and it wants "
-        "its own change to the write machinery. Observed failing about 1 "
-        "run in 5 under a loaded tier and 0 in 5 alone, with exactly one "
-        "failing check and 46 rather than 47 reported -- the 47th is "
-        "guarded by `if app._undo:`. A different signature is a different "
-        "fault"),
     "t_perf2": ("times the board with writes in flight, so it fails under a "
                 "full tier run where the store is busy and passes alone "
                 "minutes later -- observed 3/4 in a --store run and 4/4 on "

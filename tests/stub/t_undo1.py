@@ -211,9 +211,102 @@ async def t_partial_group():
             str(stub.count("set_schedule_order")))
         chk("the entry survives the one refusal", len(app._undo)==1, str(len(app._undo)))
         chk("the failure was reported", "failed" in status(app), status(app))
-        if app._undo:
-            await pilot.press("u"); await settle(pilot, app)
-            chk("and it can still be undone", "Undid" in status(app), status(app))
+        # Unguarded.  This used to read `if app._undo:` because the entry
+        # might not be there, which is why a failing run reported 46 checks
+        # rather than 47 -- a count that varied with the race was part of its
+        # recorded signature.  The entry always survives now, so the guard
+        # has nothing to protect and the suite reports the same count every
+        # run.
+        await pilot.press("u"); await settle(pilot, app)
+        chk("and it can still be undone", "Undid" in status(app), status(app))
+
+async def t_forced_orderings():
+    """The same action, its refusal answered first and then last.
+
+    These cases were a probe -- `tests/probes/t_race.py`, removed with the
+    fix -- which asserted nothing, because the two orderings disagreed and
+    there was no right answer to state.  The entry was dropped when the refusal was answered
+    before any of the action's other writes and kept when it was answered
+    after, and nothing but timing separated them.  Worse: the writes that
+    then landed counted themselves against a list no longer holding the
+    entry, so three writes succeeded, the board went on showing them, and
+    the undo key could not reach them.
+
+    They agree now, so there is an answer to assert and it lives here,
+    beside the check it explains.
+    """
+    print("1.2d the order the answers arrive in makes no difference")
+    #: Long enough that the side meant to lose certainly settles after the
+    #: other, short enough that the suite finishes.
+    DAWDLE = 0.4
+    left = {}
+    for refusal_first in (True, False):
+        tasks = [so(mk(f"T-{i}", chr(97 + i) * 3, D), 100 + i)
+                 for i in range(4)]
+        stub = patch(StubClient(tasks))
+        recorded = stub._record
+
+        def paced(name, *args, _first=refusal_first, _rec=recorded):
+            # Whichever side is meant to lose the race dawdles.
+            mine = bool(args) and args[0] == "T-2"
+            if name == "set_schedule_order" and mine is not _first:
+                threading.Event().wait(DAWDLE)
+            return _rec(name, *args)
+
+        stub._record = paced
+        stub.fail_ids[("set_schedule_order", "T-2")] = \
+            SingularityError("transient")
+        app = TaskApp(D)
+        app.client = stub
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("J")
+            await settle(pilot, app, 400)
+            left[refusal_first] = len(app._undo)
+            chk(f"refusal answered {'first' if refusal_first else 'last'}: "
+                f"the entry survives", len(app._undo) == 1,
+                str(len(app._undo)))
+            chk(f"refusal answered {'first' if refusal_first else 'last'}: "
+                f"some writes landed",
+                stub.count("set_schedule_order") >= 3,
+                str(stub.count("set_schedule_order")))
+    chk("and both orderings agree", left[True] == left[False],
+        f"first={left[True]} last={left[False]}")
+
+
+async def t_all_on_one_queue():
+    """An action whose writes are all one task's, and whose first is refused.
+
+    The refusal takes the rest of that task's queue with it, so nothing of
+    the action is left to settle and the decision can be taken at once.  It
+    matters because a decision that waited for writes which will never be
+    sent would wait forever, and the entry would linger with nothing applied.
+    """
+    print("1.2e a refusal that abandons the rest decides at once")
+    stub = patch(StubClient(three()))
+    stub.fail_ids[("set_schedule_order", "T-a")] = SingularityError("nope")
+    app = TaskApp(D)
+    app.client = stub
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        #: One task, two writes queued behind each other for it.
+        task = next(t for t in app.tasks if t.id == "T-a")
+        for order in (1500, 1600):
+            app.submit_write(
+                "Reordering", task,
+                lambda tid, o=order: stub.set_schedule_order(tid, o),
+                {"scheduleOrder": order}, group="zz-one")
+        await settle(pilot, app, 400)
+        chk("nothing of the action is left queued",
+            app._group_in_flight("zz-one") == 0,
+            str(app._group_in_flight("zz-one")))
+        chk("and no entry survives, nothing having landed",
+            not [e for e in app._undo if e.group == "zz-one"],
+            str([e.group for e in app._undo]))
+        chk("the second write was abandoned, not sent",
+            stub.count("set_schedule_order") == 1,
+            str(stub.count("set_schedule_order")))
+
 
 async def t_single_refusal_drops():
     print("1.2c a lone refused write still leaves nothing")
@@ -225,7 +318,8 @@ async def t_single_refusal_drops():
         chk("nothing recorded", app._undo==[], str(len(app._undo)))
 
 for fn in (t_record, t_refused, t_partial_group, t_single_refusal_drops, t_unreversible, t_group, t_reverse,
-           t_only_its_fields, t_refused_undo, t_gone, t_off_view, t_not_self):
+           t_only_its_fields, t_refused_undo, t_gone, t_off_view, t_not_self,
+           t_forced_orderings, t_all_on_one_queue):
     asyncio.run(fn())
 t_not_persisted()
 print(f"\n{sum(ok)}/{len(ok)} checks passed")
