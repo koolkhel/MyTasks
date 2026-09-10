@@ -145,6 +145,34 @@ def dimmed(app, title):
     spans = getattr(name, "spans", ())
     return bool(any("dim" in str(sp.style) for sp in spans))
 
+def claims(app, event, receded):
+    """What this suite says a row shows, as (label, got, want) triples.
+
+    One list, used by the case that reads well and by the sweep that runs it
+    at every hour.  It was two -- the case asserted six things about a row and
+    the sweep judged one of them -- and the five the sweep did not judge are
+    where a stale expectation sat unnoticed through twenty-four hours of
+    checking.
+
+    The start time is read off the event rather than recomputed from the hour
+    it was built for.  That is the whole of the defect this fixes: the fixture
+    was widened to start at midnight and an expectation went on computing the
+    old arithmetic beside it, correct until the moment it was not.  Read from
+    the event, the two cannot disagree -- and it is still a check, because the
+    suite supplies a datetime and the board formats a label from it.
+    """
+    return [
+        ("is receded" if receded else "is not receded",
+         dimmed(app, event.title), receded),
+        ("keeps its mark", cell(app, event.title, 1), main.EVENT_ROW_MARK),
+        ("keeps its start time", cell(app, event.title, 2),
+         f"{event.start:%H:%M}"),
+        ("keeps its name", event.title in cell(app, event.title, 3), True),
+        ("keeps its calendar", event.calendar in cell(app, event.title, 4), True),
+        ("is not struck out", "strike" in cell(app, event.title, 3), False),
+    ]
+
+
 def cell(app, title, i):
     t = next(x for x in app.tasks if x.raw.get("title") == title)
     return str(app.row_for(t)[i])
@@ -161,6 +189,7 @@ async def positions():
         titles = [e.title for e in events]
         for t in titles:
             print(f"      {t:10} dim={dimmed(app, t)}")
+        by_title = {e.title: e for e in events}
         if "over" in titles:
             check("an event that is over is receded", dimmed(app, "over"), True)
         check("one under way is not", dimmed(app, "under way"), False)
@@ -168,12 +197,8 @@ async def positions():
             check("one still to come is not", dimmed(app, "to come"), False)
         # nothing else about the row changed
         if "over" in titles:
-            check("it keeps its mark", cell(app, "over", 1), main.EVENT_ROW_MARK)
-            check("it keeps its start time",
-                  cell(app, "over", 2), f"{(h-2)%24:02d}:00")
-            check("its name is all there", "over" in cell(app, "over", 3), True)
-            check("it keeps its calendar", "c" in cell(app, "over", 4), True)
-            check("it is not struck out", "strike" in cell(app, "over", 3), False)
+            for label, got, want in claims(app, by_title["over"], True):
+                check(f"it {label}", got, want)
 
 # --------------------------------------------------------- days either side
 async def other_days():
@@ -290,9 +315,15 @@ async def every_hour():
                 lying.append(f"{title}@{h:02d}")
         with clock_at(h):
             async with board([e for _, e, _ in want]) as (app, pilot):
-                for title, _, receded in want:
-                    if dimmed(app, title) != receded:
-                        wrong.append(f"{title}@{h:02d}")
+                for title, event, receded in want:
+                    # Everything the suite claims about the row, not only its
+                    # shading.  Judging the shading alone is what let a stale
+                    # start-time expectation ride through all twenty-four
+                    # hours: the sweep built the very fixture the expectation
+                    # was wrong about and never looked at that cell.
+                    for label, got, expected in claims(app, event, receded):
+                        if got != expected:
+                            wrong.append(f"{title}@{h:02d} {label}")
     check("every fixture really is the position it is named for", lying, [])
     check("and the board draws each accordingly at every hour", wrong, [])
     # Skipped because no example exists, not because it was awkward: at
