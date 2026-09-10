@@ -18,6 +18,12 @@ _TESTS = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
+# Imported for what it does on import, not for what it exports: it points
+# `journal.PATH` at a throwaway directory, which is what keeps this suite's
+# log lines, crash files and IMAP traces out of the board's own `logs/`.
+# Without it, tracing every gateway request put 708 synthetic lines in there.
+# Not `from harness import *`, which shadows `time` with `datetime.time`.
+import harness  # noqa: F401
 import fakeimap
 import gateway
 

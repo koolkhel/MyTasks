@@ -218,3 +218,42 @@ def _rendered(error: BaseException) -> str:
         return preface + "".join(traceback.format_exception(kind, value, tb))
     except Exception:
         return f"{type(error).__name__}: {error!r}\n"
+
+
+def trace(command: str, about: str, took: float, ended: str) -> None:
+    """Write down one request made to the mail account.
+
+    The log above records an operation and how it ended.  This records the
+    conversation underneath it: ten to thirty requests a review, each with
+    what it was and how long it took.
+
+    Always written, never switched on.  The fault it exists for -- a gateway
+    dropping the line part way through -- cannot be reproduced on demand, so a
+    trace that has to be turned on first is a trace that was off.  The board
+    died once with nothing to say but that a review of seven messages had
+    started, and no way to know which of the seven it was on.
+
+    `took` is the load-bearing field.  The command says what was attempted and
+    the order says where it got to, but only the duration says whether the
+    account was healthy, slowing, or already gone -- and it is the one thing
+    that cannot be worked out afterwards.
+
+    Its own file, one for each day: a full pass of a real mailbox measures
+    thousands of lines against a log of hundreds, so sharing one file would
+    make each unreadable, and a fault is looked for by the day it happened on.
+
+    Best-effort, on the same terms as the log, and nothing reads it back.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        where = os.path.join(os.path.dirname(PATH),
+                             f"imap-{now:%Y-%m-%d}.log")
+        os.makedirs(os.path.dirname(where), exist_ok=True)
+        with open(where, "a", encoding="utf-8") as fh:
+            fh.write(f"{now:%Y-%m-%dT%H:%M:%SZ} {command:<8}"
+                     f"{about:<34}{took:7.2f}s {ended}\n")
+    except Exception:
+        # Deliberately everything, as for the log: a line about a request is
+        # not worth an exception reaching a thread part way through moving
+        # somebody's mail.
+        pass

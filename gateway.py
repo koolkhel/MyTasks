@@ -31,6 +31,9 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from time import monotonic
+
+import journal
 
 from dotenv import load_dotenv
 
@@ -220,7 +223,7 @@ class Server:
             pass
         return False
 
-    def _talk(self, command: str, call):
+    def _talk(self, command: str, call, about: str = ""):
         """Run one request, and answer for it in this module's own terms.
 
         The one place `imaplib`'s exceptions are allowed to end.  Whatever
@@ -244,23 +247,38 @@ class Server:
         else in the same method is a bug in this file, and reporting it as
         an unreachable mailbox would hide it.
         """
+        started = monotonic()
         try:
-            return call()
+            answer = call()
         except imaplib.IMAP4.abort as exc:
+            journal.trace(command, about, monotonic() - started,
+                          f"ABORT {exc}")
             raise GatewayUnreachable(
                 f"the gateway closed the line during {command}: {exc}") from exc
         except imaplib.IMAP4.error as exc:
+            journal.trace(command, about, monotonic() - started,
+                          f"REFUSED {exc}")
             raise MoveFailed(f"the gateway refused {command}: {exc}") from exc
         except OSError as exc:
+            journal.trace(command, about, monotonic() - started,
+                          f"FAILED {type(exc).__name__}")
             raise GatewayUnreachable(
                 f"the line to the gateway failed during {command}: "
                 f"{type(exc).__name__}") from exc
+        # Written on every path, so the last line before a session ends is the
+        # request that ended it.  `answer` is not looked at: what a search
+        # found is already in the operation's own line in the log, and
+        # teaching this function each command's response shape would put
+        # parsing in the one place that has none.
+        journal.trace(command, about, monotonic() - started, "ok")
+        return answer
 
     def _select(self, folder: str, readonly=False):
         typ, _ = self._talk(
             "EXAMINE" if readonly else "SELECT",
             lambda: self.imap.select(f'"{utf7_encode(folder)}"',
-                                     readonly=readonly))
+                                     readonly=readonly),
+            about=folder)
         if typ != "OK":
             raise MoveFailed(f"the folder {folder} could not be opened")
 
@@ -305,7 +323,8 @@ class Server:
         self._select(folder, readonly=True)
         typ, data = self._talk(
             "FETCH", lambda: self.imap.uid("FETCH", ",".join(wanted),
-                                           "(FLAGS)"))
+                                           "(FLAGS)"),
+            about=f"{folder} n={len(wanted)}")
         if typ != "OK":
             # A fetch of numbers that have all gone is answered OK with
             # nothing; a refusal is something else, and is not "absent".
@@ -326,7 +345,8 @@ class Server:
         self._select(folder)
         typ, resp = self._talk(
             "MOVE", lambda: self.imap.uid("MOVE", ",".join(wanted),
-                                          f'"{utf7_encode(target)}"'))
+                                          f'"{utf7_encode(target)}"'),
+            about=f"{folder} n={len(wanted)} -> {target}")
         if typ != "OK":
             raise MoveFailed(f"the move was refused: {resp}")
 
@@ -345,7 +365,8 @@ class Server:
         typ, data = self._talk(
             "SEARCH",
             lambda: self.imap.uid("SEARCH", None, "HEADER", "Message-ID",
-                                  f'"{message_id}"'))
+                                  f'"{message_id}"'),
+            about=f"{folder} {message_id}")
         if typ != "OK":
             raise MoveFailed(f"the folder {folder} could not be searched")
         found = (data[0].split() if data and data[0] else [])
@@ -378,7 +399,9 @@ class Server:
             "STORE",
             lambda: self.imap.uid("STORE", ",".join(wanted),
                                   "+FLAGS" if seen else "-FLAGS",
-                                  r"(\Seen)"))
+                                  r"(\Seen)"),
+            about=f"{folder} n={len(wanted)} "
+                  f"{'+' if seen else '-'}Seen")
         if typ != "OK":
             raise MoveFailed(
                 f"the messages could not be marked "

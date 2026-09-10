@@ -223,22 +223,40 @@ async def main_():
     # directory that did not already have one, and a synthetic failure has no
     # business in the log a person reads to find real ones.
     print("the line goes down part way through a real review")
-    single = next((t for t in rows if t.count == 1), None)
+    # The mirror is read again here rather than the row being taken from the
+    # reading at the top.  By this point three halves have run, each moving a
+    # real message and putting it back, and the mailbox mirror is refreshed on
+    # a timer: over the four to six minutes that takes, it re-syncs underneath
+    # a row chosen at the start.  Taken from the top's reading, this case
+    # looked for a row the board no longer drew and returned before ticking
+    # anything -- twice in a row, and reported as "the message is back in its
+    # folder: 0", which reads like stranded mail and was nothing of the kind.
+    fresh = mail.threads(mail.read(mailbox), fold=fold_for(tracker.load_config()))
+    single = next((t for t in fresh if t.count == 1), None)
     if single is None:
         print("  no row stands for a single message; skipping this half")
     else:
         room = tempfile.mkdtemp(prefix="gwlive.")
         journal.PATH = os.path.join(room, "logs", "mytasks.log")
         where = {single.newest.folder: [single.newest.ident]}
+        moved = []
         try:
-            await _board_review_cut(single, mailbox, gw)
+            await _board_review_cut(single, mailbox, gw, moved)
         finally:
             # The move succeeded before the cut, so the message is in the
             # archive whatever the checks said.  In a finally, and reported:
             # an interrupt here must still put somebody's mail back.
+            #
+            # Reported as "nothing to put back" when the review never got as
+            # far as moving anything, rather than as a failure: a restore
+            # finding nothing is only alarming when something was moved.
             back = gateway.restore(gw, where)
-            check("the message is back in its folder after the cut",
-                  len(back.archived), 1)
+            if moved:
+                check("the message is back in its folder after the cut",
+                      len(back.archived), 1)
+            else:
+                check("nothing was moved, so nothing needed putting back",
+                      len(back.archived), 0)
         journal.PATH = REAL_LOG
 
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
@@ -253,8 +271,13 @@ def _lines_in_log():
         return []
 
 
-async def _board_review_cut(row, mailbox, gw):
-    """Tick one real row, and cut the line before the confirmation lands."""
+async def _board_review_cut(row, mailbox, gw, moved=None):
+    """Tick one real row, and cut the line before the confirmation lands.
+
+    `moved` is appended to once the move has actually gone out, so the caller
+    can tell "the restore found nothing because nothing moved" from "the
+    restore lost something".
+    """
     #: Command names in order, for saying what happened if a check fails.
     #: Names only -- an argument would carry a folder name.
     seq = []
@@ -273,6 +296,8 @@ async def _board_review_cut(row, mailbox, gw):
         did not fire, and cost a live run to find out.
         """
         seq.append(name)
+        if name == "MOVE" and moved is not None:
+            moved.append(name)
         if name != "SELECT":
             return False
         return seq.count("MOVE") >= 1 and \
