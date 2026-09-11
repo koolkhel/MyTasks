@@ -27,11 +27,3 @@ crash*.txt
 # An editor's swap file holds the content of what is open in it, so a swap of
 # one of the above is one of the above.
 *.swp
-
-# The scripts that make a workspace on the build host.  Kept here because
-# this is where they are edited and this is what the board points at, and
-# kept out of git because they are the one place a real host, a real group
-# and real repository names have to be written down -- which is exactly what
-# this history had removed from it once with filter-repo. The board describes
-# their command line and nothing else, so nothing here is needed to build it.
-workflow/
