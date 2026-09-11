@@ -15,6 +15,14 @@ import singularity
 from singularity import (Task, Listing, Bucket, SingularityError, ApiError,
                          iso_z, local_tz, sort_for_display, CHECKED, CANCELLED, EMPTY)
 
+# The board reads a working window from the environment, and `.env` is found
+# by walking up from singularity.py -- so a suite that emptied the environment
+# would still find the window of whoever ran it, and every work-filter suite
+# would pass or fail by the hour of the day.  Every board built here starts
+# with none, which is the board these suites were written against.  A suite
+# that wants a window sets `app.working_window` itself.
+singularity.load_working_window = lambda *a, **k: None
+
 try:
     import ical
 except ImportError:          # the pre-change board, which reads no calendar

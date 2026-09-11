@@ -1276,6 +1276,23 @@ class TaskApp(App[None]):
         # on answering only where a task lives.  It lasts as long as the
         # board is open and writes nothing.
         self.hiding_work = False
+        # What the working window last said, and whether a press is
+        # overruling it.  The mode stays a plain boolean because `repaint`
+        # reads it three times and must see one answer; a property reading
+        # the clock would make every redraw depend on when it happened.
+        #
+        # Nothing records when a press expires.  Each tick asks the window
+        # about now and compares with `_window_hides`: the same answer
+        # changes nothing, a different one clears the overrule.  The
+        # comparison is the expiry.
+        self._window_hides: bool | None = None
+        #: Why the window is hiding the work, in the words the board shows,
+        #: or None while it is not.  Kept rather than recomputed where it is
+        #: drawn: the status line would otherwise read the clock on every
+        #: redraw, and the mode is exactly the thing that must not depend on
+        #: when a redraw happened.
+        self._window_reason: str | None = None
+        self._work_override: bool | None = None
         # What this session has written, most recent last, so the undo key
         # can walk back through it.  Session-long: nothing is kept on disk.
         self._undo: list[Undoable] = []
@@ -1391,6 +1408,16 @@ class TaskApp(App[None]):
         #: unreadable calendar is not the day failing to load.
         self.calendar_error: str | None = None
         self.work_project: str | None = singularity.load_work_project()
+        #: The hours and days work is shown in, when any are configured, and
+        #: why the setting could not be read when it could not.  An
+        #: unreadable window costs a person the feature, not their board, so
+        #: it is reported and then behaves as though none were configured.
+        self.working_window: singularity.WorkingWindow | None = None
+        self.window_error: str | None = None
+        try:
+            self.working_window = singularity.load_working_window()
+        except ValueError as exc:
+            self.window_error = f"WORK_HOURS could not be read: {exc}"
         self.green_tag: str | None = singularity.load_green_tag()
         #: What the configured tag turned out to be, once looked up, and
         #: whether that lookup has happened.  The two are separate because
@@ -1445,7 +1472,7 @@ class TaskApp(App[None]):
         # How often to look at whether an event has ended.  A minute is the
         # granularity the rows are drawn to, so a shorter interval could not
         # show anything a longer one missed.
-        self.set_interval(ELAPSED_CHECK_SECONDS, self.recheck_elapsed)
+        self.set_interval(ELAPSED_CHECK_SECONDS, self.each_minute)
         table = self.query_one(DataTable)
         table.add_column("", key="mark_green", width=1)
         table.add_column("", key="mark", width=2)
@@ -1453,6 +1480,15 @@ class TaskApp(App[None]):
         table.add_column("Task", key="title", width=self.title_width)
         table.add_column("Project", key="project", width=_PROJECT_WIDTH)
         table.focus()
+        # The state the board opens in comes from the clock, before the
+        # first fetch: opening the board in the evening should find the work
+        # already gone rather than watch it leave.
+        self.apply_window()
+        if self.window_error is not None:
+            # Said once, here, and never from the tick: a complaint repeated
+            # every minute about a setting nobody can fix from inside the
+            # board would sit on the counts forever.
+            self.notice(self.window_error, True)
         self.load()
 
     # -- data --------------------------------------------------------------
@@ -2385,6 +2421,65 @@ class TaskApp(App[None]):
         self._ended_shown = now_ended
         self.repaint()
 
+    def apply_window(self, moment: datetime | None = None) -> None:
+        """Set the mode from the working window, and redraw only if it moved.
+
+        The comparison against what the window last said is the whole rule.
+        The same answer changes nothing -- for `recheck_elapsed`'s reason,
+        which holds here fifty-nine ticks out of sixty as well.  A different
+        answer is a crossing: the overrule goes, the clock's answer stands,
+        and the rows move once.
+
+        That is also why a press lapses invisibly.  A press sets the mode to
+        the opposite of what is in force, and with no earlier press what is
+        in force is the window's own answer -- so the press disagrees with
+        the window, and when the window later comes round to saying the same
+        thing, dropping the overrule changes nothing on screen.  Press twice
+        and you agree with the window again; the overrule is then worth
+        nothing and the crossing moves rows as it would have anyway.
+
+        The moment is an argument so that a suite can ask about a Friday at
+        18:01 without waiting for one.
+        """
+        if self.working_window is None or self.work_project is None:
+            # Nothing to act on: a clock cannot know which rows are work,
+            # and a window that hid nothing while saying it had would be the
+            # quietly-shorter view the reporting rule exists to prevent.
+            return
+        moment = moment or datetime.now(self.tz)
+        reason = self.working_window.outside(moment)
+        if reason == self._window_reason:
+            return
+        hides = reason is not None
+        crossed = hides != self._window_hides
+        self._window_reason = reason
+        self._window_hides = hides
+        if crossed:
+            self._work_override = None
+            self.hiding_work = hides
+        # Redrawn for a changed reason as well as a crossing, which happens
+        # once a week -- at the midnight where "after 18:00" becomes "outside
+        # the working week".  Without it the board would go on giving
+        # Friday's reason all weekend.
+        self.repaint()
+
+    def each_minute(self) -> None:
+        """The one slow tick: what has ended, and where the clock now is.
+
+        Two facts on one timer rather than a timer each.  Neither redraws
+        unless its own fact changed, so the pair costs what reading a clock
+        twice a minute costs.
+
+        The window is polled rather than a crossing being scheduled: a
+        machine shut at five and opened at seven must come back with the
+        work hidden, and a one-shot set for a wall-clock instant does not
+        reliably survive a suspend.  Reading the clock on the next tick
+        after waking is right by construction, at the price of a crossing
+        landing up to a minute late.
+        """
+        self.recheck_elapsed()
+        self.apply_window()
+
     def refuse_foreign(self, task: Task | None) -> bool:
         """Say a row is not the board's to change, and report having said so.
 
@@ -2738,7 +2833,7 @@ class TaskApp(App[None]):
         # mean an unreadable calendar was never once seen.  Each source
         # takes its own message down when it recovers.
         standing = {m for m in (self.calendar_error, self.tracker_error,
-                                self.mail_error) if m}
+                                self.mail_error, self.window_error) if m}
         if not (self._notice and self._notice[0] in standing):
             self._notice = None
         self.reference = listing.reference
@@ -3138,7 +3233,9 @@ class TaskApp(App[None]):
             # Beside the other counts, never instead of them: the shown
             # count stays the number of rows, as the inbox already does for
             # the tasks it withholds.
-            bits.append(f"{self.hidden_work} work hidden")
+            why = self.window_reason()
+            bits.append(f"{self.hidden_work} work hidden"
+                        + (f" ({why})" if why else ""))
         in_flight = sum(len(q) for q in self._pending.values())
         if in_flight:
             bits.append(f"{in_flight} saving")
@@ -3408,6 +3505,17 @@ class TaskApp(App[None]):
         self._spin += 1
         self.update_daybar()
 
+    def window_reason(self) -> str | None:
+        """Why the window is hiding the work, or None if it is not doing it.
+
+        A press outranks it: having pressed the key, a person knows what
+        hid the rows, and naming a boundary they overruled would be a
+        reason that is not the reason.
+        """
+        if self._work_override is not None or not self.hiding_work:
+            return None
+        return self._window_reason
+
     def work_note(self) -> list[str]:
         """What the daybar says about the work filter, if anything.
 
@@ -3418,9 +3526,9 @@ class TaskApp(App[None]):
         """
         if not self.hiding_work:
             return []
-        if self.hidden_work:
-            return [f"work hidden ({self.hidden_work})"]
-        return ["work hidden"]
+        why = self.window_reason()
+        count = f" ({self.hidden_work})" if self.hidden_work else ""
+        return [f"work hidden{count}" + (f", {why}" if why else "")]
 
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
@@ -3830,6 +3938,10 @@ class TaskApp(App[None]):
             )
             return
         self.hiding_work = not self.hiding_work
+        # Recorded as well as applied, so the board can say whether the
+        # clock or a person is hiding the work -- and so the next crossing
+        # of the window knows there is an overrule to drop.
+        self._work_override = self.hiding_work
         self.repaint()
 
     def action_cancel_task(self) -> None:

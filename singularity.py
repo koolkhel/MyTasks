@@ -461,6 +461,160 @@ def load_green_tag(env_path: str | os.PathLike[str] | None = None) -> str | None
     return os.getenv("GREEN_TAG", "").strip() or None
 
 
+#: The days of the week, as `date.weekday()` numbers them.
+WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
+            "fri": 4, "sat": 5, "sun": 6}
+#: Which days a working window covers when none are configured.  Saturday and
+#: Sunday are outside it: made to say so for the ordinary case, a person is
+#: being asked to configure the obvious.
+WORKING_DAYS = frozenset(range(5))
+_RANGE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$")
+#: Minutes in a day, which is both the largest end a window may have and the
+#: one no start may reach.
+MINUTES_IN_DAY = 24 * 60
+
+
+def clock(minutes: int) -> str:
+    """Minutes since midnight, written the way the setting is."""
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+@dataclass(frozen=True)
+class WorkingWindow:
+    """The hours and days within which work is shown.
+
+    A value, asked about a moment rather than about the present: the board
+    hands it `datetime.now`, and a suite hands it a Friday at 18:01 or a
+    Saturday at noon without waiting for one to come round.
+    """
+
+    #: When the working day starts and ends, as minutes since local
+    #: midnight.  Minutes rather than times so that the end may be 24:00,
+    #: which no `time` can hold: without it the last minute of the day is
+    #: outside every window that could be written, `18:00-24:00` cannot be
+    #: said at all, and a suite asserting on an all-day window is wrong one
+    #: run in fourteen hundred.  Inside is `start <= t < end`, so the end
+    #: minute itself is already outside.
+    start: int
+    end: int
+    #: The days the window covers, as `date.weekday()` numbers them.
+    days: frozenset[int]
+
+    def outside(self, moment: datetime) -> str | None:
+        """Why this moment is outside the window, or None if it is inside.
+
+        The answer is the boundary that put it there, in the words the board
+        shows: "outside the working week", "after 18:00", "before 08:00".
+        One method rather than a token and a phrase derived from it, so the
+        reason the board gives and the reason it acts on cannot drift apart.
+
+        A day outside the window is outside it for its whole length, so the
+        day is asked first and the hours are never consulted on a Sunday.
+        """
+        if moment.weekday() not in self.days:
+            return "outside the working week"
+        minutes = moment.hour * 60 + moment.minute
+        if minutes < self.start:
+            return f"before {clock(self.start)}"
+        if minutes >= self.end:
+            return f"after {clock(self.end)}"
+        return None
+
+    def label(self) -> str:
+        """The window as it was written, for the board to quote back."""
+        return f"{clock(self.start)}-{clock(self.end)}"
+
+
+def parse_days(days: str) -> frozenset[int]:
+    """The days those words name, as `date.weekday()` numbers them.
+
+    A comma-separated list of three-letter English abbreviations, each of
+    them either a day or a range of days; case and spacing are ignored.  A
+    range may run round the end of the week, because a working week that
+    starts on Sunday is somebody's ordinary one.
+
+    Blank means the default working week.  Raises ValueError naming what
+    could not be read.
+    """
+    days = days.strip()
+    if not days:
+        return WORKING_DAYS
+    chosen: set[int] = set()
+    for piece in days.split(","):
+        piece = piece.strip().lower()
+        if not piece:
+            continue
+        ends = piece.split("-")
+        if len(ends) > 2 or any(e.strip() not in WEEKDAYS for e in ends):
+            raise ValueError(f"{piece!r} is not a day of the week")
+        first = WEEKDAYS[ends[0].strip()]
+        last = WEEKDAYS[ends[-1].strip()]
+        # Inclusive, and round the end of the week when it has to be: the
+        # span from `first` to `last` is however many steps forward that is.
+        span = (last - first) % 7
+        chosen.update((first + step) % 7 for step in range(span + 1))
+    if not chosen:
+        raise ValueError(f"{days!r} names no day of the week")
+    return frozenset(chosen)
+
+
+def parse_working_window(hours: str, days: str = "") -> WorkingWindow:
+    """The window those two settings describe.
+
+    Raises ValueError saying what could not be read.  The board reports that
+    and carries on with no window: an unreadable setting costs a person the
+    feature, not their board.
+
+    Takes the settings as strings rather than reading them itself, so that
+    the self-contained suites can exercise it without going near a file.
+    python-dotenv finds `.env` by walking up from this module, so emptying
+    the environment does not hide a real one -- four suites here were
+    mistaken for self-contained on exactly that point.
+    """
+    match = _RANGE.match(hours)
+    if match is None:
+        raise ValueError(f"{hours!r} is not a range of hours like 08:00-18:00")
+    start = int(match[1]) * 60 + int(match[2])
+    end = int(match[3]) * 60 + int(match[4])
+    for hour, minute in ((int(match[1]), int(match[2])),
+                         (int(match[3]), int(match[4]))):
+        # 24:00 is allowed as an end, and only as an end, because "until
+        # midnight" is a thing a person means and no other spelling says it.
+        if minute > 59 or hour > 24 or (hour == 24 and minute):
+            raise ValueError(f"{hours!r} names no such time as "
+                             f"{hour:02d}:{minute:02d}")
+    if start >= MINUTES_IN_DAY:
+        raise ValueError(f"{hours!r} starts at the end of the day")
+    if end <= start:
+        # Not wrapped round midnight: a window that wrapped would have no
+        # single day that is outside it, and the rule about days would stop
+        # meaning anything.
+        raise ValueError(f"{hours!r} does not run forwards within one day")
+    return WorkingWindow(start=start, end=end, days=parse_days(days))
+
+
+def load_working_window(
+    env_path: str | os.PathLike[str] | None = None,
+) -> WorkingWindow | None:
+    """The configured working window, or None if none is configured.
+
+    Beside the work project and the green tag, and read the same way: the
+    hours a particular person works are theirs, and `.env` is the one place
+    such a thing already lives outside version control.
+
+    Absent and blank both mean "not configured", which leaves the board
+    exactly as it is without this at all -- nothing hidden until the key is
+    pressed.  A window is something a person turns on, never something they
+    have to turn off.  Raises ValueError when one is configured and cannot
+    be read.
+    """
+    load_dotenv(env_path, override=False)
+    hours = os.getenv("WORK_HOURS", "").strip()
+    if not hours:
+        return None
+    return parse_working_window(hours, os.getenv("WORK_DAYS", "").strip())
+
+
 class SingularityClient:
     """Thin wrapper over the REST API.
 
