@@ -157,6 +157,12 @@ def t_no_shell():
         str({s: src.count(s) for s in starters if src.count(s)}))
     launch = src.split("def launch(", 1)[1].split("\n    def ", 1)[0]
     chk("launch starts exactly one thing", launch.count("Popen") == 1)
+    chk("the started program gets a session of its own",
+        "start_new_session=True" in launch, launch[-200:])
+    chk("in the same call that starts it, not somewhere else",
+        launch.count("Popen(") == 1
+        and "start_new_session=True" in launch.split("Popen(", 1)[1],
+        launch.split("Popen(", 1)[-1][:200])
     chk("every stream of the started program goes nowhere",
         launch.count("subprocess.DEVNULL") == 3
         and all(f"{s}=subprocess.DEVNULL" in launch
@@ -256,6 +262,12 @@ async def t_command_line():
             str(started))
         chk("the board says it started one",
             "Starting a workspace" in drawn(app), drawn(app))
+        # Read again after the detaching went in: what is started has to be
+        # what it always was.  A check that only looked at the flag would not
+        # notice the call itself breaking.
+        chk("and what was handed over is still the whole command line",
+            len(started) == 1 and started[0][0] == PROGRAM
+            and len(started[0]) == 7, str(started))
     app = build([issue("AAA-2", ("1.6-1", "1.7", "2.0"))])
     async with app.run_test() as pilot:
         await settle(pilot, app)

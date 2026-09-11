@@ -337,11 +337,20 @@ say that, distinguishably from having started it. The board SHALL NOT wait
 for the program, nor report what it does afterwards: what happens next is
 visible where the program puts it.
 
-The program's own output SHALL NOT reach the board's display. A program
-started this way writes to the terminal the board is drawing on, and a single
-line from it would be painted across the shown view where nothing could take
-it back. A program with something to say SHALL have somewhere of its own to
-say it.
+The program SHALL NOT be able to reach the board's terminal at all, in either
+direction. It SHALL be started detached from it -- in a session of its own,
+with no controlling terminal -- rather than merely having its streams sent
+elsewhere.
+
+Both directions matter, and the second is the one that bites. A line the
+program printed would be painted across the shown view with nothing able to
+take it back. But a program that opens the controlling terminal can also make
+it answer, and what a terminal answers arrives in the same queue a person's
+typing arrives in: the board reads it as keys, and acts on them. Sending the
+program's three streams elsewhere does not prevent either, because a child can
+open the terminal directly and bypass every stream it inherited.
+
+A program with something to say SHALL have somewhere of its own to say it.
 
 Starting a workspace SHALL write nothing. No request SHALL be sent to the
 tracker or to the task store, and nothing about the issue SHALL change.
@@ -406,11 +415,20 @@ tracker or to the task store, and nothing about the issue SHALL change.
 - **WHEN** the started program writes to its output or its errors
 - **THEN** none of it appears on the shown view, whatever the program prints and however much
 
+#### Scenario: The program cannot reach the terminal itself
+
+- **WHEN** the started program opens the controlling terminal rather than using the streams it was given
+- **THEN** there is none for it to open, so nothing it does there can be drawn on the board
+
+#### Scenario: The board cannot be typed into by what it starts
+
+- **WHEN** the started program causes the terminal to send anything back
+- **THEN** none of it reaches the board, and no action runs that nobody pressed a key for
+
 #### Scenario: The board does not wait
 
 - **WHEN** the program has been started
 - **THEN** the board is usable at once, and says nothing further about what the program went on to do
-
 ### Requirement: What the workspace program is told
 
 The program SHALL be given the issue's key, its tracker project, and the

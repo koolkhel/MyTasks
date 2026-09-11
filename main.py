@@ -4606,9 +4606,24 @@ class TaskApp(App[None]):
         message, a progress bar -- would write it across the task list, and
         nothing here could take it back.  A program with something to say has
         to say it where it can be read afterwards.
+
+        Sending the streams nowhere was not enough, and the way it failed is
+        worth keeping: a child can open `/dev/tty` -- the controlling
+        terminal -- and bypass every stream it inherited.  One did.  It wrote
+        a request there and read the terminal's answer back, and the answer
+        arrived in the queue this board reads its keys from.  The board then
+        acted on it: an overlay opened, the selection moved a row, and a link
+        opened on a row nobody had chosen.
+
+        `start_new_session` is what makes that impossible rather than
+        unlikely.  The child gets a session of its own and, with it, no
+        controlling terminal -- so there is no `/dev/tty` for it to open,
+        whatever it tries.  Nothing it does can be drawn on this terminal, and
+        nothing it does can be read from it as though somebody had typed.
         """
         subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
 
     def note_step(self) -> int:
         """How far one press of a scrolling key moves the pane.
