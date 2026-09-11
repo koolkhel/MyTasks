@@ -61,6 +61,13 @@ class Config:
     #: Their order is the block's order, so whoever configures them has
     #: already said which matters most by writing it first.
     states: tuple[str, ...]
+    #: Which custom field holds the version an issue is against.  Configured
+    #: rather than named here: a tracker keeps that in whatever field its
+    #: people agreed on, and the same tracker holds more than one candidate
+    #: -- where a problem is due to be fixed and where it was found are
+    #: different fields and different answers.  Blank means no issue has a
+    #: version, which is an ordinary board.
+    version_field: str = ""
 
     @property
     def query(self) -> str:
@@ -130,6 +137,11 @@ class Issue:
     #: recognises the least urgent priority, whose word begins with the same
     #: letter as the most urgent one's.
     priority_value: str = ""
+    #: The versions the issue is against, in the tracker's own order, from
+    #: whichever field the configuration names.  Empty where none is
+    #: configured, where the issue does not carry that field, or where it
+    #: carries it empty -- all three being ordinary rather than wrong.
+    versions: tuple[str, ...] = ()
 
     @property
     def url(self) -> str:
@@ -160,7 +172,8 @@ def load_config(env_path: str | os.PathLike[str] | None = None) -> Config | None
     states = tuple(
         s.strip() for s in os.getenv("YOUTRACK_STATES", "").split(",") if s.strip()
     ) or ("In progress",)
-    return Config(base_url, token, assignee, projects, states)
+    version_field = os.getenv("YOUTRACK_VERSION_FIELD", "").strip()
+    return Config(base_url, token, assignee, projects, states, version_field)
 
 
 def _host(base_url: str) -> str:
@@ -168,13 +181,37 @@ def _host(base_url: str) -> str:
     return base_url.split("//", 1)[-1].split("/", 1)[0] or base_url
 
 
-def _custom_fields(raw: dict) -> dict[str, dict]:
-    out: dict[str, dict] = {}
+def _custom_fields(raw: dict) -> dict[str, list[dict]]:
+    """Every custom field the issue carries, each as a list of its values.
+
+    A field holding one value is a list of one, so nothing that reads these
+    has to know whether a field is single- or multi-valued.  It used to keep
+    only the single ones, and every multi-valued field -- the versions among
+    them -- was discarded before anything could see it.
+
+    A value that is neither a mapping nor a list of them is dropped, as it
+    was: a due date is a number, and nothing here reads one.
+    """
+    out: dict[str, list[dict]] = {}
     for field in raw.get("customFields") or []:
         value = field.get("value")
         if isinstance(value, dict):
-            out[field.get("name")] = value
+            out[field.get("name")] = [value]
+        elif isinstance(value, list):
+            out[field.get("name")] = [v for v in value if isinstance(v, dict)]
     return out
+
+
+def _first(fields: dict[str, list[dict]], name: str) -> dict:
+    """The first value of a field, or an empty one where there is none."""
+    values = fields.get(name) or []
+    return values[0] if values else {}
+
+
+def _names(fields: dict[str, list[dict]], name: str) -> tuple[str, ...]:
+    """Every value of a field, by the tracker's own name for it, in order."""
+    return tuple(v.get("name") or "" for v in fields.get(name) or []
+                 if v.get("name"))
 
 
 def parse(payload: Any, config: Config) -> list[Issue]:
@@ -192,10 +229,10 @@ def parse(payload: Any, config: Config) -> list[Issue]:
     issues: list[Issue] = []
     for raw in payload:
         fields = _custom_fields(raw)
-        assignee = (fields.get("Assignee") or {}).get("login") or ""
-        state = (fields.get("State") or {}).get("name") or ""
+        assignee = _first(fields, "Assignee").get("login") or ""
+        state = _first(fields, "State").get("name") or ""
         project = (raw.get("project") or {}).get("shortName") or ""
-        priority_field = fields.get("Priority") or {}
+        priority_field = _first(fields, "Priority")
         # The tracker's own word, falling back to the API's English name: a
         # tracker with no localisation still names its own priorities, and
         # either way the word is the tracker's rather than the board's.
@@ -217,6 +254,8 @@ def parse(payload: Any, config: Config) -> list[Issue]:
                 base_url=config.base_url,
                 priority=priority,
                 priority_value=priority_value,
+                versions=(_names(fields, config.version_field)
+                          if config.version_field else ()),
             )
         )
     return sorted(issues, key=lambda i: (config.rank(i.state), i.key))

@@ -23,6 +23,13 @@ from singularity import (Task, Listing, Bucket, SingularityError, ApiError,
 # that wants a window sets `app.working_window` itself.
 singularity.load_working_window = lambda *a, **k: None
 
+# And the program that makes a workspace, for a stronger reason than the
+# window's: a board built here with the real one configured would start a real
+# program on a real machine the first time a suite pressed the key.  Every
+# board built here has none.  A suite that wants one sets
+# `app.workspace_command` itself, and replaces `launch` so nothing is run.
+singularity.load_workspace_command = lambda *a, **k: None
+
 try:
     import ical
 except ImportError:          # the pre-change board, which reads no calendar

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import subprocess
 import sys
 import threading
 import uuid
@@ -73,6 +74,13 @@ TRACKER_PROJECT = "_tracker_project"
 TRACKER_STATE = "_tracker_state"
 TRACKER_PRIORITY = "_tracker_priority"
 TRACKER_PRIORITY_VALUE = "_tracker_priority_value"
+#: The issue's own key, carried rather than cut back out of the row's id.
+#: The id exists to be unique among rows; the key is a fact about the issue,
+#: and a program is told the second, never the first.
+TRACKER_KEY = "_tracker_key"
+#: The versions the issue is against, in the tracker's order, from whichever
+#: custom field the configuration names.  Empty is ordinary.
+TRACKER_VERSIONS = "_tracker_versions"
 #: Prefixes a tracker row's id so it can never collide with a task's.
 TRACKER_PREFIX = "yt:"
 #: The mark shown against a tracker row, distinct from a task's checkbox so
@@ -875,6 +883,14 @@ class Help(ModalScreen[None]):
                      too, from its title or its note;
                      where a task offers more than one,
                      o asks which
+  W                  start a workspace for the selected
+                     tracker issue — asks which version,
+                     filled in with the issue's own, then
+                     runs the program named by
+                     WORKSPACE_COMMAND with the issue's
+                     key, its project and that version.
+                     The board makes no workspace itself
+                     and waits for nothing
   f                  turn the selected mail thread into a
                      task on today, carrying what the
                      message said in its note. The thread's
@@ -1199,6 +1215,7 @@ class TaskApp(App[None]):
         Binding(keys("p"), "project", "Project"),
         Binding(keys("g"), "green", "Green"),
         Binding(keys("o"), "open_link", "Link"),
+        Binding(keys("W"), "start_workspace", "Workspace"),
         # The note pane's own two keys, so reading a note that does not fit
         # never costs the list its arrows.  Plain characters, for the reason
         # the movement keys are: a terminal cannot swallow them the way it
@@ -1412,6 +1429,9 @@ class TaskApp(App[None]):
         #: why the setting could not be read when it could not.  An
         #: unreadable window costs a person the feature, not their board, so
         #: it is reported and then behaves as though none were configured.
+        #: The program that makes a workspace, when one is configured.  A
+        #: path the board execs, never a command line it interprets.
+        self.workspace_command: str | None = singularity.load_workspace_command()
         self.working_window: singularity.WorkingWindow | None = None
         self.window_error: str | None = None
         try:
@@ -2998,8 +3018,10 @@ class TaskApp(App[None]):
 
         Each carries the work project's id, so the key that hides work hides
         these too and `is_work` needs to know nothing about the tracker; and
-        its own page as a link, so the key that opens a link opens the issue.
-        The marker is what every write checks before refusing.
+        its own page as a link, so the key that opens a link opens the issue;
+        and its key, project and versions, which are what the key that starts
+        a workspace hands to the program that makes one.  The marker is what
+        every write checks before refusing.
         """
         if not self.shows_tracker:
             return []
@@ -3015,10 +3037,12 @@ class TaskApp(App[None]):
                 "projectId": self.work_project,
                 TRACKER_MARK: True,
                 TRACKER_URL: issue.url,
+                TRACKER_KEY: issue.key,
                 TRACKER_PROJECT: issue.project,
                 TRACKER_STATE: issue.state,
                 TRACKER_PRIORITY: issue.priority,
                 TRACKER_PRIORITY_VALUE: issue.priority_value,
+                TRACKER_VERSIONS: issue.versions,
             }))
         return rows
 
@@ -4500,6 +4524,91 @@ class TaskApp(App[None]):
             return
         self.open_url(url)
         self.set_status(f"Opening {url}")
+
+    @work
+    async def action_start_workspace(self) -> None:
+        """Start work on the selected issue, by running one configured program.
+
+        The board does not check anything out, reach any host, or know what a
+        repository is.  It knows three things the program does not -- which
+        issue, which tracker project, which version -- and hands them over.
+        Everything that changes often lives in the program.
+
+        The version is asked rather than assumed, with the issue's own filled
+        in.  An issue is recorded against the version where a problem was
+        found or is due, which is not always the version somebody is about to
+        work in, so what the tracker holds is a proposal and the person has
+        the last word.  Leaving the prompt, or emptying it, starts nothing --
+        as it does for renaming and for adding.
+        """
+        task = self.selected
+        if task is None:
+            return
+        if not self.is_tracker(task):
+            # Only a tracker row carries the three facts.  A task that merely
+            # mentions an issue's key has no issue behind it, so the board
+            # knows neither its project nor its version.
+            self.set_status("Only a tracker issue can start a workspace")
+            return
+        if self.workspace_command is None:
+            self.set_status(
+                "No workspace program is set · put WORKSPACE_COMMAND in .env",
+                True,
+            )
+            return
+        key = task.raw.get(TRACKER_KEY) or ""
+        versions = tuple(task.raw.get(TRACKER_VERSIONS) or ())
+        version = await self.push_screen_wait(
+            # Escaped: the prompt is drawn as markup, and while an issue key
+            # has never yet held a bracket, the rule this board settled is
+            # that foreign text is escaped wherever it is drawn rather than
+            # wherever somebody expects trouble.
+            TaskInput(f"Work on {escape(key)} at which version?",
+                      versions[0] if versions else "")
+        )
+        if not version:
+            return
+        argv = [self.workspace_command,
+                "--key", key,
+                "--project", task.raw.get(TRACKER_PROJECT) or "",
+                "--version", version]
+        try:
+            self.launch(argv)
+        except OSError as exc:
+            # Said differently from "starting": a program that is not there
+            # and a program that ran and failed are different problems, and
+            # only the first is the board's to report.
+            self.set_status(
+                f"Could not start {self.workspace_command}: "
+                f"{type(exc).__name__}", True)
+            return
+        self.set_status(f"Starting a workspace for {key} at {version}")
+
+    def launch(self, argv: list[str]) -> None:
+        """Run a program and do not wait for it.
+
+        A list of arguments and no shell, ever: the values in it come from a
+        tracker and from a person, and neither is the board's to vouch for.
+        With no shell there is nothing for them to mean.
+
+        Routed through a method of its own for the reason the link opener is
+        -- so a suite can assert what would be run without running it, which
+        is what makes this the path that ships verified rather than the one
+        nobody could test.
+
+        Nothing is awaited and no exit code is ever read.  What the program
+        goes on to do is visible where the program puts it.
+
+        All three streams go nowhere, and the last two are the point: a child
+        writes to the terminal's own file descriptors, which no redirection
+        inside this process can reach.  The board draws a full screen on those
+        descriptors, so a program that printed one line -- a warning, a usage
+        message, a progress bar -- would write it across the task list, and
+        nothing here could take it back.  A program with something to say has
+        to say it where it can be read afterwards.
+        """
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def note_step(self) -> int:
         """How far one press of a scrolling key moves the pane.

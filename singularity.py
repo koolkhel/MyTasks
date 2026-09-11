@@ -461,6 +461,25 @@ def load_green_tag(env_path: str | os.PathLike[str] | None = None) -> str | None
     return os.getenv("GREEN_TAG", "").strip() or None
 
 
+def load_workspace_command(
+    env_path: str | os.PathLike[str] | None = None,
+) -> str | None:
+    """The program that makes a workspace, or None if none is configured.
+
+    A path to something the board execs, never a command line it interprets.
+    That is the whole of the safety argument: a version or a project key is a
+    value somebody typed into a tracker, and handing one to a shell would make
+    what it contains a question about this board rather than about that
+    tracker.  There is no shell here to ask.
+
+    Beside the work project and the green tag, and read the same way -- the
+    path names a person's own machine, and `.env` is where such a thing
+    already lives outside version control.
+    """
+    load_dotenv(env_path, override=False)
+    return os.getenv("WORKSPACE_COMMAND", "").strip() or None
+
+
 #: The days of the week, as `date.weekday()` numbers them.
 WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
             "fri": 4, "sat": 5, "sun": 6}
