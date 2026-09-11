@@ -87,7 +87,7 @@ print("the search itself finds what is there")
 # Without this the whole suite could pass by finding nothing at all -- a
 # broken grep and a clean tree look identical from outside.
 check("a string the tracked tree does hold is found",
-      "tests/run.py" in tracked_matches("MAIL_IMAP_PASSWORD_COMMAND"), True)
+      "tests/run.py" in tracked_matches("MAIL_EWS_URL"), True)
 # Assembled rather than written, or the literal would be in this file and
 # the check would find itself.
 check("and one it does not is not",

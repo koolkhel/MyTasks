@@ -3,32 +3,42 @@
 The board reads mail from a directory and writes nothing there: a maildir
 whose files are moved by hand stops syncing, with a duplicate-UID failure
 that needs the folder rebuilt.  Reviewing a message therefore happens here,
-over IMAP, against whatever gateway fronts the account.
+against the account itself rather than against the directory.
 
-Trimmed from `corpmail.py` in the DavMail project next door, which offers
-itself to be copied and carries the traps this would otherwise re-learn.
-Copied rather than imported: a path dependency on a sibling repository would
-stop this one working from a fresh clone.  Its sending, attachment and
-index paths are not here -- only what reviewing needs.
+This talked IMAP to a local gateway that translated to the account's own web
+service.  It no longer does, and the reason is measured rather than a matter
+of taste: opening a folder made that gateway enumerate it over the service
+every time, and a review measured 81.9 seconds of 88.9 doing nothing else --
+92%.  Asked directly, the same review has no folder to open.  A search costs
+about a second whether the folder holds 33 items or 20,821, a move about a
+fifth of a second, and marking read about a tenth.
 
-What was NOT copied, deliberately: that file names the account it was written
-for.  Here the account, the host and the archive's name all come from the
-environment, so nothing about one mailbox is committed.
+The cost model that shapes what follows, measured against this account:
 
-The cost model that shapes this: bulk *flags* are nearly free -- 20,699 of
-them in 0.88 s next door, and 291 in 0.14 s here -- while anything
-per-message costs about 150 ms, headers included.  Measured on the real
-folders, a whole-folder header fetch of 291 messages took 45 s where a
-search for one identity took 2.1 s.  So a move takes a set of numbers and is
-one round trip whatever the row's size, the numbers are found by a search a
-message rather than a fetch a folder, and nothing here ever fetches a body.
+  * A search restricted to a set of identities is one request and its cost
+    does not grow with the folder.  0.42 s against a folder of 33, 0.96 s
+    against one of 20,821.  So a row is one search a folder, not one a
+    message -- the opposite of what the old protocol forced, where an OR of
+    eight identities came back with two of them and searching one at a time
+    was the only honest way to ask.
+  * A folder is named by an identity the account hands out, and finding one
+    by its name costs a walk of the tree: 1.36 s for four folders at once
+    against 4.18 s for one alone.  So the walk happens once a session and
+    every name it passes is remembered.
+  * Bulk requests are cheap: a move names a set of items and is one request,
+    and so is marking a set read.
+
+Nothing here fetches a body.  The board reads what a message says from the
+mirrored directory; this half only moves messages and confirms where they
+are.
+
+What is deliberately not here: the account, the address of its service and
+the archive's name all come from the environment, so nothing about one
+mailbox is committed.
 """
 from __future__ import annotations
 
-import base64
-import imaplib
 import os
-import re
 import subprocess
 from dataclasses import dataclass
 from time import monotonic
@@ -39,7 +49,7 @@ from dotenv import load_dotenv
 
 
 class GatewayUnreachable(Exception):
-    """The gateway could not be reached, or refused us.
+    """The account could not be reached, or refused us.
 
     Its own type because it means the board can still read mail and still
     show the queue -- only reviewing is unavailable, and saying which is
@@ -53,11 +63,12 @@ class MoveFailed(Exception):
 
 @dataclass(frozen=True)
 class Config:
-    """Where the gateway is and how to speak to it."""
+    """Where the account's service is and how to speak to it."""
 
-    host: str
-    port: int
-    user: str
+    #: The address of the service the board talks to.
+    service: str
+    #: The mailbox to act on, which is also the identity presented.
+    account: str
     #: The folder a reviewed message is moved to.  Named here because it is
     #: not the board's business what an account calls it.
     archive: str = "Archive"
@@ -66,36 +77,45 @@ class Config:
     #: was built against reads the system keychain.
     password_command: tuple[str, ...] = ()
     #: How long to wait for one request before giving up.  There is a
-    #: timeout at all because there was not: a gateway that stopped
+    #: timeout at all because there was not: a server that stopped
     #: answering left a worker thread blocked on a socket forever, and
     #: quitting the board then waited on that thread -- the run hung, with
     #: nothing said, until asyncio gave up after five minutes.
     #:
-    #: Generous, because legitimate requests here are slow: a search of the
-    #: archive measured 11.5 s and a move of 97 messages 13.7 s.  This is
-    #: the bound on a hang, not a target.
+    #: Generous, because this is the bound on a hang rather than a target.
+    #: The requests it bounds are measured in a second or two.
     timeout: float = 120.0
 
 
 def load_config(env_path=None) -> Config | None:
-    """How to reach the gateway, or None when it is not configured.
+    """How to reach the account, or None when it is not configured.
 
     None is an ordinary board that can read mail and not review it, which
     is a real state: the directory is filled by something else, and that
     something else may be all a person has set up.
+
+    The address decides.  Reading is configured separately -- a directory of
+    maildirs -- and either half may be set up alone, so what makes reviewing
+    possible is knowing where to send a request.
+
+    The identity and the credential command are read under their own names
+    and, failing that, under the names they had when this spoke IMAP.  A key
+    called `MAIL_IMAP_USER` naming an account reached without IMAP would be
+    a lie, and renaming it without a fallback would stop an unedited
+    configuration reviewing anything with nothing said about why.
     """
     load_dotenv(env_path, override=False)
-    host = os.getenv("MAIL_IMAP_HOST", "").strip()
-    user = os.getenv("MAIL_IMAP_USER", "").strip()
-    command = os.getenv("MAIL_IMAP_PASSWORD_COMMAND", "").strip()
-    if not (host and user and command):
-        return None
-    try:
-        port = int(os.getenv("MAIL_IMAP_PORT", "143").strip() or 143)
-    except ValueError:
+
+    def named(new: str, old: str) -> str:
+        return (os.getenv(new, "").strip() or os.getenv(old, "").strip())
+
+    service = os.getenv("MAIL_EWS_URL", "").strip()
+    account = named("MAIL_ACCOUNT", "MAIL_IMAP_USER")
+    command = named("MAIL_PASSWORD_COMMAND", "MAIL_IMAP_PASSWORD_COMMAND")
+    if not (service and account and command):
         return None
     return Config(
-        host=host, port=port, user=user,
+        service=service, account=account,
         archive=os.getenv("MAIL_ARCHIVE_FOLDER", "Archive").strip() or "Archive",
         password_command=tuple(command.split()),
     )
@@ -134,136 +154,263 @@ def password(config: Config) -> str:
     return done.stdout.strip()
 
 
-# -- folder names -------------------------------------------------------
-# IMAP names folders in a modified UTF-7 that Python ships no codec for, and
-# the library hands back the encoded form: selecting a non-ASCII folder by
-# its real name raises before it reaches the server.  Both directions are
-# therefore done here.
-
-def utf7_encode(name: str) -> str:
-    """A folder's name as IMAP wants it.  ASCII names pass through."""
-    out: list[str] = []
-    buf: list[str] = []
-
-    def flush() -> None:
-        if buf:
-            b = "".join(buf).encode("utf-16-be")
-            out.append("&" + base64.b64encode(b).decode()
-                       .rstrip("=").replace("/", ",") + "-")
-            buf.clear()
-
-    for ch in name:
-        if ch == "&":
-            flush(); out.append("&-")
-        elif 0x20 <= ord(ch) <= 0x7e:
-            flush(); out.append(ch)
-        else:
-            buf.append(ch)
-    flush()
-    return "".join(out)
+#: The library's exception types, fetched once and kept.  Not imported at the
+#: top of the module for the reason `Mailbox` is not: a board that never
+#: reviews anything should not pay for an XML parser and a cryptography stack
+#: on the way up.  Not imported per request either, which is what this was at
+#: first -- the one place every request passes through is the last place to
+#: put work that can be done once.
+_KINDS = None
 
 
-def utf7_decode(name: str) -> str:
-    """The inverse: what IMAP returns, as a name a person would recognise."""
-    out: list[str] = []
-    i = 0
-    while i < len(name):
-        if name[i] == "&":
-            j = name.index("-", i)
-            chunk = name[i + 1:j]
-            if chunk == "":
-                out.append("&")
-            else:
-                b = chunk.replace(",", "/")
-                b += "=" * (-len(b) % 4)
-                out.append(base64.b64decode(b).decode("utf-16-be"))
-            i = j + 1
-        else:
-            out.append(name[i]); i += 1
-    return "".join(out)
+def _error_kinds():
+    """(never happened, a refusal, a rejected credential, a line, anything).
+
+    The order these are caught in is the whole of the difference between
+    telling a person the account refused their review and telling them it
+    could not be reached, and the library's hierarchy does not draw that
+    line for us: `ErrorTimeoutExpired` -- a request that never completed --
+    is a subclass of `ResponseMessageError`, which otherwise means the
+    service answered and would not do it.  Read in class order a timeout
+    reads as a refusal, and the board says the move was refused when nothing
+    was ever asked.  A live run against the account caught exactly that.
+
+    So the ones that mean "this never reached anywhere, or it did and the
+    account asked for later" are named first, and everything else in
+    `ResponseMessageError` keeps its meaning.  This is the same trap
+    `imaplib` set with `abort` being a subclass of `error`, in a different
+    library.
+    """
+    global _KINDS
+    if _KINDS is None:
+        from exchangelib.errors import (EWSError, ErrorServerBusy,
+                                        ErrorTimeoutExpired, RateLimitError,
+                                        ResponseMessageError, TransportError,
+                                        UnauthorizedError)
+        never_happened = (ErrorTimeoutExpired, ErrorServerBusy, RateLimitError)
+        _KINDS = (never_happened, ResponseMessageError, UnauthorizedError,
+                  TransportError, EWSError)
+    return _KINDS
 
 
-_ID = re.compile(rb"message-id:\s*(<[^>\s]+>)", re.I)
+#: How many identities one restriction may name.  The service refuses a
+#: restriction with "too many elements" somewhere above this -- a folder's
+#: worth of them is refused, 120 was answered -- and a row on this account
+#: holds at most a few dozen, so this bounds a question nothing real asks
+#: rather than dividing one that is.
+BATCH = 100
+
+
+def restriction(idents):
+    """One restriction naming every identity, in a shape that does not nest.
+
+    Written this way because the other way failed against the account.  An
+    OR of one term per identity nests one level per message, and the service
+    refuses a request more than 32 levels deep -- `ErrorSchemaValidation`,
+    "the maximum read depth (32) has been exceeded".  A row of thirty-nine
+    messages is an ordinary row on this account, and it would have been
+    refused outright.  The stubs could not have caught it: nesting is legal
+    and cheap in a fake, and only a server has a depth limit.
+
+    A membership test is flat however many identities it names -- 120 of them
+    in one request, answered with 120 matches -- so the shape stops depending
+    on how big a row is.
+    """
+    from exchangelib import Q
+    return Q(message_id__in=list(idents))
+
+
+class Mailbox:
+    """The account, in the four requests this module makes of it.
+
+    A class of its own, and small on purpose.  It is the only thing here
+    that knows a library, and it is what a suite substitutes: the board's
+    reviewing path is the one place it changes something it cannot change
+    back, so a suite has to be able to drive every path without an account.
+
+    The old protocol was faked at the wire, because the parsing of its
+    answers was the part that broke -- folder names in a modified UTF-7, a
+    fetch answering alternating tuples, a search that matched nothing
+    answering one empty string.  There is no parsing here: the library
+    answers with objects.  What can be got wrong instead is *which request
+    is made*, so that is what these four methods make visible and what a
+    suite counts.
+    """
+
+    def __init__(self, config: Config, secret: str):
+        # Imported here rather than at the top of the module: the board
+        # starts, draws and reads mail without ever touching this, and a
+        # library that pulls in an XML parser and a cryptography stack
+        # should not be on the path of a board that never reviews anything.
+        from exchangelib import Account, Configuration, Credentials, DELEGATE
+        from exchangelib.protocol import BaseProtocol
+
+        # The library holds its timeout on the class rather than per
+        # connection, so this is set rather than passed.
+        BaseProtocol.TIMEOUT = config.timeout
+        settings = Configuration(
+            service_endpoint=config.service,
+            credentials=Credentials(config.account, secret),
+            # Named rather than negotiated: this account answers it, and
+            # letting the library try each in turn would make a wrong
+            # password cost several round trips before it said so.
+            auth_type="NTLM",
+        )
+        self.account = Account(primary_smtp_address=config.account,
+                               config=settings, autodiscover=False,
+                               access_type=DELEGATE)
+        self._known: dict[str, object] | None = None
+
+    def folders(self) -> dict[str, object]:
+        """Every folder the account holds, by name folded for comparison.
+
+        One walk, remembered.  Finding one folder by name costs the same
+        walk as finding all of them -- 4.18 s for one against 1.36 s for
+        four, the difference being where the walk happened to stop -- so
+        asking once and keeping the answer is the whole of the difference
+        between a session and a request.
+        """
+        if self._known is None:
+            found: dict[str, object] = {}
+            for folder in self.account.root.walk():
+                found.setdefault(str(folder.name).casefold(), folder)
+            self._known = found
+        return self._known
+
+    def find(self, folder, idents) -> list:
+        """Every message in this folder whose identity is one of these.
+
+        One request for the whole set.  The identities are what the mirror
+        knows a message by, and they are what the board asks about, so this
+        is the one question a review needs answered.
+        """
+        wanted = [i for i in idents if i]
+        if not wanted:
+            return []
+        # Only what is needed to name a message again: its identity, and the
+        # pair the service uses to say *this* item.  Asking for more would
+        # fetch bodies the board reads from the mirror instead.
+        #
+        # In parts where a set is larger than the service will name at once,
+        # which no row is: a row of thirty-nine is the largest this account
+        # has, and the bound is a hundred.  A caller asking about a folder's
+        # worth of identities -- putting mail back after something went wrong,
+        # say -- gets an answer rather than a refusal.
+        found = []
+        for at in range(0, len(wanted), BATCH):
+            found += list(folder.filter(restriction(wanted[at:at + BATCH]))
+                          .only("message_id", "id", "changekey"))
+        return found
+
+    def move(self, items, target) -> None:
+        """Move these items to that folder, in one request."""
+        self.account.bulk_move(ids=items, to_folder=target)
+
+    def mark(self, items, seen: bool) -> None:
+        """Mark these items read, or unread again, in one request."""
+        for item in items:
+            item.is_read = seen
+        self.account.bulk_update([(item, ("is_read",)) for item in items])
 
 
 class Server:
-    """A connection to the gateway, for the length of one review."""
+    """A connection to the account, for the length of one review."""
 
     def __init__(self, config: Config, connect=None):
         self.config = config
-        #: Substitutable so a suite can drive every path here without a
-        #: server: the connection is the only thing that reaches outside.
+        #: Substitutable so a suite can drive every path here without an
+        #: account: the connection is the only thing that reaches outside.
         self._connect = connect or self._open
-        self.imap = None
+        self.mailbox = None
+        #: The archive, resolved once when the session opens.
+        self.archive = None
+        #: Every folder the account holds, asked for once a session.  The
+        #: walk that answers costs about as much for all of them as for one,
+        #: and a review names two or three, so it is asked once and kept.
+        self._known: dict[str, object] | None = None
 
     def _open(self):
-        # Plain IMAP4, not IMAP4_SSL: the gateway this was built against
-        # binds the loopback only and advertises no TLS.
-        opened = imaplib.IMAP4(self.config.host, self.config.port,
-                               timeout=self.config.timeout)
-        return opened
+        return Mailbox(self.config, password(self.config))
 
     def __enter__(self):
         try:
-            self.imap = self._connect()
-            self.imap.login(self.config.user, password(self.config))
+            self.mailbox = self._connect()
         except GatewayUnreachable:
             raise
         except Exception as exc:
             raise GatewayUnreachable(
-                f"the gateway at {self.config.host}:{self.config.port} "
+                f"the account at {self.config.service} "
                 f"could not be reached: {type(exc).__name__}") from exc
+        # Resolved here beside the connection, not in each method that needs
+        # it: the walk that finds a folder costs about as much as the walk
+        # that finds every folder, and a review asks about the archive three
+        # times.  One session, one walk.
+        self.archive = self._folder(self.config.archive)
         return self
 
     def __exit__(self, *exc):
-        try:
-            if self.imap is not None:
-                self.imap.logout()
-        except Exception:
-            pass
+        self.mailbox = None
+        self.archive = None
+        self._known = None
         return False
 
     def _talk(self, command: str, call, about: str = ""):
         """Run one request, and answer for it in this module's own terms.
 
-        The one place `imaplib`'s exceptions are allowed to end.  Whatever
-        happens underneath -- the gateway closing the line mid-command, a
-        socket error, a protocol refusal -- leaves here as one of this
+        The one place the library's exceptions are allowed to end.  Whatever
+        happens underneath -- the line failing mid-request, the service
+        refusing, the credential being wrong -- leaves here as one of this
         module's two exceptions, so that nothing calling this class has to
         know a protocol is involved.
 
-        Only `__enter__` used to do this, for connect and login, which
-        covers a review that cannot start.  Nothing covered the connection
-        dying part way through, and against this gateway that is the likeliest
-        of the three: an operation stays open for tens of seconds, and the
-        longer it is open the better its chance of being cut.
-
-        `abort` is caught before `error` because it is a subclass of it.
-        imaplib raises `abort` when the connection is gone and `error` when
-        the server answered and would not do it; read the other way round,
-        every dropped line would be reported as a refusal.
+        The order of the clauses is load bearing, as it was when this spoke
+        IMAP and `abort` had to be caught before `error` because it was a
+        subclass of it.  Here `ResponseMessageError` is a subclass of
+        `TransportError`: the first means the service answered and would not
+        do what was asked, the second that the conversation itself failed.
+        Read the other way round, every refusal would be reported as an
+        unreachable account and the board would say the wrong thing about
+        every one of them.
 
         One call, never a method body.  An `OSError` raised by something
         else in the same method is a bug in this file, and reporting it as
         an unreachable mailbox would hide it.
         """
+        never_happened, refused, unauthorised, transport, any_error = \
+            _error_kinds()
         started = monotonic()
         try:
             answer = call()
-        except imaplib.IMAP4.abort as exc:
+        except never_happened as exc:
             journal.trace(command, about, monotonic() - started,
                           f"ABORT {exc}")
             raise GatewayUnreachable(
-                f"the gateway closed the line during {command}: {exc}") from exc
-        except imaplib.IMAP4.error as exc:
+                f"the line to the account went down during {command}: "
+                f"{exc}") from exc
+        except refused as exc:
             journal.trace(command, about, monotonic() - started,
                           f"REFUSED {exc}")
-            raise MoveFailed(f"the gateway refused {command}: {exc}") from exc
+            raise MoveFailed(f"the account refused {command}: {exc}") from exc
+        except unauthorised as exc:
+            journal.trace(command, about, monotonic() - started,
+                          f"REFUSED {exc}")
+            raise GatewayUnreachable(
+                f"the account refused us during {command}: {exc}") from exc
+        except transport as exc:
+            journal.trace(command, about, monotonic() - started,
+                          f"ABORT {exc}")
+            raise GatewayUnreachable(
+                f"the line to the account went down during {command}: "
+                f"{exc}") from exc
+        except any_error as exc:
+            journal.trace(command, about, monotonic() - started,
+                          f"REFUSED {exc}")
+            raise MoveFailed(f"the account refused {command}: {exc}") from exc
         except OSError as exc:
             journal.trace(command, about, monotonic() - started,
                           f"FAILED {type(exc).__name__}")
             raise GatewayUnreachable(
-                f"the line to the gateway failed during {command}: "
+                f"the line to the account went down during {command}: "
                 f"{type(exc).__name__}") from exc
         # Written on every path, so the last line before a session ends is the
         # request that ended it.  `answer` is not looked at: what a search
@@ -273,120 +420,96 @@ class Server:
         journal.trace(command, about, monotonic() - started, "ok")
         return answer
 
-    def _select(self, folder: str, readonly=False):
-        typ, _ = self._talk(
-            "EXAMINE" if readonly else "SELECT",
-            lambda: self.imap.select(f'"{utf7_encode(folder)}"',
-                                     readonly=readonly),
-            about=folder)
-        if typ != "OK":
-            raise MoveFailed(f"the folder {folder} could not be opened")
+    def _folder(self, name: str):
+        """The folder of that name, or a refusal naming it.
 
-    def numbers(self, folder: str, idents, stop=None) -> dict[str, bytes]:
-        """The server's number for each of these messages in one folder.
+        Asked of the account once a session.  The walk that answers costs
+        about as much for every folder as for one, and a review names the
+        archive three times, so the answer is kept for as long as the
+        session that needed it.
 
-        One search a message, bounded by the row rather than by the folder.
-
-        The plan was one bulk header fetch for the whole folder, on the
-        measurement that bulk metadata is nearly free.  It is not free for
-        headers: this gateway answers a header fetch by fetching each
-        message from Exchange, so asking a 291-message folder for its
-        identities measured 45 s where the same folder's flags came back in
-        0.14 s.  A search for one identity measured 2.1 s, so a row of eight
-        costs 17 s against 45 s -- and it does not grow when the folder does.
-
-        An OR of the row's identities in a single search would have been one
-        round trip for the lot.  This gateway answers it with 2 matches out
-        of 8 identities that are all found when searched for one at a time,
-        so that is out: the same class of deviation the confirmation below
-        exists for.
+        Matched without regard to case, because what the board is given is
+        what a person wrote in their configuration and what the account
+        holds is however that account spells it.
         """
-        self._select(folder, readonly=True)
-        out: dict[str, bytes] = {}
-        for ident in idents:
-            # Asked between searches, so a board being forced to end waits out
-            # one search rather than a folder opening and a search.  The
-            # confirmation used to ask this between messages, where each
-            # message cost an opening as well -- about fifteen seconds against
-            # about one now.
-            if stop is not None and stop():
-                raise MoveFailed("gave up part way: the board is closing")
-            found = self._number_here(folder, ident)
-            if found is not None:
-                out[ident] = found
+        if self._known is None:
+            self._known = self._talk("FOLDERS",
+                                     lambda: self.mailbox.folders(),
+                                     about="every folder")
+        found = self._known.get(name.casefold())
+        if found is None:
+            raise MoveFailed(f"the folder {name} could not be found")
+        return found
+
+    def numbers(self, folder: str, idents, stop=None) -> dict:
+        """Each of these messages in one folder, by identity.
+
+        One request for the whole row, which is what the account's own
+        service allows and the old gateway did not: asked for eight
+        identities at once it answered with two of them, so the board asked
+        one at a time and a row of eight cost eight searches.  Here the set
+        is the question.
+
+        `stop` is asked before the request rather than between messages,
+        there being one request to be between.  A board being forced to end
+        waits out at most one search.
+        """
+        wanted = [i for i in idents if i]
+        if not wanted:
+            return {}
+        if stop is not None and stop():
+            raise MoveFailed("gave up part way: the board is closing")
+        where = folder if not isinstance(folder, str) else self._folder(folder)
+        name = folder if isinstance(folder, str) else str(folder.name)
+        items = self._talk("SEARCH",
+                           lambda: self.mailbox.find(where, wanted),
+                           about=f"{name} n={len(wanted)}")
+        out = {}
+        for item in items:
+            ident = getattr(item, "message_id", None)
+            if ident in wanted and ident not in out:
+                out[ident] = item
         return out
 
-    def present(self, folder: str, uids) -> list[bytes]:
-        """Which of these numbers the folder still holds.
+    def present(self, folder, idents) -> list:
+        """Which of these messages the folder still holds.
 
-        A flags fetch of the numbers already known, which is the cheap half
-        of the cost model: 0.14 s for a folder of 291.  It is what proves a
-        move actually removed something, and it needs no identity -- a
-        number that is gone from the folder is the message that left it.
+        What proves a move actually removed something.  The same question as
+        `numbers` and deliberately so: after a move the item is elsewhere
+        with an identity of the service's own, so asking the folder about the
+        message identities is the only question that still means anything.
         """
-        wanted = [u.decode() if isinstance(u, bytes) else str(u) for u in uids]
+        wanted = [i for i in idents if i]
         if not wanted:
             return []
-        self._select(folder, readonly=True)
-        typ, data = self._talk(
-            "FETCH", lambda: self.imap.uid("FETCH", ",".join(wanted),
-                                           "(FLAGS)"),
-            about=f"{folder} n={len(wanted)}")
-        if typ != "OK":
-            # A fetch of numbers that have all gone is answered OK with
-            # nothing; a refusal is something else, and is not "absent".
-            raise MoveFailed(f"the folder {folder} could not be checked")
-        still = []
-        for part in data or ():
-            line = part[0] if isinstance(part, tuple) else part
-            found = re.search(rb"UID (\d+)", line or b"")
-            if found and found.group(1) in [w.encode() for w in wanted]:
-                still.append(found.group(1))
-        return still
+        return sorted(self.numbers(folder, wanted))
 
-    def move(self, folder: str, uids, target: str) -> None:
-        """Move these numbered messages to another folder, in one request."""
-        wanted = [u.decode() if isinstance(u, bytes) else str(u) for u in uids]
-        if not wanted:
+    def move(self, folder, items, target) -> None:
+        """Move these items to another folder, in one request."""
+        held = list(items)
+        if not held:
             return
-        self._select(folder)
-        typ, resp = self._talk(
-            "MOVE", lambda: self.imap.uid("MOVE", ",".join(wanted),
-                                          f'"{utf7_encode(target)}"'),
-            about=f"{folder} n={len(wanted)} -> {target}")
-        if typ != "OK":
-            raise MoveFailed(f"the move was refused: {resp}")
+        where = target if not isinstance(target, str) else self._folder(target)
+        name = target if isinstance(target, str) else str(target.name)
+        # The source is named only so the trace reads as a sentence: the
+        # items carry where they are, and the request names them, not a
+        # folder to take them from.
+        source = folder if isinstance(folder, str) else str(folder.name)
+        self._talk("MOVE", lambda: self.mailbox.move(held, where),
+                   about=f"{source} n={len(held)} -> {name}")
 
-    def number(self, folder: str, message_id: str) -> bytes | None:
-        """One message's number in a folder, or None if it is not there.
-
-        A search rather than a fetch: the folder in question may be the
-        archive, which holds everything the account has ever kept, and a
-        search is answered in about two seconds whatever its size.
-        """
-        self._select(folder, readonly=True)
-        return self._number_here(folder, message_id)
-
-    def _number_here(self, folder: str, message_id: str) -> bytes | None:
-        """The same, for a folder already open.  Saves re-selecting it."""
-        typ, data = self._talk(
-            "SEARCH",
-            lambda: self.imap.uid("SEARCH", None, "HEADER", "Message-ID",
-                                  f'"{message_id}"'),
-            about=f"{folder} {message_id}")
-        if typ != "OK":
-            raise MoveFailed(f"the folder {folder} could not be searched")
-        found = (data[0].split() if data and data[0] else [])
-        return found[0] if found else None
+    def number(self, folder: str, message_id: str):
+        """One message in a folder, or None if it is not there."""
+        return self.numbers(folder, [message_id]).get(message_id)
 
     def holds(self, folder: str, message_id: str) -> bool:
         """Whether a folder holds this message."""
         return self.number(folder, message_id) is not None
 
-    def mark_seen(self, folder: str, uids, seen: bool = True) -> None:
-        """Mark these numbered messages read, or unread again.
+    def mark_seen(self, folder, items, seen: bool = True) -> None:
+        """Mark these items read, or unread again.
 
-        One request for the row, and it costs no search: the numbers come
+        One request for the row, and it costs no search: the items come
         from the confirmation, which had to look each message up in the
         archive anyway and used to throw the answer away.
 
@@ -396,23 +519,13 @@ class Server:
         Undoing a review clears it again, or the row would come back to a
         queue that no longer counts it.
         """
-        wanted = [u.decode() if isinstance(u, bytes) else str(u) for u in uids]
-        if not wanted:
+        held = list(items)
+        if not held:
             return
-        # Writable: a read-only mailbox refuses a store, and this is the one
-        # flag the board sets anywhere.
-        self._select(folder)
-        typ, resp = self._talk(
-            "STORE",
-            lambda: self.imap.uid("STORE", ",".join(wanted),
-                                  "+FLAGS" if seen else "-FLAGS",
-                                  r"(\Seen)"),
-            about=f"{folder} n={len(wanted)} "
-                  f"{'+' if seen else '-'}Seen")
-        if typ != "OK":
-            raise MoveFailed(
-                f"the messages could not be marked "
-                f"{'read' if seen else 'unread'}: {resp}")
+        name = folder if isinstance(folder, str) else str(folder.name)
+        self._talk("FLAG", lambda: self.mailbox.mark(held, seen),
+                   about=f"{name} n={len(held)} "
+                         f"{'+' if seen else '-'}Seen")
 
 
 @dataclass(frozen=True)
@@ -449,21 +562,20 @@ def archive(config: Config, by_folder: dict, connect=None,
     confirmed.
 
     Confirmation is both halves: gone from the folder it was in, and present
-    in the archive.  A move that answered OK is not evidence; the gateway
-    this speaks to has been caught elsewhere answering a request with
-    something the protocol does not allow, and a row retired on an
-    unconfirmed move is a message a person believes they have dealt with.
+    in the archive.  A move that was accepted is not evidence; a row retired
+    on an unconfirmed move is a message a person believes they have dealt
+    with.
 
-    Absence is proved by asking the folder for the numbers just moved: a
-    flags fetch of numbers already known, which is the cheap half of the
-    cost model.  Presence in the archive is a search per message, which is
-    what it costs to know.
+    What a row costs, in requests, whatever it holds: one search of the
+    folder, one move, one search that proves the folder let go, one search of
+    the archive, and one flag for the whole row.  None of them grows with the
+    number of messages in the row, which is the property the specification
+    states and the reason the searches take a set rather than a message.
 
-    `stop` is asked, between messages, whether to give up -- the board wires
-    it to its own shutdown.  Confirming a large row takes minutes, and a
-    person quitting should not wait for it: the messages that were moved are
-    in the archive either way, and the next run finds them there and reports
-    them already reviewed.
+    `stop` is asked before each search whether to give up -- the board wires
+    it to its own shutdown.  The messages that were moved are in the archive
+    either way, and the next run finds them there and reports them already
+    reviewed.
 
     Raises `MoveFailed` when a move cannot be confirmed, so the caller can
     put the row back.  The messages that were confirmed stay archived: they
@@ -474,7 +586,7 @@ def archive(config: Config, by_folder: dict, connect=None,
     already: list[str] = []
     missing: list[str] = []
     #: Where each one landed in the archive, for marking it read.
-    arrived: list[bytes] = []
+    arrived: list = []
     with Server(config, connect=connect) as srv:
         for folder, idents in by_folder.items():
             wanted = [i for i in idents if i]
@@ -485,28 +597,18 @@ def archive(config: Config, by_folder: dict, connect=None,
             elsewhere = [i for i in wanted if i not in numbers]
             if here:
                 moved = [numbers[i] for i in here]
-                srv.move(folder, moved, config.archive)
-                stayed = srv.present(folder, moved)
+                srv.move(folder, moved, srv.archive)
+                stayed = srv.present(folder, here)
                 if stayed:
                     raise MoveFailed(
                         f"{len(stayed)} of {len(here)} are still in {folder} "
                         f"after the move")
-            # One opening of the archive for the whole confirmation, and for
+            # One search of the archive for the whole confirmation, and for
             # both groups: those just moved, and those that turned out to be
-            # elsewhere already.  They concern one folder, and opening it was
-            # measured on this account at about fourteen seconds against about
-            # one to search it -- so opening it per message made a folded row
-            # cost minutes where it costs seconds.  A row of seven spent two
-            # minutes here; it spends half of one.
-            #
-            # The numbers are kept, not just the yes-or-no: they are what
-            # marks the messages read below, and finding them again would cost
-            # another search of the archive.
-            #
-            # Searches are still one a message.  An OR of the row would be one
-            # round trip and this gateway answers an OR of eight identities
-            # with two of them -- see `numbers`.
-            landed = srv.numbers(config.archive, here + elsewhere, stop=stop)
+            # elsewhere already.  The items are kept, not just the yes-or-no:
+            # they are what marks the messages read below, and finding them
+            # again would cost another search.
+            landed = srv.numbers(srv.archive, here + elsewhere, stop=stop)
             for ident in here:
                 if ident not in landed:
                     raise MoveFailed(
@@ -521,10 +623,10 @@ def archive(config: Config, by_folder: dict, connect=None,
                     already.append(ident)
                     arrived.append(landed[ident])
         # Read, now that they are where they belong: one request for the
-        # whole row, on numbers the confirmation already found.  Last, so a
+        # whole row, on items the confirmation already found.  Last, so a
         # message is never marked read on the strength of a move that could
         # not be confirmed.
-        srv.mark_seen(config.archive, arrived)
+        srv.mark_seen(srv.archive, arrived)
     return Outcome(tuple(archived), tuple(already), tuple(missing))
 
 
@@ -543,27 +645,25 @@ def restore(config: Config, by_folder: dict, connect=None) -> Outcome:
             wanted = [i for i in idents if i]
             if not wanted:
                 continue
-            # Three openings of the archive for the row, not three a message.
-            # Written a message at a time this cost 3n openings at about
-            # fourteen seconds each -- a row of seven spent nearly five
-            # minutes of an undo doing nothing but opening one folder.
-            found = srv.numbers(config.archive, wanted)
+            # Three requests for the row, not three a message.
+            found = srv.numbers(srv.archive, wanted)
             missing += [i for i in wanted if i not in found]
             here = [i for i in wanted if i in found]
             if not here:
                 continue
             moving = [found[i] for i in here]
             # Unread again before they go back, and in that order: after a
-            # move a message is in another folder with another number, so
-            # marking it afterwards would mean finding it again.
+            # move a message is in another folder under another identity of
+            # the service's own, so marking it afterwards would mean finding
+            # it again.
             #
             # The queue is what has not been dealt with, and a message that
             # returned read would return to a queue that does not show it.
-            srv.mark_seen(config.archive, moving, seen=False)
+            srv.mark_seen(srv.archive, moving, seen=False)
             # One move for the row, which is what makes the undo all or
             # nothing: either the row comes back or none of it does.  A row
             # split between a folder and the archive is the state hardest to
             # reason about and the one a person can do least about.
-            srv.move(config.archive, moving, folder)
+            srv.move(srv.archive, moving, folder)
             back += here
     return Outcome(tuple(back), (), tuple(missing))

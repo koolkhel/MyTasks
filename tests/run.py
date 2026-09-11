@@ -54,9 +54,13 @@ TIERS = {
     # run by default, and refused outright when either half is absent --
     # half-configured, they would archive mail and be unable to say where
     # it went.
-    "gateway": ("the mail gateway, and a mailbox to read",
-                ("MAIL_MAILDIR", "MAIL_FOLDERS", "MAIL_IMAP_HOST",
-                 "MAIL_IMAP_USER", "MAIL_IMAP_PASSWORD_COMMAND")),
+    # The address is what says reviewing is configured at all; the identity
+    # and the credential command are read under either their own names or the
+    # ones they had when this spoke IMAP, so they are not named here -- the
+    # suite's own guard reports them, and naming one spelling would refuse a
+    # configuration that works.
+    "gateway": ("the mail account, and a mailbox to read",
+                ("MAIL_MAILDIR", "MAIL_FOLDERS", "MAIL_EWS_URL")),
 }
 #: What a suite calls the tasks it creates, so leftovers are recognisable.
 TEST_PREFIX = "zz"

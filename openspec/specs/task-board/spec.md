@@ -3428,6 +3428,11 @@ of an undo.
 - **WHEN** the archive cannot be confirmed
 - **THEN** the row returns and the board says why
 
+The economy SHALL be counted in requests to the account, not in any one
+protocol's idea of opening a folder. What a row costs SHALL NOT grow with the
+number of messages it holds: confirming is one question about a set of
+identities, asked once.
+
 #### Scenario: A message already archived
 
 - **WHEN** a message is not in its folder and is found in the archive
@@ -3446,12 +3451,12 @@ of an undo.
 #### Scenario: Confirming a folded row costs no more openings than a single one
 
 - **WHEN** rows of one message and of many are reviewed
-- **THEN** confirming each opens the archive the same number of times
+- **THEN** confirming each costs the archive the same number of requests, whatever the row holds
 
 #### Scenario: One opening answers about both groups
 
 - **WHEN** a row holds messages that were moved and messages already elsewhere
-- **THEN** the archive is opened once to ask about both
+- **THEN** one request to the archive answers about both groups
 
 #### Scenario: An undo that fails leaves the row whole
 
@@ -3572,7 +3577,7 @@ what makes it safe to keep, and it is required separately.
 
 ### Requirement: The board shows whether the mailbox is busy
 
-Reviewing a mail row is the slowest thing the board does — measured at about 13 seconds for a row of one message, and for a folded row about 8 seconds a message at four messages falling to about 3 at sixteen, the cost of a row being mostly what it takes to open the archive rather than what it takes per message — and reviews are done one at a time, so ticking several leaves the later ones waiting. The board SHALL show whether any of that work is in flight, so that a person can tell whether what they have ticked has landed before they tick more or leave.
+Reviewing a mail row reaches across the network to the account, and reviews are done one at a time, so ticking several leaves the later ones waiting. How long one takes depends on the account, the network and how the board reaches it, and SHALL NOT be written into this requirement: the indication exists because the work is not instant, not because it takes any particular number of seconds. The board SHALL show whether any of that work is in flight, so that a person can tell whether what they have ticked has landed before they tick more or leave.
 
 The indication SHALL be one cell at the right of the day bar, shown in every view. Mailbox work outstands regardless of which view is being looked at, and whether it is safe to quit is the same question in all of them.
 
@@ -4128,3 +4133,38 @@ of their task.
 
 - **WHEN** the board says something with no such text in it
 - **THEN** the message reads exactly as it did before, and the status line's own error styling still applies
+
+### Requirement: How the mail account is reached is configured
+
+The address of the service the board talks to, and the identity it presents,
+SHALL be read from the environment. No address, mailbox name or credential
+SHALL appear in the board's source, so that a corporate account is not
+described by a repository that can be published.
+
+The credential SHALL be asked for at the moment it is needed, by a configured
+command, rather than held from the moment the board starts. A board that never
+reviews anything SHALL never ask for it.
+
+Where nothing is configured, the board SHALL go on reading mail and SHALL
+refuse to review it, saying which of the two it cannot do. Reading and writing
+are configured separately and either may be set up alone.
+
+#### Scenario: Configured
+
+- **WHEN** the address and the identity are configured and a row is reviewed
+- **THEN** the board reaches the account and reviews the row
+
+#### Scenario: Nothing configured
+
+- **WHEN** no address is configured and a row is reviewed
+- **THEN** nothing is sent anywhere, no message moves, and the board says the mailbox cannot be written to
+
+#### Scenario: The credential cannot be fetched
+
+- **WHEN** the configured command for the credential fails or answers nothing
+- **THEN** the board reports the account as unreachable, and no message has moved
+
+#### Scenario: Nothing identifying is in the source
+
+- **WHEN** the board's source and its specification are read
+- **THEN** neither names an address, a mailbox, a folder of a real account, or a credential

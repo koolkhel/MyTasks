@@ -1,34 +1,32 @@
 """One real message, and one real row, moved to the archive and moved back.
 
 The only suite here that touches a real account. It exists because every
-other check about reviewing is against a substituted server, and a
-substituted server agrees with whatever this code believes: that the gateway
-takes a batched move, that a search finds a message by its identity, that a
-folder empties when messages leave it. Those are beliefs about a server, and
-only the server can settle them.
+other check about reviewing is against a substituted account, and a
+substituted account agrees with whatever this code believes: that the service
+takes a batched move, that a search finds a message by its identity in one
+request, that a folder lets go when messages leave it. Those are beliefs
+about a server, and only the server can settle them.
 
 What it does, and no more: takes one unread message from a configured folder,
 moves it to the archive, confirms both sides, moves it back and confirms
-that. Then the same for one folded row of several messages, timing the
-confirmation. Nothing is deleted, nothing goes anywhere but the archive and
-back, and the restore runs even when a check fails.
+that. Then the same for one folded row of several messages, timing both and
+counting the requests each costs. Nothing is deleted, nothing goes anywhere
+but the archive and back, and the restore runs even when a check fails.
 
-It prints counts, folder names and durations. No subject, sender, address or
-identity is printed, here or in a failure message: this is a real mailbox.
+It prints counts and durations. No subject, sender, address, identity or
+folder name is printed, here or in a failure message: this is a real mailbox.
 
 Note for whoever runs it: a message moved out and back reaches the local
 mirror as a removal and then as a new arrival, so it may vanish from the
-folder for up to one sync interval and come back with a new number. That is
-the same thing an ordinary review does, and it is why undoing a review says
-the row returns when the mailbox next catches up.
+folder for up to one sync interval and come back. That is the same thing an
+ordinary review does, and it is why undoing a review says the row returns
+when the mailbox next catches up.
 """
 import asyncio
 import builtins
 import functools
-import imaplib
 import os
 import re
-import socket
 import sys
 import tempfile
 import time
@@ -45,7 +43,7 @@ import singularity
 import tracker
 
 #: The real configuration, captured before the harness is imported: it
-#: withholds the mailbox, the gateway and the log from every board built
+#: withholds the mailbox, the account and the log from every board built
 #: under it, which is right for every other suite and is exactly what the
 #: last check here has to undo.  Captured rather than re-read, so no suite
 #: reimplements how the board finds its own settings.
@@ -61,6 +59,10 @@ from textual.widgets import DataTable, Static   # noqa: E402
 #: a real server, and a buffered run looks identical to a hung one -- which
 #: it did, the first time it was run.
 print = functools.partial(builtins.print, flush=True)
+
+#: An address that refuses, for the half that needs a request to fail for
+#: real rather than by a raised exception of the suite's own.
+DEAD = "https://127.0.0.1:1/EWS/Exchange.asmx"
 
 ok = []
 
@@ -85,15 +87,119 @@ def fold_for(config):
     return fold
 
 
-def summarise(threads):
-    return {"rows": len(threads), "messages": sum(t.count for t in threads)}
+class Counting:
+    """A real account, with every request it is asked for recorded.
+
+    Names only.  An argument would carry a folder name, and this file prints
+    what it records.
+    """
+
+    def __init__(self, config):
+        started = time.monotonic()
+        self.real = gateway.Mailbox(config, gateway.password(config))
+        self.opened = time.monotonic() - started
+        self.seq = []
+
+    def folders(self):
+        self.seq.append("FOLDERS")
+        return self.real.folders()
+
+    def find(self, folder, idents):
+        self.seq.append("SEARCH")
+        return self.real.find(folder, idents)
+
+    def move(self, items, target):
+        self.seq.append("MOVE")
+        return self.real.move(items, target)
+
+    def mark(self, items, seen):
+        self.seq.append("FLAG")
+        return self.real.mark(items, seen)
+
+
+class Dying(Counting):
+    """A real account whose next request goes nowhere, on cue.
+
+    The board crashed on this account when the line dropped between the move
+    and the confirmation that followed it.  That was a stateful conversation:
+    one connection carried a whole review, and losing it lost the review.
+    This one is not -- every request stands alone over HTTP, and a connection
+    closed between two of them costs nothing but a reconnection.  So the
+    failure worth reproducing is no longer a cut line but a request that
+    cannot be made, and the way to produce one honestly is to send it
+    somewhere that refuses rather than to raise something here and call it a
+    network.
+    """
+
+    def __init__(self, config, cut_when):
+        super().__init__(config)
+        self.cut_when = cut_when
+        self.cut = False
+
+    def _cutting(self, name):
+        """Whether this request is the one that should go nowhere."""
+        if self.cut or not self.cut_when(name, self.seq):
+            return False
+        self.cut = True
+        return True
+
+    def _through_nowhere(self, call):
+        """Make one request, with the address pointed somewhere that refuses.
+
+        Put back in a `finally`, and that is the whole of why this method
+        exists.  The library keeps one protocol object per address and
+        credential and hands it to every account built afterwards, so an
+        address left pointing at nothing outlives this object: the first
+        version of this redirected and never put it back, and the restore
+        that exists to return somebody's mail to its folder failed with it.
+        A real message sat in the archive until it was found by hand.
+
+        Through the configuration, too, rather than the protocol: the
+        property on the protocol has no setter, and assigning to it raised
+        an AttributeError inside the request -- which `_talk` rightly does
+        not catch, so the board wrote a crash file and this suite reported a
+        fault of its own making as a fault of the board's.
+        """
+        protocol = self.real.account.protocol
+        was = protocol.config.service_endpoint
+        protocol.config.service_endpoint = DEAD
+        try:
+            return call()
+        finally:
+            protocol.config.service_endpoint = was
+
+    def folders(self):
+        self.seq.append("FOLDERS")
+        if self._cutting("FOLDERS"):
+            return self._through_nowhere(lambda: self.real.folders())
+        return self.real.folders()
+
+    def find(self, folder, idents):
+        self.seq.append("SEARCH")
+        if self._cutting("SEARCH"):
+            return self._through_nowhere(
+                lambda: self.real.find(folder, idents))
+        return self.real.find(folder, idents)
+
+    def move(self, items, target):
+        self.seq.append("MOVE")
+        if self._cutting("MOVE"):
+            return self._through_nowhere(
+                lambda: self.real.move(items, target))
+        return self.real.move(items, target)
+
+    def mark(self, items, seen):
+        self.seq.append("FLAG")
+        if self._cutting("FLAG"):
+            return self._through_nowhere(lambda: self.real.mark(items, seen))
+        return self.real.mark(items, seen)
 
 
 async def main_():
     mailbox = REAL_MAILBOX()
     gw = REAL_GATEWAY()
     if mailbox is None or not mailbox.folders or gw is None:
-        print("no mailbox or no gateway configured; nothing was run")
+        print("no mailbox or no account configured; nothing was run")
         return 2
 
     found = mail.read(mailbox)
@@ -103,6 +209,20 @@ async def main_():
     if not rows:
         print("nothing unread to move; nothing was run")
         return 2
+
+    # -- what a session costs before it does anything ---------------------
+    print("reaching the account")
+    counted = Counting(gw)
+    print(f"  building a session took {counted.opened:.2f}s")
+    check("a session can be built at all", counted.real is not None)
+    started = time.monotonic()
+    walk = counted.folders()
+    print(f"  and naming every folder took {time.monotonic() - started:.2f}s")
+    check("the configured archive is among the folders it names",
+          gw.archive.casefold() in walk, True)
+
+    #: What each half cost, in requests, for the comparison at the end.
+    cost = {}
 
     # -- one message ------------------------------------------------------
     print("one message, archived and confirmed on both sides")
@@ -116,14 +236,16 @@ async def main_():
     else:
         message = single.newest
         where = {message.folder: [message.ident]}
+        one = Counting(gw)
         started = time.monotonic()
         # Inside the try, not before it: the move happens in here, so an
         # interrupt or a failure part way through must still reach the
         # restore below.  It was written the other way round first, and an
         # interrupted run would have left somebody's mail in the archive.
         try:
-            outcome = gateway.archive(gw, where)
+            outcome = gateway.archive(gw, where, connect=lambda: one)
             took = time.monotonic() - started
+            cost["a row of one"] = list(one.seq)
             check("it is reported archived", len(outcome.archived), 1)
             check("not as already done, and not as missing",
                   (len(outcome.already), len(outcome.missing)), (0, 0))
@@ -131,8 +253,8 @@ async def main_():
                 check("the archive holds it", srv.holds(gw.archive, message.ident))
                 check("and the folder it was in does not",
                       srv.holds(message.folder, message.ident), False)
-            print(f"  archived and confirmed in {took:.2f}s "
-                  f"from folder {message.folder}")
+            print(f"  archived and confirmed in {took:.2f}s, "
+                  f"{len(one.seq)} requests: {' '.join(one.seq)}")
         finally:
             back = gateway.restore(gw, where)
             check("it is moved back", len(back.archived), 1)
@@ -158,15 +280,18 @@ async def main_():
             by_folder.setdefault(message.folder, []).append(message.ident)
         print(f"  the row stands for {many.count} message(s) in "
               f"{len(by_folder)} folder(s)")
+        several = Counting(gw)
         started = time.monotonic()
         try:
-            outcome = gateway.archive(gw, by_folder)
+            outcome = gateway.archive(gw, by_folder, connect=lambda: several)
             took = time.monotonic() - started
+            cost["a folded row"] = list(several.seq)
             check("every message in the row is archived",
                   len(outcome.archived), many.count)
             check("none is reported missing", len(outcome.missing), 0)
             print(f"  {many.count} archived and confirmed in {took:.2f}s "
-                  f"({took / many.count:.2f}s a message)")
+                  f"({took / many.count:.2f}s a message), "
+                  f"{len(several.seq)} requests: {' '.join(several.seq)}")
             with gateway.Server(gw) as srv:
                 held = sum(1 for idents in by_folder.values()
                            for ident in idents if srv.holds(gw.archive, ident))
@@ -176,13 +301,32 @@ async def main_():
             check("all of them are moved back", len(back.archived), many.count)
             check("and none was lost on the way", len(back.missing), 0)
 
-    # -- the board's own path, against the real gateway -------------------
+    # -- what the spec says a row costs -----------------------------------
+    # The property the specification states, measured here rather than
+    # assumed: what a row costs does not grow with the number of messages it
+    # holds.  Both halves must have run in one folder for the comparison to
+    # mean anything, which is why it is guarded rather than skipped silently.
+    print("what a row costs, against the account")
+    if len(cost) == 2 and len(by_folder) == 1:
+        one_row, folded_row = cost["a row of one"], cost["a folded row"]
+        print(f"  a row of one:  {len(one_row)} requests")
+        print(f"  a folded row:  {len(folded_row)} requests "
+              f"for {many.count} messages")
+        check("a folded row costs no more requests than a single one",
+              len(folded_row) <= len(one_row), True)
+        check("and they are the same requests in the same order",
+              folded_row, one_row)
+    else:
+        print("  one of the halves did not run, or the row spanned folders; "
+              "not compared")
+
+    # -- the board's own path, against the real account -------------------
     # Everything above drives `gateway.archive` directly, which is not the
     # path a keypress takes: the counting, the indicator and the log all
     # live in the board's review worker.  So this builds a board with a
-    # STUBBED task store and the REAL gateway -- nothing live about the
+    # STUBBED task store and the REAL account -- nothing live about the
     # half that does not need to be -- and ticks one row.
-    print("a board with a stubbed store and the real gateway")
+    print("a board with a stubbed store and the real account")
     single = next((t for t in rows if t.count == 1), None)
     if single is None:
         print("  no row stands for a single message; skipping this half")
@@ -212,25 +356,25 @@ async def main_():
         back = gateway.restore(gw, where)
         check("the message is back in its folder", len(back.archived), 1)
 
-    # -- the line goes down part way through, against the real gateway ----
-    # The crash this change exists for, reproduced on the account it happened
-    # on: the socket is closed under the client after the move and before the
-    # archive-side confirmation, so imaplib reads EOF from a connection it
-    # still believes is open.  That is what the gateway did.
+    # -- a request that cannot be made, against the real account ----------
+    # The crash this was written for, in the shape it can still take: the
+    # move goes out and is answered, and the request that would confirm it
+    # never reaches anywhere.  See `Dying` for why this is no longer a cut
+    # line.
     #
     # The log goes to a throwaway directory for this half, unlike the one
     # above.  Two reasons: proving that no crash file was written needs a
     # directory that did not already have one, and a synthetic failure has no
     # business in the log a person reads to find real ones.
-    print("the line goes down part way through a real review")
+    print("a request that cannot be made, part way through a real review")
     # The mirror is read again here rather than the row being taken from the
     # reading at the top.  By this point three halves have run, each moving a
     # real message and putting it back, and the mailbox mirror is refreshed on
-    # a timer: over the four to six minutes that takes, it re-syncs underneath
-    # a row chosen at the start.  Taken from the top's reading, this case
-    # looked for a row the board no longer drew and returned before ticking
-    # anything -- twice in a row, and reported as "the message is back in its
-    # folder: 0", which reads like stranded mail and was nothing of the kind.
+    # a timer: over the minutes that takes, it re-syncs underneath a row
+    # chosen at the start.  Taken from the top's reading, this case looked for
+    # a row the board no longer drew and returned before ticking anything --
+    # twice in a row, and reported as "the message is back in its folder: 0",
+    # which reads like stranded mail and was nothing of the kind.
     fresh = mail.threads(mail.read(mailbox), fold=fold_for(tracker.load_config()))
     single = next((t for t in fresh if t.count == 1), None)
     if single is None:
@@ -272,40 +416,30 @@ def _lines_in_log():
 
 
 async def _board_review_cut(row, mailbox, gw, moved=None):
-    """Tick one real row, and cut the line before the confirmation lands.
+    """Tick one real row, and make the confirmation unable to go out.
 
     `moved` is appended to once the move has actually gone out, so the caller
     can tell "the restore found nothing because nothing moved" from "the
     restore lost something".
     """
-    #: Command names in order, for saying what happened if a check fails.
-    #: Names only -- an argument would carry a folder name.
-    seq = []
     made = []
 
-    def cut_after_the_move(name, args):
-        """Cut on the second select after the move.
+    def cut_after_the_move(name, seq):
+        """Cut on the second search after the move.
 
-        Counting rather than matching a folder name.  The sequence after the
-        move is fixed: a readonly select of the folder just emptied and a
-        flags fetch, which prove the messages left, and then a select of the
-        archive per message, which is the half that proves they arrived and
-        the half the line went down in on the account.  So the second select
-        after the move is the archive-side confirmation, whatever the account
-        happens to call its archive -- and matching the name was tried first,
-        did not fire, and cost a live run to find out.
+        Counting rather than matching a folder name.  The sequence after a
+        move is fixed: a search of the folder just emptied, which proves the
+        messages left, and then a search of the archive, which proves they
+        arrived and is the half the line went down in on the account.  So the
+        second search after the move is the archive-side confirmation,
+        whatever the account happens to call its archive.
         """
-        seq.append(name)
         if name == "MOVE" and moved is not None:
             moved.append(name)
-        if name != "SELECT":
+        if name != "SEARCH" or "MOVE" not in seq:
             return False
-        return seq.count("MOVE") >= 1 and \
-            seq.count("SELECT") - _selects_before_move(seq) == 2
-
-    def _selects_before_move(names):
-        return names[:names.index("MOVE")].count("SELECT") \
-            if "MOVE" in names else names.count("SELECT")
+        after = seq[seq.index("MOVE"):]
+        return after.count("SEARCH") == 2
 
     app = main.TaskApp()
     app.client = StubClient([mk("zz-stub-cut", "a stubbed task")],
@@ -313,8 +447,9 @@ async def _board_review_cut(row, mailbox, gw, moved=None):
     app.calendar_config = app.tracker_config = None
     app.mail_config = mailbox
     app.gateway_config = gw
+
     def connect():
-        one = Guillotine(gw, cut_after_the_move)
+        one = Dying(gw, cut_after_the_move)
         made.append(one)
         return one
 
@@ -343,11 +478,12 @@ async def _board_review_cut(row, mailbox, gw, moved=None):
             if app.mail_busy == 0:
                 break
         took = time.monotonic() - started
-        print(f"  the line went down after {took:.1f}s")
-        check("the line was actually cut",
+        print(f"  the request failed after {took:.1f}s")
+        check("the confirmation was actually sent nowhere",
               any(one.cut for one in made))
         if not any(one.cut for one in made):
-            print(f"  commands in order: {seq}")
+            print(f"  requests in order: "
+                  f"{' '.join(one.seq for one in made for one in [one])[:80]}")
         check("nothing is left in flight", app.mail_busy, 0)
         check("the board is still running", app.is_running)
         # The whole point.  This failure used to end the session.
@@ -365,67 +501,11 @@ async def _board_review_cut(row, mailbox, gw, moved=None):
         check("naming how many messages",
               bool(failed) and "1 message(s)" in failed[0])
         check("and that the line went down rather than a move being refused",
-              bool(failed) and "closed the line" in failed[0])
+              bool(failed) and "went down" in failed[0])
         check("no subject or sender reached the log",
               any(row.newest.subject[:18] in l for l in said), False)
         for line in failed:
             print(f"  logged: {line.split(' ', 1)[1][:76]}")
-
-
-class Guillotine:
-    """A real connection whose socket is closed under it, on cue.
-
-    Shutting the socket down under the client rather than closing the client:
-    imaplib then reads EOF from a connection it still believes is open,
-    raises `IMAP4.abort`, and that is precisely the shape of the failure that
-    ended a session on this account.  Nothing else about the conversation is
-    changed -- every request before the cut goes to the real gateway and is
-    answered by it.
-    """
-
-    def __init__(self, config, cut_when):
-        self.real = imaplib.IMAP4(config.host, config.port,
-                                  timeout=config.timeout)
-        self.cut_when = cut_when
-        self.cut = False
-
-    def _maybe_cut(self, name, args):
-        if not self.cut and self.cut_when(name, args):
-            self.cut = True
-            try:
-                # `shutdown`, not `close`.  A socket with a `makefile`
-                # outstanding -- which imaplib always has -- keeps its
-                # descriptor open on `close`: the method sets a flag and
-                # defers the real close until the last reader is gone.  So
-                # closing it changed nothing, the conversation carried on,
-                # and a live run reported a review that succeeded.  A
-                # shutdown ends the line for real, and the next read returns
-                # nothing, which is the EOF the gateway actually produced.
-                self.real.socket().shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                self.real.socket().close()
-            except Exception:
-                pass
-
-    def login(self, *args):
-        return self.real.login(*args)
-
-    def logout(self):
-        # A line already down has nothing left to say goodbye on.
-        try:
-            return self.real.logout()
-        except Exception:
-            return ("BYE", [b"gone"])
-
-    def select(self, mailbox, readonly=False):
-        self._maybe_cut("SELECT", (mailbox, readonly))
-        return self.real.select(mailbox, readonly=readonly)
-
-    def uid(self, command, *args):
-        self._maybe_cut(command.upper(), args)
-        return self.real.uid(command, *args)
 
 
 async def _board_review(row, mailbox, gw):
@@ -444,7 +524,7 @@ async def _board_review(row, mailbox, gw):
             await pilot.pause()
         wanted = f"{main.MAIL_PREFIX}{row.newest.ident}"
         at = next((i for i, t in enumerate(app.tasks) if t.id == wanted), None)
-        check("the row the gateway half used is on the board", at is not None)
+        check("the row the account half used is on the board", at is not None)
         if at is None:
             return
         table = app.query_one(DataTable)

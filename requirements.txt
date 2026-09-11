@@ -2,3 +2,4 @@ requests>=2.32
 python-dotenv>=1.0
 textual>=0.80
 pyobjc-framework-EventKit>=10.0; sys_platform == "darwin"
+exchangelib>=5.6

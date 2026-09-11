@@ -5,7 +5,7 @@ request: which messages a row stands for, where the rows sit, what they open,
 what a tick and a promotion do, each of the four outcomes a confirmation can
 have, and that nothing on disk changes through all of it.
 
-No account and no credentials: the connection is `tests/fakeimap.py`, so the
+No account and no credentials: the connection is `tests/fakemail.py`, so the
 paths that must fail can be made to fail. Synthetic mail only -- a private
 copy of the committed fixture per board -- and invented project keys.
 """
@@ -17,7 +17,8 @@ _TESTS = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 from harness import *
-import fakeimap
+import fakemail
+from exchangelib.errors import TransportError
 import mailfixture as F
 import gateway, mail, main, tracker
 from textual.widgets import DataTable
@@ -51,12 +52,12 @@ def server_for(path, folders=F.FOLDERS, **kw):
     for message in mail.read(mail.Config(path, tuple(folders))):
         held[message.folder].append(message.ident)
     held[F.ARCHIVE] = []
-    return fakeimap.FakeIMAP(held, **kw)
+    return fakemail.FakeMailbox(held, **kw)
 
 
 @asynccontextmanager
 async def board(tasks=None, tracker_cfg=None, mail_cfg=None, imap=None,
-                gateway_cfg=fakeimap.CONFIG, to_inbox=True, folders=F.FOLDERS):
+                gateway_cfg=fakemail.CONFIG, to_inbox=True, folders=F.FOLDERS):
     app = main.TaskApp()
     app.client = StubClient(tasks if tasks is not None else [mk("i1", "a triage task")],
                             reference=NOW)
@@ -248,7 +249,7 @@ async def reviewing():
         check("the row is already gone",
               [t.id for t in rows(app) if t.id == row.id], [])
         check("while the server is still being asked where the messages are",
-              imap.commands(), ["LOGIN", "SELECT", "SEARCH"])
+              imap.commands(), ["FOLDERS", "SEARCH"])
         check("and nothing has moved", imap.ids(F.ARCHIVE), [])
         hold.set()
         await settle(pilot, 30)
@@ -262,7 +263,9 @@ async def reviewing():
     hold = threading.Event()
 
     def count_logins(name, args):
-        if name == "LOGIN":
+        # A session opens by asking the account for its folders, there being
+        # no login of its own to count.
+        if name == "FOLDERS":
             opened.append(1)
             hold.wait(10)
         return None
@@ -297,8 +300,11 @@ async def reviewing():
     print("a promotion survives a gateway that will not take the mail")
     imap = None
     path = F.copy()
-    broken = server_for(path, fail=lambda name, args:
-                        ("NO", [b"refused"]) if name == "MOVE" else None)
+    def refuse_moves(name, args):
+        if name == "MOVE":
+            raise fakemail.refused("refused")
+
+    broken = server_for(path, fail=refuse_moves)
     async with board(tracker_cfg=TRK, mail_cfg=mail.Config(path, F.FOLDERS),
                      imap=broken) as (app, pilot, _p, _i, _o):
         row = await select(app, pilot, lambda t: "ZZA-200" in (t.raw.get("title") or ""))
@@ -320,10 +326,9 @@ async def reviewing():
         await settle(pilot, 34)
         check("only these requests were made",
               sorted(set(imap.commands())),
-              ["FETCH", "LOGIN", "LOGOUT", "MOVE", "SEARCH", "SELECT",
-               "STORE"])
+              ["FLAG", "FOLDERS", "MOVE", "SEARCH"])
         check("every move named the archive",
-              {args[1].strip('"') for name, args in imap.calls if name == "MOVE"},
+              {args[0] for name, args in imap.calls if name == "MOVE"},
               {F.ARCHIVE})
         check("nothing was deleted or expunged",
               [c for c in imap.commands() if c in ("EXPUNGE", "DELETE")], [])
@@ -334,7 +339,7 @@ async def reviewing():
         check("and no flag was set anywhere but the archive",
               set(imap.stored_in), {F.ARCHIVE})
         check("and every message is still on the server",
-              sum(len(f) for f in imap.folders.values()), 18)
+              sum(len(f) for f in imap.held.values()), 18)
 
 
 # ------------------------------------------------------------- confirmation
@@ -347,11 +352,12 @@ async def confirming():
         row = await select(app, pilot, lambda t: "ZZA-200" in (t.raw.get("title") or ""))
         idents = [m.ident for m in row.raw[main.MAIL_MESSAGES]]
         # Somebody else moved them, between the mirror being written and now.
-        for folder in list(imap.folders):
-            for uid, ident in list(imap.folders[folder].items()):
-                if ident in idents:
-                    del imap.folders[folder][uid]
-                    imap.folders[F.ARCHIVE][b"9" + uid] = ident
+        for folder in list(imap.held):
+            for item in list(imap.held[folder]):
+                if item.message_id in idents:
+                    imap.held[folder].remove(item)
+                    item.folder = F.ARCHIVE
+                    imap.held[F.ARCHIVE].append(item)
         await pilot.press("space")
         await settle(pilot, 30)
         check("it is reported as already reviewed",
@@ -367,10 +373,10 @@ async def confirming():
                      imap=imap) as (app, pilot, _p, _i, _o):
         row = await select(app, pilot, lambda t: "ZZA-200" in (t.raw.get("title") or ""))
         idents = [m.ident for m in row.raw[main.MAIL_MESSAGES]]
-        for folder in list(imap.folders):
-            for uid, ident in list(imap.folders[folder].items()):
-                if ident in idents:
-                    del imap.folders[folder][uid]
+        for folder in list(imap.held):
+            for item in list(imap.held[folder]):
+                if item.message_id in idents:
+                    imap.held[folder].remove(item)
         await pilot.press("space")
         await settle(pilot, 30)
         check("the board says so",
@@ -637,7 +643,7 @@ async def dropped_line():
     because this is no longer a crash.
     """
     print("a line that drops part way through a review")
-    import imaplib, tempfile
+    import tempfile
     import journal
     journal.PATH = os.path.join(tempfile.mkdtemp(prefix="journal."),
                                 "logs", "mytasks.log")
@@ -657,9 +663,8 @@ async def dropped_line():
     # The moves are answered; the line goes down on the archive-side
     # confirmation, which is where it went down on the account.
     def drop_confirming(name, args):
-        if name == "SELECT" and args and args[0] == F.ARCHIVE:
-            raise imaplib.IMAP4.abort("command: EXAMINE => socket error: EOF")
-        return None
+        if name == "SEARCH" and args and args[0] == F.ARCHIVE:
+            raise TransportError("the connection was closed")
 
     path = F.copy()
     imap = server_for(path, fail=drop_confirming)
@@ -702,7 +707,7 @@ async def dropped_line():
         check("and how long it took before giving up",
               bool(failed) and "s:" in failed[0])
         check("and says the line went down rather than the move being refused",
-              bool(failed) and "closed the line" in failed[0])
+              bool(failed) and "went down" in failed[0])
         check("the person is told, naming the row",
               "back in the queue" in status(app))
 

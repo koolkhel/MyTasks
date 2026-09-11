@@ -26,7 +26,7 @@ _TESTS = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 from harness import *
-import fakeimap
+import fakemail
 import gateway, journal, mail, main
 from textual.widgets import DataTable
 
@@ -73,7 +73,7 @@ def traced(room):
 
 
 def server(size=3, **kw):
-    return fakeimap.FakeIMAP({"Feed": [ident(i) for i in range(size)],
+    return fakemail.FakeMailbox({"Feed": [ident(i) for i in range(size)],
                               "Archive": []}, **kw)
 
 
@@ -82,7 +82,7 @@ def review(size=3, **kw):
     room = elsewhere()
     imap = server(size, **kw)
     try:
-        gateway.archive(fakeimap.CONFIG,
+        gateway.archive(fakemail.CONFIG,
                         {"Feed": [ident(i) for i in range(size)]},
                         connect=lambda: imap)
     except Exception:
@@ -94,13 +94,12 @@ def review(size=3, **kw):
 def every_request():
     print("every request the board makes is written down")
     imap, lines, room = review(3)
-    #: The recording server sees LOGIN and LOGOUT too; the trace does not,
-    #: those two being outside the traced path -- which is what keeps a
-    #: credential off it.  So the trace is the commands minus those two.
+    #: Every request is traced now.  There is no login of its own to leave
+    #: out: the credential is handed to the library when the session is
+    #: built, which is not a request and not on this path.
     asked = imap.commands()
     check("the server was asked something at all", len(asked) > 0)
-    check("a line for every request but login and logout",
-          len(lines), len([c for c in asked if c not in ("LOGIN", "LOGOUT")]))
+    check("a line for every request the account saw", len(lines), len(asked))
     check("one file, for today", traces(room),
           [f"imap-{dt.datetime.now(dt.timezone.utc):%Y-%m-%d}.log"])
 
@@ -112,55 +111,60 @@ def every_request():
           [bool(m) for m in parsed], [True] * len(lines))
     check("the commands are the ones the gateway issues",
           sorted({m.group(2) for m in parsed if m}),
-          ["EXAMINE", "FETCH", "MOVE", "SEARCH", "SELECT", "STORE"])
-    check("every line names its folder",
-          all(("Feed" in m.group(3) or "Archive" in m.group(3))
+          ["FLAG", "FOLDERS", "MOVE", "SEARCH"])
+    check("every line names what it concerned",
+          all(("Feed" in m.group(3) or "Archive" in m.group(3)
+               or "every folder" in m.group(3))
               for m in parsed if m))
     check("every line carries a duration",
           all(m.group(4) is not None for m in parsed if m))
     check("and every one of them says it ended well",
           {m.group(5) for m in parsed if m}, {"ok"})
 
-    print("a search names the message, and the rest name a count")
+    print("each line names the folder it concerned and how many messages")
     by = {}
     for m in parsed:
         by.setdefault(m.group(2), []).append(m.group(3))
-    check("a search names the identity it searched for",
-          all(ident(0)[:5] in a or "<zz" in a for a in by["SEARCH"]),
-          True)
-    check("a fetch names how many", all("n=" in a for a in by["FETCH"]))
+    #: A search names a set now, not one message: the account answers the
+    #: whole row in one request, so what is worth recording is which folder
+    #: was asked and how many were asked about.
+    check("a search names its folder and how many",
+          all(("Feed" in a or "Archive" in a) and "n=" in a
+              for a in by["SEARCH"]), True)
     check("a move names how many and where to",
           all("n=" in a and "->" in a for a in by["MOVE"]))
-    check("a store names how many and which flag",
-          all("n=" in a and "Seen" in a for a in by["STORE"]))
-    check("a select names only its folder",
-          all("n=" not in a for a in by["SELECT"] + by["EXAMINE"]))
+    check("a flag names how many and which flag",
+          all("n=" in a and "Seen" in a for a in by["FLAG"]))
+    check("the walk that names the folders carries no count",
+          all("n=" not in a for a in by["FOLDERS"]))
 
-    print("login and logout are not on the traced path")
-    check("no line names login", any("LOGIN" in l for l in lines), False)
-    check("nor logout", any("LOGOUT" in l for l in lines), False)
+    print("the credential is not on the traced path")
+    check("no line names a password", any("password" in l.lower()
+                                          for l in lines), False)
     src = open(os.path.join(_REPO, "gateway.py"), encoding="utf-8").read()
-    check("the gateway calls them outside the traced helper",
-          bool(re.search(r"self\.imap\.login\(", src))
-          and "self._talk(\n            \"LOGIN\"" not in src)
+    #: It is fetched where the session is built, which is not a request and
+    #: so cannot be traced: there is nothing for the helper to write down.
+    check("the credential is fetched outside the traced helper",
+          bool(re.search(r"Mailbox\(self\.config, password\(self\.config\)\)", src))
+          and 'self._talk("LOGIN"' not in src)
 
 
 # -- the request that ended a session -------------------------------------
 def what_failed():
     print("a request that failed is written down as having failed")
-    import imaplib
+    from exchangelib.errors import TransportError
 
     def drop_on_archive(name, args):
-        if name == "SELECT" and args and args[0] == "Archive":
-            raise imaplib.IMAP4.abort("command: EXAMINE => socket error: EOF")
-        return None
+        if name == "SEARCH" and args and args[0] == "Archive":
+            raise TransportError("the connection was closed")
 
     imap, lines, room = review(3, fail=drop_on_archive)
     check("something was traced before it died", len(lines) > 0)
     last = lines[-1]
     check("the last line is the request that ended it", "ABORT" in last, True)
-    check("and it says what it failed with", "socket error: EOF" in last, True)
-    check("and which command it was", "EXAMINE" in last, True)
+    check("and it says what it failed with",
+          "the connection was closed" in last, True)
+    check("and which command it was", "SEARCH" in last, True)
     check("and how long it had been waiting",
           bool(re.search(r"\d+\.\d\ds ABORT", last)), True)
     check("nothing was traced after it",
@@ -168,16 +172,20 @@ def what_failed():
 
     print("a refusal is told apart from a dropped line")
     def refuse_the_move(name, args):
-        return ("NO", [b"refused"]) if name == "MOVE" else None
+        if name == "MOVE":
+            raise fakemail.refused("refused")
 
     _, lines, _ = review(3, fail=refuse_the_move)
     moves = [l for l in lines if " MOVE " in l]
-    check("the move is traced as having been answered",
-          bool(moves) and moves[-1].rstrip().endswith("ok"), True)
-    # A "NO" is an answer, not a protocol error: the gateway reads the status
-    # and raises its own MoveFailed, which is not the request failing.
+    # The distinction the trace exists to draw: a refusal is the account
+    # answering and declining, a dropped line is the conversation failing.
+    # They are different words on the line, and a person reading it after the
+    # fact has only those words.
+    check("the move is traced as refused, not as a dropped line",
+          bool(moves) and moves[-1].rstrip().endswith(
+              "REFUSED " + str(fakemail.refused("refused"))), True)
     check("and the operation stopped there",
-          [l for l in lines if " STORE " in l], [])
+          [l for l in lines if " FLAG " in l], [])
 
 
 # -- a file a day ---------------------------------------------------------
@@ -197,7 +205,7 @@ def a_day_at_a_time():
     for day in (9, 10):
         journal.datetime = on(day)
         try:
-            journal.trace("EXAMINE", "Archive", 10.2, "ok")
+            journal.trace("SEARCH", "Archive", 10.2, "ok")
         finally:
             journal.datetime = real
     check("two days make two files", traces(room),
@@ -213,7 +221,7 @@ def a_day_at_a_time():
     print("a trace that cannot be written changes nothing")
     journal.PATH = os.path.join("/dev/null", "logs", "mytasks.log")
     imap = server(1)
-    out = gateway.archive(fakeimap.CONFIG, {"Feed": [ident(0)]},
+    out = gateway.archive(fakemail.CONFIG, {"Feed": [ident(0)]},
                           connect=lambda: imap)
     check("the review still happened", len(out.archived), 1)
     check("and nothing was raised about the trace", True)
@@ -239,7 +247,7 @@ def nothing_identifying():
                      answers=None, body="ZZMARKERBODY and more of it",
                      text="ZZMARKERSUBJECT", folder="Feed", key=f"k{i}")
         for i in range(3)))]
-    app.gateway_config = fakeimap.CONFIG
+    app.gateway_config = fakemail.CONFIG
     app.gateway_connect = lambda: imap
 
     async def go():
@@ -267,17 +275,31 @@ def nothing_identifying():
     check("no body reached the trace", "ZZMARKERBODY" in text, False)
     check("no sender reached the trace", "zzsender" in text, False)
     check("the folder is there", "Feed" in text, True)
-    check("and the identities are, as the log's rule allows",
-          ident(0) in text, True)
+    #: The identities are not.  A search used to name the one message it
+    #: asked about, there being one search a message; a search now names a
+    #: set, and the line says which folder and how many.  The rule the log
+    #: was written to allows either, and the shorter line carries fewer
+    #: identifiers onto disk, which is the better direction for a file that
+    #: describes somebody's mail.
+    check("how many, rather than which", "n=" in text, True)
+    check("and no identity is written down", ident(0) in text, False)
 
     print("and no request asks for any, which is why")
     src = open(os.path.join(_REPO, "gateway.py"), encoding="utf-8").read()
     for verb in ("BODY", "RFC822", "ENVELOPE", "BODYSTRUCTURE",
                  "HEADER.FIELDS"):
         check(f"the gateway never asks for {verb}", verb in src, False)
-    # The one HEADER it names is a search key, which carries no message text.
-    check("the only HEADER it names is the search key",
-          re.findall(r'"HEADER"', src), ['"HEADER"'])
+    # What it does ask for, said positively: the identity a message is known
+    # by and the pair the account uses to name that item again.  Nothing that
+    # carries a word anyone wrote.
+    check("it asks for identities and nothing else",
+          bool(re.search(r'\.only\("message_id", "id", "changekey"\)', src)),
+          True)
+    #: Named exactly, not as words: "body" alone appears in the module's own
+    #: prose, and a check that matched prose would fail on a sentence saying
+    #: the gateway fetches no bodies.
+    for field in ("text_body", "unique_body", "attachments", "mime_content"):
+        check(f"the gateway never asks for {field}", field in src, False)
 
 
 def nothing_secret():
@@ -285,8 +307,8 @@ def nothing_secret():
     #: The password the gateway would send, planted as a marker.
     room = elsewhere()
     marked = gateway.Config(
-        host=fakeimap.CONFIG.host, port=fakeimap.CONFIG.port,
-        user=fakeimap.CONFIG.user, archive=fakeimap.CONFIG.archive,
+        service=fakemail.CONFIG.service, account=fakemail.CONFIG.account,
+        archive=fakemail.CONFIG.archive,
         password_command=("printf", "ZZMARKERPASSWORD"))
     check("the password command really yields the marker",
           gateway.password(marked), "ZZMARKERPASSWORD")
@@ -295,7 +317,7 @@ def nothing_secret():
     text = "\n".join(traced(room))
     check("something was traced", len(traced(room)) > 0)
     check("the password is nowhere in it", "ZZMARKERPASSWORD" in text, False)
-    check("and neither is the user", marked.user in text, False)
+    check("and neither is the account", marked.account in text, False)
 
 
 # -- what it costs --------------------------------------------------------
@@ -308,30 +330,28 @@ def costs_nothing():
     #: nothing" actually means is that every request the account sees is one
     #: the gateway would have made anyway, and that the trace holds those and
     #: no others.
-    UNTRACED = ("LOGIN", "LOGOUT")
     for size in (1, 3, 7):
         imap, lines, _ = review(size)
         asked = imap.commands()
-        check(f"a row of {size}: the trace holds every request but "
-              f"{' and '.join(UNTRACED).lower()}",
-              len(lines), len([c for c in asked if c not in UNTRACED]))
+        check(f"a row of {size}: the trace holds every request",
+              len(lines), len(asked))
         check(f"a row of {size}: and holds nothing the account never saw",
               len(lines) <= len(asked), True)
-        check(f"a row of {size}: those two are the only ones untraced",
-              sorted({c for c in asked if c in UNTRACED}), ["LOGIN", "LOGOUT"])
+        check(f"a row of {size}: every request is one the review needed",
+              sorted(set(asked)), ["FLAG", "FOLDERS", "MOVE", "SEARCH"])
 
     print("nothing on the board is drawn from it")
     room = elsewhere()
     imap = server(1)
-    gateway.archive(fakeimap.CONFIG, {"Feed": [ident(0)]},
+    gateway.archive(fakemail.CONFIG, {"Feed": [ident(0)]},
                     connect=lambda: imap)
     check("a trace was written", len(traces(room)), 1)
     for f in traces(room):
         os.remove(os.path.join(room, f))
     check("and removing it leaves the gateway answering the same",
-          gateway.Server(fakeimap.CONFIG,
+          gateway.Server(fakemail.CONFIG,
                          connect=lambda: imap).__class__.__name__, "Server")
-    out = gateway.restore(fakeimap.CONFIG, {"Feed": [ident(0)]},
+    out = gateway.restore(fakemail.CONFIG, {"Feed": [ident(0)]},
                           connect=lambda: imap)
     check("the message still came back", len(out.archived), 1)
     check("with the trace gone beforehand", True)
@@ -339,38 +359,34 @@ def costs_nothing():
 
 # -- the repetition it makes visible --------------------------------------
 def no_repetition():
-    print("a folded row opens the archive twice, not once a message")
+    print("a folded row searches the archive once, not once a message")
     imap, lines, _ = review(7)
-    selects = [l for l in lines if " SELECT " in l or " EXAMINE " in l]
-    archive = [l for l in selects if "Archive" in l]
-    #: Readonly opens are EXAMINE, writable ones SELECT.  The gateway opens
-    #: the archive readonly once to confirm the whole row arrived, and
-    #: writably once to mark it read.
-    reading = [l for l in archive if " EXAMINE " in l]
-    writing = [l for l in archive if " SELECT " in l]
-    #: This assertion has moved rather than been written afresh.  It used to
-    #: record the repetition as present: eleven folder openings for seven
-    #: messages, eight of them the archive, seven readonly and six of those
-    #: repetition -- about a minute of a folded row spent opening one folder,
-    #: most of the nine minutes the crash spent before the line dropped.  It
-    #: was written as a check so that removing the repetition would have an
-    #: assertion to move instead of a claim to re-establish.  This is that.
-    check("five folder openings for seven messages", len(selects), 5)
-    check("two of them open the archive", len(archive), 2)
-    check("one readonly, for the whole confirmation", len(reading), 1)
-    check("and one writable, for the flag", len(writing), 1)
-    check("the searches are still one a message",
-          len([l for l in lines if " SEARCH " in l and "Archive" in l]), 7)
+    searches = [l for l in lines if " SEARCH " in l]
+    archive = [l for l in searches if "Archive" in l]
+    walks = [l for l in lines if " FOLDERS " in l]
+    #: This assertion has moved twice rather than been written afresh.  It
+    #: first recorded the repetition as present: eleven folder openings for
+    #: seven messages, eight of them the archive, seven readonly and six of
+    #: those repetition -- about a minute of a folded row spent opening one
+    #: folder, most of the nine minutes the crash spent before the line
+    #: dropped.  Then it recorded the openings cut to two.  There are no
+    #: openings at all now, and what is left is what a review actually needs
+    #: to ask.
+    check("one walk of the folders, for the session", len(walks), 1)
+    check("three searches for seven messages", len(searches), 3)
+    check("one of them the archive's, for the whole confirmation",
+          len(archive), 1)
+    check("one move and one flag", (len([l for l in lines if " MOVE " in l]),
+                                    len([l for l in lines if " FLAG " in l])),
+          (1, 1))
     #: The point of the shape: it does not grow with the row.
-    opens = {}
+    asked = {}
     for size in (1, 3, 7):
         _, some, _ = review(size)
-        opens[size] = len([l for l in some
-                           if ("Archive" in l)
-                           and (" SELECT " in l or " EXAMINE " in l)])
-    check("and the count is the same for any row size", set(opens.values()),
-          {2})
-    print(f"      archive openings by row size: {opens}")
+        asked[size] = len(some)
+    check("and the count is the same for any row size", set(asked.values()),
+          {6})
+    print(f"      requests by row size: {asked}")
 
 
 # -- the directory it lands in --------------------------------------------

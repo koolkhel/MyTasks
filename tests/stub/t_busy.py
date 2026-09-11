@@ -23,7 +23,7 @@ _TESTS = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 from harness import *
-import fakeimap
+import fakemail
 import gateway, journal, mail, main
 from textual.widgets import DataTable, Static
 
@@ -59,11 +59,11 @@ def lines():
 
 
 def server(**kw):
-    return fakeimap.FakeIMAP({"Feed": [ident(i) for i in range(4)],
+    return fakemail.FakeMailbox({"Feed": [ident(i) for i in range(4)],
                               "Archive": []}, **kw)
 
 
-async def board(imap, tasks=None, size=(100, 44), gateway_cfg=fakeimap.CONFIG,
+async def board(imap, tasks=None, size=(100, 44), gateway_cfg=fakemail.CONFIG,
                 subject="a notification", body="what it says"):
     """A board whose inbox holds one mail row of three messages."""
     app = main.TaskApp()
@@ -184,20 +184,22 @@ async def every_way_it_ends():
 
     print("in neither place: it is in no folder at all")
     elsewhere()
-    empty = fakeimap.FakeIMAP({"Feed": [], "Archive": []})
+    empty = fakemail.FakeMailbox({"Feed": [], "Archive": []})
     ways.append(("in neither place", empty, True))
 
     print("already archived: somebody else moved it")
     elsewhere()
-    done = fakeimap.FakeIMAP({"Feed": [],
+    done = fakemail.FakeMailbox({"Feed": [],
                               "Archive": [ident(i) for i in range(3)]})
     ways.append(("already archived", done, False))
 
     print("unreachable: the gateway refuses us")
     elsewhere()
 
-    class Refuses(fakeimap.FakeIMAP):
-        def login(self, user, secret):
+    class Refuses(fakemail.FakeMailbox):
+        # The first thing a session asks for, and so the first thing that
+        # can fail: there is no login of its own to refuse any more.
+        def folders(self):
             raise OSError("no route to host")
 
     ways.append(("gateway unreachable",
@@ -266,7 +268,7 @@ async def every_way_it_ends():
     print("undoing settles too")
     for label, imap in (("put back", server()),
                         ("not in the archive",
-                         fakeimap.FakeIMAP({"Feed": [], "Archive": []}))):
+                         fakemail.FakeMailbox({"Feed": [], "Archive": []}))):
         elsewhere()
         app, size = await board(imap)
         async with app.run_test(size=size) as pilot:

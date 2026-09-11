@@ -27,7 +27,7 @@ _TESTS = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 from harness import *
-import fakeimap
+import fakemail
 import gateway, journal, mail, main
 import datetime as dt
 from textual.widgets import DataTable
@@ -252,7 +252,7 @@ async def a_board(imap):
                      answers=None, body="what it says", text="a notification",
                      folder="Feed", key=f"k{i}")
         for i in range(3)))]
-    app.gateway_config = fakeimap.CONFIG
+    app.gateway_config = fakemail.CONFIG
     app.gateway_connect = lambda: imap
     return app
 
@@ -272,7 +272,7 @@ async def a_crashing_review():
             raise ZeroDivisionError("a defect, not a mailbox failure")
         return None
 
-    imap = fakeimap.FakeIMAP({"Feed": [ident(i) for i in range(4)],
+    imap = fakemail.FakeMailbox({"Feed": [ident(i) for i in range(4)],
                               "Archive": []}, fail=a_bug)
     app = await a_board(imap)
     ended = None
