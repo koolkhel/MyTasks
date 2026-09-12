@@ -20,8 +20,8 @@ sys.path.insert(0, _REPO)
 import singularity
 _read_command = singularity.load_workspace_command
 from harness import StubClient, mk, TZ
-from datetime import datetime
-import main as M, tracker, ical
+from datetime import datetime, timedelta, time as time_of_day
+import main as M, tracker, ical, mail
 from main import TaskApp, TaskInput, KeyBar
 from textual.widgets import DataTable, Input
 
@@ -448,200 +448,167 @@ async def close_card(pilot, app, n=30):
     return False
 
 
-async def t_working_remembered():
-    print("3.1 what the board remembers")
+async def open_card(pilot, app, row_id, n=30):
+    """Put the cursor on a row and open its card."""
+    await select(pilot, app, row_id)
+    await pilot.press("enter")
+    for _ in range(n):
+        await pilot.pause()
+        if card(app) is not None:
+            return True
+    return False
+
+
+@contextmanager
+def calendar_showing(title="a meeting"):
+    """Put one event on today, and take it away again.
+
+    The fetch is replaced rather than a calendar read: this machine has no
+    grant to read one, and a suite that needed it would pass or fail by whose
+    machine ran it.
+    """
+    saved = ical.fetch
+    at = datetime.combine(TODAY, time_of_day(9, 0))
+    ical.fetch = lambda cfg, day: [ical.Event(
+        title=title, account="Me", calendar="c", start=at,
+        end=at + timedelta(hours=1), all_day=False)]
+    try:
+        yield
+    finally:
+        ical.fetch = saved
+
+
+def a_thread(subject="a thread nobody wrote", ident="m1"):
+    when = datetime.combine(TODAY, time_of_day(8, 0)).astimezone(TZ)
+    return mail.Thread((mail.Message(
+        sender="s@example.invalid", subject=subject, when=when, ident=ident,
+        answers=None, body="", text=subject, folder="Feed", key="k1"),))
+
+
+def mixed(calendar=False, threads=()):
+    """A board carrying a row of more than one kind."""
+    app = build([issue("AAA-1", versions=("1.2",))],
+                tasks=[mk("T-1", "a task of my own", TODAY)])
+    app.calendar_config = ical.Config(work="W", personal=("Me",)) if calendar else None
+    app.mail_threads = list(threads)
+    return app
+
+
+async def t_counts_on_any_row():
+    print("3.5 every card counts, whatever row it was opened on")
+    with calendar_showing():
+        app = mixed(calendar=True, threads=[a_thread()])
+        async with app.run_test() as pilot:
+            await settle(pilot, app)
+            event = next((t.id for t in app.tasks if app.is_event(t)), None)
+            chk("the day carries an event to open a card on", event is not None)
+            with clock(datetime(2099, 3, 4, 14, 3, tzinfo=TZ)):
+                for what, row in (("a task the board manages", "T-1"),
+                                  ("a tracker issue", "yt:AAA-1"),
+                                  ("a calendar event", event)):
+                    chk(f"the card opens on {what}",
+                        row is not None and await open_card(pilot, app, row))
+                    line = since_line(app)
+                    chk(f"and counts from the moment it opened -- {what}",
+                        line == "since 14:03  ·  0m", repr(line))
+                    chk(f"the card closes again -- {what}",
+                        await close_card(pilot, app))
+                # Mail belongs to the inbox, which is where its row is drawn.
+                await pilot.press("i")
+                await settle(pilot, app)
+                thread_row = next((t.id for t in app.tasks if app.is_mail(t)), None)
+                chk("the inbox carries a mail row", thread_row is not None)
+                chk("the card opens on a mail thread",
+                    thread_row is not None and await open_card(pilot, app, thread_row))
+                line = since_line(app)
+                chk("and counts there too, no row exempt",
+                    line == "since 14:03  ·  0m", repr(line))
+                await close_card(pilot, app)
+
+
+async def t_coming_back_starts_again():
+    print("3.6 coming back to a card starts the count again")
+    app = mixed()
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        with clock(datetime(2099, 3, 4, 14, 0, tzinfo=TZ)) as state:
+            chk("the card opens", await open_card(pilot, app, "T-1"))
+            line = since_line(app)
+            chk("and starts at nothing", line == "since 14:00  ·  0m", repr(line))
+            state["now"] = datetime(2099, 3, 4, 14, 20, tzinfo=TZ)
+            # Drawn when the card was built, so it reads the old minute until
+            # the card's own timer redraws it.  That is what is called here.
+            card(app).keep_up()
+            await pilot.pause()
+            line = since_line(app)
+            chk("twenty minutes later the open card says so",
+                line == "since 14:00  ·  20m", repr(line))
+            chk("the card closes", await close_card(pilot, app))
+            state["now"] = datetime(2099, 3, 4, 14, 25, tzinfo=TZ)
+            chk("the card opens again", await open_card(pilot, app, "T-1"))
+            line = since_line(app)
+            chk("and counts from the second opening, not the first",
+                line == "since 14:25  ·  0m", repr(line))
+            await close_card(pilot, app)
+
+
+async def t_workspace_counts_like_the_rest():
+    print("3.7 the key that starts a workspace counts like any other")
     app = build([issue("AAA-1", versions=("1.2",))])
     async with app.run_test() as pilot:
         await settle(pilot, app)
-        chk("nothing is being worked on to begin with", app.working is None,
-            repr(app.working))
-        await start(pilot, app, "yt:AAA-1")
-        chk("after starting, one thing is", app.working is not None)
-        chk("and it is the row the workspace was started for",
-            app.working and app.working[0] == "yt:AAA-1", repr(app.working))
-
-    print("3.2 the card opens on what was started")
-    app = build([issue("AAA-1", versions=("1.2",)),
-                 issue("AAA-2", versions=("1.2",))])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        await start(pilot, app, "yt:AAA-2")
-        for _ in range(40):
-            await pilot.pause()
-            if card(app) is not None:
-                break
-        chk("the card is shown", card(app) is not None)
-        chk("on the issue just started",
-            card(app) is not None and card(app).shown_task.id == "yt:AAA-2",
-            card(app) and card(app).shown_task.id)
-        chk("and it says since when", since_line(app) is not None, since_line(app))
-        chk("escape closes it", await close_card(pilot, app))
-        chk("leaving the row it was opened from selected",
-            app._selected_id == "yt:AAA-2", repr(app._selected_id))
-
-    print("3.3 nothing started, nothing shown")
-    app = build([issue("AAA-1", versions=("1.2",))])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        await select(pilot, app, "yt:AAA-1")
-        await pilot.press("W")
-        await prompt_open(pilot, app)
-        await pilot.press("escape")          # left the prompt
-        for _ in range(30):
-            await pilot.pause()
-        chk("leaving the prompt opens no card", card(app) is None)
-        chk("and nothing is being worked on", app.working is None, repr(app.working))
-
-    app = build([issue("AAA-1", versions=("1.2",))])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        # Driven by hand rather than through `start`, which installs a launcher
-        # of its own and would undo the failure this case is about.
-        failing(app, FileNotFoundError("no such program"))
-        await select(pilot, app, "yt:AAA-1")
-        await pilot.press("W")
-        await prompt_open(pilot, app)
-        await pilot.press("enter")
-        for _ in range(40):
-            await pilot.pause()
-            if not isinstance(app.screen, TaskInput):
-                break
-        for _ in range(20):
-            await pilot.pause()
-        chk("a program that cannot be started opens no card", card(app) is None)
-        chk("and nothing is being worked on", app.working is None, repr(app.working))
-        chk("and the board still says why",
-            "Could not start" in drawn(app), drawn(app))
+        with clock(datetime(2099, 3, 4, 14, 3, tzinfo=TZ)):
+            opened, _prefilled, started = await start(pilot, app, "yt:AAA-1")
+            chk("the prompt was answered and the program started",
+                opened and len(started) == 1, repr(started))
+            for _ in range(40):
+                await pilot.pause()
+                if card(app) is not None:
+                    break
+            by_key = since_line(app)
+            chk("the card it opens counts from that moment",
+                by_key == "since 14:03  ·  0m", repr(by_key))
+            chk("the card closes", await close_card(pilot, app))
+            chk("the same row opens by hand",
+                await open_card(pilot, app, "yt:AAA-1"))
+            by_hand = since_line(app)
+            chk("and says exactly what the other key's card said",
+                by_hand == by_key, f"{by_hand!r} vs {by_key!r}")
+            await close_card(pilot, app)
 
 
-async def t_working_one_at_a_time():
-    print("3.4 starting another replaces the first")
-    app = build([issue("AAA-1", versions=("1.2",)), issue("AAA-2", versions=("1.2",))])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        await start(pilot, app, "yt:AAA-1")
-        await close_card(pilot, app)
-        first = app.working
-        await start(pilot, app, "yt:AAA-2")
-        await close_card(pilot, app)
-        chk("the second is what is being worked on",
-            app.working and app.working[0] == "yt:AAA-2", repr(app.working))
-        chk("and it is not the first any more", app.working != first)
-        await select(pilot, app, "yt:AAA-1")
-        await pilot.press("enter")
-        for _ in range(30):
-            await pilot.pause()
-            if card(app) is not None:
-                break
-        chk("the first issue's card says nothing about time worked",
-            since_line(app) is None, since_line(app))
-        await close_card(pilot, app)
-
-    print("3.5 starting again restarts the count")
-    app = build([issue("AAA-1", versions=("1.2",))])
+async def t_nothing_is_added_up():
+    print("3.8 nothing is carried from one card to the next")
+    app = mixed()
     async with app.run_test() as pilot:
         await settle(pilot, app)
         with clock(datetime(2099, 3, 4, 9, 0, tzinfo=TZ)) as state:
-            await start(pilot, app, "yt:AAA-1")
-            await close_card(pilot, app)
-            state["now"] = datetime(2099, 3, 4, 11, 30, tzinfo=TZ)
-            await select(pilot, app, "yt:AAA-1")
-            await pilot.press("enter")
-            for _ in range(30):
-                await pilot.pause()
-                if card(app) is not None:
-                    break
-            chk("two and a half hours in, the card says so",
-                since_line(app), "since 09:00  ·  2h 30m")
-            await close_card(pilot, app)
-            await start(pilot, app, "yt:AAA-1")
-            for _ in range(40):
-                await pilot.pause()
-                if card(app) is not None:
-                    break
-            chk("starting again counts from the second start",
-                since_line(app), "since 11:30  ·  0m")
-
-
-async def t_working_shown():
-    print("3.6 the line is the same whichever key opened the card")
-    app = build([issue("AAA-1", versions=("1.2",))])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        with clock(datetime(2099, 3, 4, 14, 3, tzinfo=TZ)) as state:
-            await start(pilot, app, "yt:AAA-1")
-            for _ in range(40):
-                await pilot.pause()
-                if card(app) is not None:
-                    break
-            state["now"] = datetime(2099, 3, 4, 14, 45, tzinfo=TZ)
-            started_with = since_line(app)
-            # Drawn when the card was built, so it still reads the old minute
-            # until the card's own timer redraws it -- which is 3.8.
-            card(app).keep_up()
-            await pilot.pause()
-            started_with = since_line(app)
-            chk("starting work shows when it began and how long ago",
-                started_with, "since 14:03  ·  42m")
-            await close_card(pilot, app)
-            await select(pilot, app, "yt:AAA-1")
-            await pilot.press("enter")
-            for _ in range(30):
-                await pilot.pause()
-                if card(app) is not None:
-                    break
-            chk("and the key that opens a card on any row says the same",
-                since_line(app), started_with)
-            await close_card(pilot, app)
-
-    print("3.7 any other row says nothing")
-    app = build([issue("AAA-1", versions=("1.2",))],
-                tasks=[mk("T-1", "a task of my own", TODAY)])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        await start(pilot, app, "yt:AAA-1")
-        await close_card(pilot, app)
-        await select(pilot, app, "T-1")
-        await pilot.press("enter")
-        for _ in range(30):
-            await pilot.pause()
-            if card(app) is not None:
-                break
-        chk("a card on another row is shown", card(app) is not None)
-        chk("with no line about time worked at all",
-            since_line(app) is None, since_line(app))
-        chk("not an empty one, and not a zero",
-            card(app) is not None and not card(app).query("#focus-since"))
-        await close_card(pilot, app)
-
-    print("3.8 the count keeps up with the clock")
-    app = build([issue("AAA-1", versions=("1.2",))])
-    async with app.run_test() as pilot:
-        await settle(pilot, app)
-        with clock(datetime(2099, 3, 4, 8, 0, tzinfo=TZ)) as state:
-            await start(pilot, app, "yt:AAA-1")
-            for _ in range(40):
-                await pilot.pause()
-                if card(app) is not None:
-                    break
-            chk("the card carries a timer of its own",
-                card(app) is not None and card(app)._worked_timer is not None)
-            chk("reading nothing yet", since_line(app), "since 08:00  ·  0m")
-            state["now"] = datetime(2099, 3, 4, 8, 7, tzinfo=TZ)
-            card(app).keep_up()
-            await pilot.pause()
-            chk("and it advances with no key pressed",
-                since_line(app), "since 08:00  ·  7m")
-            shown = card(app)
-            chk("the timer is given up when the card closes",
-                await close_card(pilot, app) and shown._worked_timer is None)
+            seen = []
+            for hour, minute in ((9, 0), (9, 30), (9, 55)):
+                state["now"] = datetime(2099, 3, 4, hour, minute, tzinfo=TZ)
+                chk(f"the card opens at {hour:02d}:{minute:02d}",
+                    await open_card(pilot, app, "T-1"))
+                seen.append(since_line(app))
+                chk(f"and closes again at {hour:02d}:{minute:02d}",
+                    await close_card(pilot, app))
+            chk("each opening counts from itself alone",
+                seen == ["since 09:00  ·  0m", "since 09:30  ·  0m",
+                         "since 09:55  ·  0m"], repr(seen))
+        held = vars(app)
+        for name in ("working", "worked", "since", "total"):
+            chk(f"the board holds no attribute called {name!r}",
+                name not in held)
+        chk("and the only working- name left is the working hours",
+            [k for k in held if k.startswith("working")] == ["working_window"],
+            repr([k for k in held if k.startswith("working")]))
 
 
 t_reader_absent()
 t_no_shell()
 for fn in (t_row_carries, t_refusals, t_command_line, t_leaving,
            t_shell_characters, t_cannot_start, t_writes_nothing, t_named,
-           t_working_remembered, t_working_one_at_a_time, t_working_shown):
+           t_counts_on_any_row, t_coming_back_starts_again,
+           t_workspace_counts_like_the_rest, t_nothing_is_added_up):
     asyncio.run(fn())
 
 print(f"\n{sum(ok)}/{len(ok)} checks passed")

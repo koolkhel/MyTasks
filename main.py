@@ -801,18 +801,18 @@ class TaskFocus(ModalScreen[None]):
     # Deliberately not `task` or `_task`: `Screen` exposes a read-only `task`
     # property, and `_task` is the message-pump coroutine MessagePump sets in
     # its own __init__ -- assigning over either breaks the screen.
-    def __init__(self, task: Task, when: str, project: str, tz,
-                 since: "datetime | None" = None):
+    def __init__(self, task: Task, when: str, project: str, tz):
         super().__init__()
         self.shown_task = task
         self.shown_when = when
         self.shown_project = project
         self.shown_tz = tz
-        #: When work on this row began, where it is the row being worked on.
-        #: Optional, and the card draws nothing for it when it is absent --
-        #: which is what keeps every existing caller, and the suite that
-        #: builds this card directly, working unchanged.
-        self.shown_since = since
+        #: When this card opened, which is the whole of what it counts.
+        #: Recorded here rather than at mount because `compose` draws the
+        #: line that reads it and runs first, so a card has a start at every
+        #: moment anything can ask for one.  Nobody passes it in: a caller
+        #: able to supply a start is a caller able to get it wrong.
+        self.shown_since = datetime.now(tz)
         self._worked_timer = None
 
     def compose(self) -> ComposeResult:
@@ -833,8 +833,7 @@ class TaskFocus(ModalScreen[None]):
             if task.pinned:
                 facts.append("pinned")
             yield Static("  ·  ".join(facts), id="focus-facts")
-            if self.shown_since is not None:
-                yield Static(self.worked_line(), id="focus-since")
+            yield Static(self.worked_line(), id="focus-since")
             note = task.note_text
             if note:
                 # Escaped, as the pane below the list escapes it and for the
@@ -847,9 +846,9 @@ class TaskFocus(ModalScreen[None]):
             yield Label("esc to close", id="dialog-hint")
 
     def worked_line(self) -> str:
-        """When work began and how long ago that was.
+        """When this card opened and how long ago that was.
 
-        "since", not "worked": this counts the clock, not the effort.  A board
+        "since", not "worked": this counts the clock, not the effort.  A card
         left open overnight, a lunch and a closed laptop all pass unnoticed,
         and a word that claimed otherwise would be the card lying about what
         it knows.
@@ -866,9 +865,8 @@ class TaskFocus(ModalScreen[None]):
         opened just before one would jump a minute at once and then sit still
         for the rest of another.
         """
-        if self.shown_since is not None:
-            self._worked_timer = self.set_interval(
-                WORKED_TICK_SECONDS, self.keep_up)
+        self._worked_timer = self.set_interval(
+            WORKED_TICK_SECONDS, self.keep_up)
 
     def on_unmount(self) -> None:
         if self._worked_timer is not None:
@@ -1501,28 +1499,6 @@ class TaskApp(App[None]):
         #: The program that makes a workspace, when one is configured.  A
         #: path the board execs, never a command line it interprets.
         self.workspace_command: str | None = singularity.load_workspace_command()
-        #: What work has been started on, and when: the row's id and the
-        #: moment its program was launched.
-        #:
-        #: One pair rather than a map from row to moment.  A person works on
-        #: one thing at a time, and a board holding several would have to
-        #: draw and explain a state that is true of nobody.  Starting on
-        #: another row replaces this; starting again on the same row begins
-        #: the count again, because pressing the key is somebody saying that
-        #: work starts now.
-        #:
-        #: Held here and written nowhere, so a board started again shows no
-        #: count even for work still going on.  That is undertaken rather
-        #: than regretted: a record of time worked that survives restarts is
-        #: a different thing to promise, and half-keeping it here would be
-        #: the wrong half of it.
-        #:
-        #: `working`: checked against `App` and `ModalScreen` before it was
-        #: named, and on neither.  This file has been caught twice by a name
-        #: that was already the framework's -- `_closing`, which is Textual's
-        #: own message-pump flag, and a `mail_failed` attribute that shadowed
-        #: the method of that name.
-        self.working: "tuple[str, datetime] | None" = None
         self.working_window: singularity.WorkingWindow | None = None
         self.window_error: str | None = None
         try:
@@ -4557,24 +4533,14 @@ class TaskApp(App[None]):
             return
         self.show_focus(task)
 
-    def working_since(self, task: Task | None) -> "datetime | None":
-        """When work on this row began, or None where it is not the one.
-
-        The comparison lives here rather than in the card: the app knows what
-        is being worked on, the card knows how to draw what it is given, and
-        keeping the two apart is what makes the line the same whichever key
-        opened the card.
-        """
-        if task is None or self.working is None:
-            return None
-        row, began = self.working
-        return began if row == task.id else None
-
     def show_focus(self, task: Task) -> None:
-        """Open the card on a row, saying since when if it is the one.
+        """Open the card on a row.
 
         One place builds it, so the key that opens a card on any row and the
-        key that starts work cannot drift into showing different cards.
+        key that starts work cannot drift into showing different cards.  The
+        card counts its own sitting from the moment it is built; nothing here
+        tells it when to start, which is what leaves no second opinion about
+        it to be wrong.
         """
         self.push_screen(
             TaskFocus(
@@ -4582,7 +4548,6 @@ class TaskApp(App[None]):
                 task.start_label(self.tz),
                 self.projects.get(task.project_id or "", ""),
                 self.tz,
-                self.working_since(task),
             )
         )
 
@@ -4695,15 +4660,13 @@ class TaskApp(App[None]):
                 f"Could not start {self.workspace_command}: "
                 f"{type(exc).__name__}", True)
             return
-        # After the program is away, and not before: an abandoned prompt or a
-        # program that could not be started leaves what is being worked on
-        # exactly as it was.  Both of those returned above.
-        self.working = (task.id, datetime.now(self.tz))
         self.set_status(f"Starting a workspace for {key} at {version}")
-        # And the card, on the thing just started.  Starting work is the one
-        # moment the board is told what is being worked on, and somebody who
-        # has just said so should be looking at it rather than at the list
-        # they were reading before.
+        # And the card, on the thing just started -- after the program is
+        # away and not before, so an abandoned prompt or a program that could
+        # not be started opens nothing.  Both of those returned above.
+        # Somebody who has just said what they are starting should be looking
+        # at it rather than at the list they were reading before.  The card
+        # counts because every card counts, not because this key opened it.
         self.show_focus(task)
 
     def launch(self, argv: list[str]) -> None:

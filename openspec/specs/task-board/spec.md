@@ -262,6 +262,7 @@ neither sends anything to the tracker, and neither changes the issue.
 
 - **WHEN** a person opens a tracker issue or starts a workspace from it
 - **THEN** no request is sent to the tracker, and the issue is exactly as it was
+
 ### Requirement: An issue's version
 
 The board SHALL read from each tracker issue the version it is against, taken
@@ -769,9 +770,19 @@ The focus view SHALL show a note as the characters it contains, by the same rule
 
 - **WHEN** the selected task's note contains square brackets or text that reads as markup and a person opens the focus view
 - **THEN** every character of it appears there, and no styling comes from it
+
 ### Requirement: The focus view changes nothing
 
-Opening, viewing, or dismissing the focus view SHALL leave the task exactly as it was, and SHALL send no request that modifies anything. In particular the key that opens the focus view SHALL NOT also tick the task, so a task cannot be completed by looking at it.
+Opening, viewing, or dismissing the focus view SHALL leave the task exactly as
+it was, and SHALL send no request that modifies anything. In particular the key
+that opens the focus view SHALL NOT also tick the task, so a task cannot be
+completed by looking at it.
+
+The count the card shows is not an exception to this. It is the card's own
+reading of the clock, kept while the card is open and gone when it closes: no
+request carries it, nothing on the row records it, and a row whose card has
+been opened is byte for byte the row it was. A person who opens a card to read
+a long title has changed nothing by doing so, however long they leave it open.
 
 #### Scenario: Opening the focus view does not complete the task
 
@@ -787,6 +798,11 @@ Opening, viewing, or dismissing the focus view SHALL leave the task exactly as i
 
 - **WHEN** a person wants to tick the selected task
 - **THEN** an action distinct from the one that opens the focus view does it
+
+#### Scenario: Counting is not a change
+
+- **WHEN** a person leaves a card open on a task for a long time and dismisses it
+- **THEN** no request has been sent, and the task is exactly as it was before the card opened
 
 ### Requirement: Today shows what is past due
 
@@ -967,6 +983,7 @@ except on screen.
 
 - **WHEN** the bar is drawn and one of the keys it names is a character the display treats as styling
 - **THEN** the row on screen shows that character followed by its label, and no part of the bar's own styling appears as text
+
 ### Requirement: A task's link is recognised and readable
 
 The board SHALL recognise a link written in a task's title or in its note, whether stored as an HTML anchor or written as a plain `http` or `https` address. Where a title holds an anchor, the board SHALL show the anchor's readable text in place of the stored markup, so no row or card ever displays raw HTML. The surrounding words of the title SHALL be preserved. An address written without a scheme SHALL be understood as `https`.
@@ -1659,6 +1676,7 @@ Where the mode is off, the board SHALL say nothing about it.
 
 - **WHEN** work is hidden by a press inside the window
 - **THEN** the board reports the count as it always has and names no boundary, because none is doing it
+
 ### Requirement: Which project counts as work is configured, not built in
 
 The board SHALL take the identity of the work project from its environment rather than carrying it in its own source, so that a personal project identifier need never enter the repository.
@@ -3088,6 +3106,7 @@ opening nothing — as every other key that would change such a row does.
 
 - **WHEN** a person presses the note key with a tracker issue selected
 - **THEN** no editor opens, nothing is written, and the board says the issue lives in the tracker
+
 ### Requirement: Choosing among several things a task can open
 
 Where the selected task offers more than one thing to open, the board SHALL
@@ -3135,6 +3154,7 @@ has no link.
 
 - **WHEN** a task offers exactly one thing to open
 - **THEN** it is opened at once and nothing is asked
+
 ### Requirement: The board shows the current time
 
 The board SHALL show the current time, at the right of its own header, and
@@ -3239,6 +3259,7 @@ fetch anything to decide it.
 
 - **WHEN** time passes and no event's end has been crossed
 - **THEN** no row is redrawn, and the selected row is where it was
+
 ### Requirement: The board reads named folders from a directory of maildirs
 
 The board SHALL read messages from the folders named in the environment,
@@ -3748,6 +3769,7 @@ they can do; mail moved with no record of it is work lost, which they cannot.
 
 - **WHEN** some of a row's messages have been archived and confirmed and then the connection is lost
 - **THEN** those messages stay archived, the row is reported as failed, and nothing is moved back to make the report tidy
+
 ### Requirement: A mail thread can be turned into a task
 
 The board SHALL let a person turn the selected mail thread into a task on
@@ -4646,64 +4668,68 @@ are configured separately and either may be set up alone.
 - **WHEN** the board's source and its specification are read
 - **THEN** neither names an address, a mailbox, a folder of a real account, or a credential
 
-### Requirement: The board shows what is being worked on and since when
+### Requirement: The card counts the sitting
 
-The board SHALL remember one thing being worked on and the moment that began.
-Starting work on something else SHALL replace both: one at a time, because a
-person works on one thing at a time and a board holding several would be
-describing a wish rather than a fact. Starting work again on the same thing
-SHALL begin the count again, because pressing the key is the person saying
-that work is starting now.
+A card SHALL say, for whatever row it was opened on, the moment it opened and
+how long ago that was. It SHALL do so for every row alike -- a task, a tracker
+issue, a mail thread, a calendar event -- because the card is where a person is
+while they are on something, and no kind of row is exempt from being the thing
+somebody is on.
 
-Where a card is shown for the thing being worked on, it SHALL say when that
-began and how long ago that was. It SHALL do so however the card was opened:
-the fact belongs to the thing, not to the key that reached it. A card for
-anything else SHALL say nothing about time worked, rather than saying zero.
+The count SHALL begin when the card opens and SHALL end when it is dismissed.
+Opening the card again SHALL begin a new count. Leaving the card is leaving the
+thing: a person who has come back has come back to start again, and a count
+that carried across the gap would be counting the walk to the kitchen.
 
-What is shown SHALL be the time elapsed since work began, and the board SHALL
-NOT present it as effort. A board left open overnight, a lunch, and a closed
-laptop all pass unnoticed, so the count answers "since when" and not "how
-hard". The wording SHALL make that plain.
+No key that opens a card SHALL count differently from any other. In particular
+the key that starts a workspace SHALL count because the card it opens counts,
+not because that key is special.
 
-The count SHALL keep up with the clock while the card is open, without a
-person doing anything to refresh it.
+What is shown SHALL be time elapsed, and the board SHALL NOT present it as
+effort. A card left open overnight, a lunch and a closed laptop all pass
+unnoticed, so the count answers "since when" and not "how hard". The wording
+SHALL make that plain.
 
-None of this SHALL be written down. The board SHALL forget what was being
-worked on when it stops, and a board started again SHALL show no count even
-for work that is still going on. An accumulated record of time worked is a
-different undertaking and SHALL NOT be inferred from this one.
+The count SHALL keep up with the clock while the card is open, without a person
+doing anything to refresh it.
+
+Nothing about it SHALL be written down or added up. No total SHALL be kept for
+a row, for a day, or for anything else, on disk or in memory, and the board
+SHALL NOT remember after a card is dismissed that it was ever open. An
+accumulated record of time spent is a different undertaking and SHALL NOT be
+inferred from this one.
 
 #### Scenario: The card says since when
 
-- **WHEN** work has been started on something and its card is shown
-- **THEN** the card says when work began and how long ago that was
+- **WHEN** a card is opened on any row
+- **THEN** it says the time it opened and how long ago that was
 
 #### Scenario: The count keeps up
 
-- **WHEN** the card for the thing being worked on stays open across a minute boundary
+- **WHEN** a card stays open across a minute boundary
 - **THEN** the elapsed time it shows advances without anything being pressed
 
-#### Scenario: Another row says nothing
+#### Scenario: Every kind of row counts
 
-- **WHEN** a card is opened on a row that is not the thing being worked on
-- **THEN** it says nothing about time worked, and shows neither a zero nor an empty line
+- **WHEN** a card is opened on a mail thread or on a calendar event
+- **THEN** it counts exactly as it does for a task the board manages
 
-#### Scenario: Opened by either key
+#### Scenario: Coming back starts again
 
-- **WHEN** the thing being worked on is reached by the key that opens a card on any row
-- **THEN** its card carries the same account of when work began as it would have shown when work started
+- **WHEN** a card is dismissed and opened again on the same row
+- **THEN** the count begins from that moment, not from when it was first opened
 
-#### Scenario: One thing at a time
+#### Scenario: Starting a workspace is no different
 
-- **WHEN** work is started on a second thing
-- **THEN** the first is no longer the thing being worked on, and its card says nothing about time worked
+- **WHEN** a workspace is started and the card opens on that issue
+- **THEN** the count begins then, exactly as it would have had the card been opened by hand
 
-#### Scenario: Starting again restarts the count
+#### Scenario: A second card does not disturb a first
 
-- **WHEN** work is started again on the thing already being worked on
-- **THEN** the count begins from that moment
+- **WHEN** a card is opened on one row, dismissed, and a card opened on another
+- **THEN** the second counts from when it opened, and the board holds nothing about the first
 
-#### Scenario: A restarted board remembers nothing
+#### Scenario: Nothing is added up
 
-- **WHEN** the board is stopped and started again while work is still going on
-- **THEN** no card shows a count, and nothing on disk records that work had begun
+- **WHEN** cards have been opened and dismissed several times
+- **THEN** the board holds no total for any row, and nothing on disk records that any card was open
