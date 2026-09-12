@@ -24,20 +24,18 @@ nobody has diagnosed it, that is what it says.
 #: minutes earlier as a known one, and the run as green.
 KNOWN = {
     "t_top6": (1, "1 of 11: reads live tracker issues and their order; not diagnosed"),
-    "t_place": ("crash:RuntimeError",
-                "a task it created is not found on the board; not diagnosed"),
-    "t_perf": ("crash:RuntimeError",
-               "a task it created is not found on the board; not diagnosed"),
-    "t_undo6": ("crash:RuntimeError",
-                "a task it created is not found on the board; not diagnosed"),
-    "t_work6": ("crash:RuntimeError",
-                "a task it created is not found on the board; not diagnosed"),
 }
 
-#: The four crashers above fail the same way -- a task they created on a
-#: far-future probe day is not on the board -- which looks like one cause
-#: rather than four. It predates the change that imported them, so it is
-#: recorded here rather than chased, but it is one thread and not four.
+#: Resolved: four crashers came off this list on 2026-09-12. t_place,
+#: t_perf, t_undo6 and t_work6 were each listed as "crash:RuntimeError -- a
+#: task it created is not found on the board; not diagnosed", and the four
+#: looked like one cause rather than four. All four pass. Run twice each
+#: directly and once through the runner: t_place 20/20, t_perf 5/5,
+#: t_undo6 11/11, t_work6 16/16, no throttles, nothing left on the account.
+#: Nobody diagnosed the crash; it stopped happening, which is not the same
+#: thing. The entries went for passing rather than for being inconvenient,
+#: and going is the point: a listed suite that crashes again now reports as
+#: a new failure instead of matching a signature nobody has revisited.
 
 #: Two suites that had been failing all along turned out to be counting
 #: calendar rows against a capture of tasks, and were repaired rather than

@@ -86,18 +86,35 @@ check("timed label", ev("x", 9).label, "09:00")
 
 print("an account that is not on the machine is reported, not passed over")
 import datetime as _dt
-try:
-    ical.fetch(ical.Config(work="NoSuchAccountHere", personal=()), _dt.date.today())
-    check("a missing account raises", False, True)
-except ical.CalendarUnreadable as exc:
-    check("a missing account is named", "NoSuchAccountHere" in str(exc), True)
-try:
-    ical.fetch(ical.Config(work=REAL.work, personal=("AlsoMissing",)), _dt.date.today())
-    check("one missing among real ones still raises", False, True)
-except ical.CalendarUnreadable as exc:
-    check("only the missing one is named",
-          ("AlsoMissing" in str(exc), REAL.work in str(exc)), (True, False))
+# Alone in this file, these two need a calendar the system will really let
+# this process read.  Ask before asserting, and ask with _status(), which is
+# only a question: going through _store() instead would wait out the access
+# timeout on a machine that has not been asked yet, and raise the permission
+# dialog at whoever is running the suites.
+#
+# Without the grant, fetch refuses inside _store() -- before the account
+# matching these two are about is reached at all.  Reading that refusal as a
+# result would report the machine's answer as the board's.
+_skipped = 0
+if ical._status() != ical._FULL_ACCESS:
+    _skipped = 2
+    print("  skip  2 checks: the system has not granted this process access "
+          "to the calendar, so there is no account list to match against")
+else:
+    try:
+        ical.fetch(ical.Config(work="NoSuchAccountHere", personal=()), _dt.date.today())
+        check("a missing account raises", False, True)
+    except ical.CalendarUnreadable as exc:
+        check("a missing account is named", "NoSuchAccountHere" in str(exc), True)
+    try:
+        ical.fetch(ical.Config(work=REAL.work, personal=("AlsoMissing",)), _dt.date.today())
+        check("one missing among real ones still raises", False, True)
+    except ical.CalendarUnreadable as exc:
+        check("only the missing one is named",
+              ("AlsoMissing" in str(exc), REAL.work in str(exc)), (True, False))
 
 print()
-print(f"{sum(ok)}/{len(ok)} checks passed")
+# The total counts what ran, never what was meant to run.
+_note = f" ({_skipped} skipped: no calendar access)" if _skipped else ""
+print(f"{sum(ok)}/{len(ok)} checks passed{_note}")
 sys.exit(0 if all(ok) else 1)
