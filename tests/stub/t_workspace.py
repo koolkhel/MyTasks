@@ -6,6 +6,7 @@ the board's own launch method is replaced, and a check proves it is the only
 way through.
 """
 import sys, asyncio
+from contextlib import contextmanager
 import os as _os
 # Where this suite is, and therefore where its neighbours and the board are.
 # Nothing here may name an absolute path: the suites were unrunnable anywhere
@@ -396,10 +397,251 @@ async def t_named():
             "WORKSPACE_COMMAND" in M.Help.TEXT)
 
 
+# ------------------------------------------- what is being worked on, and since when
+@contextmanager
+def clock(at):
+    """Make the board believe it is `at`, and let a check move it.
+
+    The same seam `t_elapsed` uses -- `main.datetime` rebound to a subclass
+    whose `now` answers what the check says -- with the answer held in a dict
+    so a check can advance it without leaving the board.
+
+    Only the board's clock moves.  Nothing here waits for a real minute to
+    pass: the card is asked to redraw, which is what its own timer does.
+    """
+    real = M.datetime
+    state = {"now": at}
+
+    class Frozen(real):
+        @classmethod
+        def now(cls, tz=None):
+            value = state["now"]
+            return value.astimezone(tz) if tz is not None else value
+
+    M.datetime = Frozen
+    try:
+        yield state
+    finally:
+        M.datetime = real
+
+
+def card(app):
+    """The card on top, or None where the board is showing the list."""
+    return app.screen if isinstance(app.screen, M.TaskFocus) else None
+
+
+def since_line(app):
+    """What the card says about time worked, or None where it says nothing."""
+    top = card(app)
+    if top is None:
+        return None
+    found = next(iter(top.query("#focus-since")), None)
+    return None if found is None else str(found.visual.plain)
+
+
+async def close_card(pilot, app, n=30):
+    await pilot.press("escape")
+    for _ in range(n):
+        await pilot.pause()
+        if card(app) is None:
+            return True
+    return False
+
+
+async def t_working_remembered():
+    print("3.1 what the board remembers")
+    app = build([issue("AAA-1", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        chk("nothing is being worked on to begin with", app.working is None,
+            repr(app.working))
+        await start(pilot, app, "yt:AAA-1")
+        chk("after starting, one thing is", app.working is not None)
+        chk("and it is the row the workspace was started for",
+            app.working and app.working[0] == "yt:AAA-1", repr(app.working))
+
+    print("3.2 the card opens on what was started")
+    app = build([issue("AAA-1", versions=("1.2",)),
+                 issue("AAA-2", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        await start(pilot, app, "yt:AAA-2")
+        for _ in range(40):
+            await pilot.pause()
+            if card(app) is not None:
+                break
+        chk("the card is shown", card(app) is not None)
+        chk("on the issue just started",
+            card(app) is not None and card(app).shown_task.id == "yt:AAA-2",
+            card(app) and card(app).shown_task.id)
+        chk("and it says since when", since_line(app) is not None, since_line(app))
+        chk("escape closes it", await close_card(pilot, app))
+        chk("leaving the row it was opened from selected",
+            app._selected_id == "yt:AAA-2", repr(app._selected_id))
+
+    print("3.3 nothing started, nothing shown")
+    app = build([issue("AAA-1", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        await select(pilot, app, "yt:AAA-1")
+        await pilot.press("W")
+        await prompt_open(pilot, app)
+        await pilot.press("escape")          # left the prompt
+        for _ in range(30):
+            await pilot.pause()
+        chk("leaving the prompt opens no card", card(app) is None)
+        chk("and nothing is being worked on", app.working is None, repr(app.working))
+
+    app = build([issue("AAA-1", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        # Driven by hand rather than through `start`, which installs a launcher
+        # of its own and would undo the failure this case is about.
+        failing(app, FileNotFoundError("no such program"))
+        await select(pilot, app, "yt:AAA-1")
+        await pilot.press("W")
+        await prompt_open(pilot, app)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            if not isinstance(app.screen, TaskInput):
+                break
+        for _ in range(20):
+            await pilot.pause()
+        chk("a program that cannot be started opens no card", card(app) is None)
+        chk("and nothing is being worked on", app.working is None, repr(app.working))
+        chk("and the board still says why",
+            "Could not start" in drawn(app), drawn(app))
+
+
+async def t_working_one_at_a_time():
+    print("3.4 starting another replaces the first")
+    app = build([issue("AAA-1", versions=("1.2",)), issue("AAA-2", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        await start(pilot, app, "yt:AAA-1")
+        await close_card(pilot, app)
+        first = app.working
+        await start(pilot, app, "yt:AAA-2")
+        await close_card(pilot, app)
+        chk("the second is what is being worked on",
+            app.working and app.working[0] == "yt:AAA-2", repr(app.working))
+        chk("and it is not the first any more", app.working != first)
+        await select(pilot, app, "yt:AAA-1")
+        await pilot.press("enter")
+        for _ in range(30):
+            await pilot.pause()
+            if card(app) is not None:
+                break
+        chk("the first issue's card says nothing about time worked",
+            since_line(app) is None, since_line(app))
+        await close_card(pilot, app)
+
+    print("3.5 starting again restarts the count")
+    app = build([issue("AAA-1", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        with clock(datetime(2099, 3, 4, 9, 0, tzinfo=TZ)) as state:
+            await start(pilot, app, "yt:AAA-1")
+            await close_card(pilot, app)
+            state["now"] = datetime(2099, 3, 4, 11, 30, tzinfo=TZ)
+            await select(pilot, app, "yt:AAA-1")
+            await pilot.press("enter")
+            for _ in range(30):
+                await pilot.pause()
+                if card(app) is not None:
+                    break
+            chk("two and a half hours in, the card says so",
+                since_line(app), "since 09:00  ·  2h 30m")
+            await close_card(pilot, app)
+            await start(pilot, app, "yt:AAA-1")
+            for _ in range(40):
+                await pilot.pause()
+                if card(app) is not None:
+                    break
+            chk("starting again counts from the second start",
+                since_line(app), "since 11:30  ·  0m")
+
+
+async def t_working_shown():
+    print("3.6 the line is the same whichever key opened the card")
+    app = build([issue("AAA-1", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        with clock(datetime(2099, 3, 4, 14, 3, tzinfo=TZ)) as state:
+            await start(pilot, app, "yt:AAA-1")
+            for _ in range(40):
+                await pilot.pause()
+                if card(app) is not None:
+                    break
+            state["now"] = datetime(2099, 3, 4, 14, 45, tzinfo=TZ)
+            started_with = since_line(app)
+            # Drawn when the card was built, so it still reads the old minute
+            # until the card's own timer redraws it -- which is 3.8.
+            card(app).keep_up()
+            await pilot.pause()
+            started_with = since_line(app)
+            chk("starting work shows when it began and how long ago",
+                started_with, "since 14:03  ·  42m")
+            await close_card(pilot, app)
+            await select(pilot, app, "yt:AAA-1")
+            await pilot.press("enter")
+            for _ in range(30):
+                await pilot.pause()
+                if card(app) is not None:
+                    break
+            chk("and the key that opens a card on any row says the same",
+                since_line(app), started_with)
+            await close_card(pilot, app)
+
+    print("3.7 any other row says nothing")
+    app = build([issue("AAA-1", versions=("1.2",))],
+                tasks=[mk("T-1", "a task of my own", TODAY)])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        await start(pilot, app, "yt:AAA-1")
+        await close_card(pilot, app)
+        await select(pilot, app, "T-1")
+        await pilot.press("enter")
+        for _ in range(30):
+            await pilot.pause()
+            if card(app) is not None:
+                break
+        chk("a card on another row is shown", card(app) is not None)
+        chk("with no line about time worked at all",
+            since_line(app) is None, since_line(app))
+        chk("not an empty one, and not a zero",
+            card(app) is not None and not card(app).query("#focus-since"))
+        await close_card(pilot, app)
+
+    print("3.8 the count keeps up with the clock")
+    app = build([issue("AAA-1", versions=("1.2",))])
+    async with app.run_test() as pilot:
+        await settle(pilot, app)
+        with clock(datetime(2099, 3, 4, 8, 0, tzinfo=TZ)) as state:
+            await start(pilot, app, "yt:AAA-1")
+            for _ in range(40):
+                await pilot.pause()
+                if card(app) is not None:
+                    break
+            chk("the card carries a timer of its own",
+                card(app) is not None and card(app)._worked_timer is not None)
+            chk("reading nothing yet", since_line(app), "since 08:00  ·  0m")
+            state["now"] = datetime(2099, 3, 4, 8, 7, tzinfo=TZ)
+            card(app).keep_up()
+            await pilot.pause()
+            chk("and it advances with no key pressed",
+                since_line(app), "since 08:00  ·  7m")
+            shown = card(app)
+            chk("the timer is given up when the card closes",
+                await close_card(pilot, app) and shown._worked_timer is None)
+
+
 t_reader_absent()
 t_no_shell()
 for fn in (t_row_carries, t_refusals, t_command_line, t_leaving,
-           t_shell_characters, t_cannot_start, t_writes_nothing, t_named):
+           t_shell_characters, t_cannot_start, t_writes_nothing, t_named,
+           t_working_remembered, t_working_one_at_a_time, t_working_shown):
     asyncio.run(fn())
 
 print(f"\n{sum(ok)}/{len(ok)} checks passed")

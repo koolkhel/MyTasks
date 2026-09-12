@@ -355,6 +355,12 @@ A program with something to say SHALL have somewhere of its own to say it.
 Starting a workspace SHALL write nothing. No request SHALL be sent to the
 tracker or to the task store, and nothing about the issue SHALL change.
 
+Having started one, the board SHALL show that issue's card. Starting work is
+the one moment the board is told what is being worked on, and a person who has
+just said so should be looking at the thing rather than at the list they were
+reading before. The card SHALL be the same one the board opens on any row;
+nothing about it is special to this key except that this key opens it.
+
 #### Scenario: Starting from a tracker row
 
 - **WHEN** a person presses the key on a tracker row with a program configured
@@ -429,6 +435,17 @@ tracker or to the task store, and nothing about the issue SHALL change.
 
 - **WHEN** the program has been started
 - **THEN** the board is usable at once, and says nothing further about what the program went on to do
+
+#### Scenario: The card opens on what was started
+
+- **WHEN** a workspace is started for an issue
+- **THEN** that issue's card is shown, and dismissing it returns to the view and the row the person was on
+
+#### Scenario: Nothing started, nothing shown
+
+- **WHEN** starting a workspace is abandoned at the prompt, or the program cannot be started
+- **THEN** no card is shown, and the board reports what it reported before
+
 ### Requirement: What the workspace program is told
 
 The program SHALL be given the issue's key, its tracker project, and the
@@ -4628,3 +4645,65 @@ are configured separately and either may be set up alone.
 
 - **WHEN** the board's source and its specification are read
 - **THEN** neither names an address, a mailbox, a folder of a real account, or a credential
+
+### Requirement: The board shows what is being worked on and since when
+
+The board SHALL remember one thing being worked on and the moment that began.
+Starting work on something else SHALL replace both: one at a time, because a
+person works on one thing at a time and a board holding several would be
+describing a wish rather than a fact. Starting work again on the same thing
+SHALL begin the count again, because pressing the key is the person saying
+that work is starting now.
+
+Where a card is shown for the thing being worked on, it SHALL say when that
+began and how long ago that was. It SHALL do so however the card was opened:
+the fact belongs to the thing, not to the key that reached it. A card for
+anything else SHALL say nothing about time worked, rather than saying zero.
+
+What is shown SHALL be the time elapsed since work began, and the board SHALL
+NOT present it as effort. A board left open overnight, a lunch, and a closed
+laptop all pass unnoticed, so the count answers "since when" and not "how
+hard". The wording SHALL make that plain.
+
+The count SHALL keep up with the clock while the card is open, without a
+person doing anything to refresh it.
+
+None of this SHALL be written down. The board SHALL forget what was being
+worked on when it stops, and a board started again SHALL show no count even
+for work that is still going on. An accumulated record of time worked is a
+different undertaking and SHALL NOT be inferred from this one.
+
+#### Scenario: The card says since when
+
+- **WHEN** work has been started on something and its card is shown
+- **THEN** the card says when work began and how long ago that was
+
+#### Scenario: The count keeps up
+
+- **WHEN** the card for the thing being worked on stays open across a minute boundary
+- **THEN** the elapsed time it shows advances without anything being pressed
+
+#### Scenario: Another row says nothing
+
+- **WHEN** a card is opened on a row that is not the thing being worked on
+- **THEN** it says nothing about time worked, and shows neither a zero nor an empty line
+
+#### Scenario: Opened by either key
+
+- **WHEN** the thing being worked on is reached by the key that opens a card on any row
+- **THEN** its card carries the same account of when work began as it would have shown when work started
+
+#### Scenario: One thing at a time
+
+- **WHEN** work is started on a second thing
+- **THEN** the first is no longer the thing being worked on, and its card says nothing about time worked
+
+#### Scenario: Starting again restarts the count
+
+- **WHEN** work is started again on the thing already being worked on
+- **THEN** the count begins from that moment
+
+#### Scenario: A restarted board remembers nothing
+
+- **WHEN** the board is stopped and started again while work is still going on
+- **THEN** no card shows a count, and nothing on disk records that work had begun
