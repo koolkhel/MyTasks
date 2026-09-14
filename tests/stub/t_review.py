@@ -42,15 +42,20 @@ def check(name, got, want=True):
 
 
 def server_for(path, folders=F.FOLDERS, **kw):
-    """A server holding what the mailbox at `path` shows as unread.
+    """A server holding every message the mailbox at `path` shows.
 
-    The unread ones: those are the messages the board can ever act on, and a
-    server that also held the read ones would let a check pass on a message
-    no row stands for.
+    Whatever the board can see is whatever it can act on, and that is now the
+    whole of the folder: a message being read does not take it out of the
+    queue.  This once held the unread ones only, on the same reasoning read
+    the other way round.
     """
     held = {name: [] for name in folders}
     for message in mail.read(mail.Config(path, tuple(folders))):
-        held[message.folder].append(message.ident)
+        # Carrying the read flag the maildir has, so that what the account
+        # says about a message matches what the board read.  An undo puts
+        # that flag back, and an account where nothing was ever read could
+        # not tell a restored flag from a cleared one.
+        held[message.folder].append((message.ident, message.seen))
     held[F.ARCHIVE] = []
     return fakemail.FakeMailbox(held, **kw)
 
@@ -114,7 +119,7 @@ def made(app):
 async def folding():
     print("messages about one issue are one row")
     async with board(tracker_cfg=TRK) as (app, pilot, path, imap, _o):
-        check("the fixture's nine header threads are eight rows", len(rows(app)), 8)
+        check("the fixture's ten header threads are nine rows", len(rows(app)), 9)
         row = titled(app, "ZZA-100")
         check("the folded row stands for five messages",
               row.raw[main.MAIL_COUNT], 5)
@@ -135,14 +140,14 @@ async def folding():
         # counts -- the line's own wording is checked below, where no
         # tracker is configured.
         check("the counts report rows and messages, not rows twice",
-              (app.shown_mail, app.shown_messages), (8, 18))
+              (app.shown_mail, app.shown_messages), (9, 19))
 
     print("nothing folds where no issue is named")
     async with board(tracker_cfg=None) as (app, pilot, path, imap, _o):
         check("with no project configured, the header threads stand",
-              len(rows(app)), 9)
+              len(rows(app)), 10)
         check("and both queues are named on the status line",
-              ("9 thread(s)" in status(app), "18 message(s)" in status(app)),
+              ("10 thread(s)" in status(app), "19 message(s)" in status(app)),
               (True, True))
     async with board(tracker_cfg=TRK, folders=("Jenkins",)) as (
             app, pilot, path, imap, _o):
@@ -165,7 +170,7 @@ async def ordering():
     async with board(tasks=tasks, tracker_cfg=TRK) as (app, pilot, path, imap, _o):
         kinds = ["MAIL" if app.is_mail(t) else "task" for t in app.tasks]
         check("every task comes before every mail row",
-              kinds, ["task"] * 3 + ["MAIL"] * 8)
+              kinds, ["task"] * 3 + ["MAIL"] * 9)
         check("the cursor starts on a task",
               app.is_mail(app.selected), False)
         with_mail = [t.id for t in app.tasks if not app.is_mail(t)]
@@ -339,7 +344,7 @@ async def reviewing():
         check("and no flag was set anywhere but the archive",
               set(imap.stored_in), {F.ARCHIVE})
         check("and every message is still on the server",
-              sum(len(f) for f in imap.held.values()), 18)
+              sum(len(f) for f in imap.held.values()), 19)
 
 
 # ------------------------------------------------------------- confirmation
@@ -470,7 +475,7 @@ async def stays_gone():
         # The mirror still holds every message: nothing has removed the local
         # files, and it will not until the sync next runs.
         check("the mailbox on disk still holds them",
-              len(mail.read(mail.Config(path, F.FOLDERS))), 18)
+              len(mail.read(mail.Config(path, F.FOLDERS))), 19)
         # What a person actually does: leave the inbox and come back.
         await pilot.press("t")
         await settle(pilot, 26)
@@ -481,7 +486,7 @@ async def stays_gone():
         check("held back by identity, and only those five",
               app.reviewed, set(idents))
         check("nothing else was hidden",
-              sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 13)
+              sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 14)
 
     print("what the mailbox has caught up on is forgotten")
     path = F.copy()
@@ -549,7 +554,7 @@ async def configuration():
     imap = server_for(path)
     async with board(tracker_cfg=TRK, mail_cfg=mail.Config(path, F.FOLDERS),
                      imap=imap, gateway_cfg=None) as (app, pilot, _p, _i, _o):
-        check("the mail is there to read", len(rows(app)), 8)
+        check("the mail is there to read", len(rows(app)), 9)
         row = await select(app, pilot, app.is_mail)
         await pilot.press("space")
         await settle(pilot, 24)
@@ -712,10 +717,111 @@ async def dropped_line():
               "back in the queue" in status(app))
 
 
+# -------------------------------------------------- what an undo puts back
+async def undo_restores_the_flag():
+    print("undoing a review puts each read flag back as it found it")
+    # Built here rather than copied from the fixture: the two states have to
+    # sit in one thread, and only a built mailbox can say which messages
+    # start read.  Two read, one not, all about one issue, so they fold into
+    # a single row and one review covers all three.
+    # The body carries an address, because folding needs the issue key and
+    # the first address to agree -- the key alone merged unrelated mail.
+    LINK = "see https://track.corp.invalid/issue/ZZA-500"
+    path = F.build({"Feed": [
+        ("ZZA-500 first", LINK, {"seen": True}),
+        ("ZZA-500 second", LINK, {"seen": True}),
+        ("ZZA-500 third", LINK, {}),
+    ]})
+    cfg = mail.Config(path, ("Feed",))
+    was = {m.ident: m.seen for m in mail.read(cfg)}
+    check("the mailbox starts with two read and one unread",
+          sorted(was.values()), [False, True, True])
+    imap = server_for(path, ("Feed",))
+    async with board(tracker_cfg=TRK, mail_cfg=cfg, imap=imap) as (
+            app, pilot, _p, _i, _o):
+        check("the three fold into one row", len(rows(app)), 1)
+        check("standing for all three", rows(app)[0].raw[main.MAIL_COUNT], 3)
+        await select(app, pilot, app.is_mail)
+        await pilot.press("space")
+        await settle(pilot, 40)
+        check("the review filed all three",
+              len(imap.held[F.ARCHIVE]), 3)
+        check("and left every one of them read",
+              imap.unread_in(F.ARCHIVE), [])
+        flags_after_review = [c for c in imap.calls if c[0] == "FLAG"]
+        check("with one flag request, naming the archive",
+              [(c[1][0], c[1][2]) for c in flags_after_review],
+              [(F.ARCHIVE, True)])
+
+        before_undo = len(imap.calls)
+        await pilot.press("u")
+        await settle(pilot, 40)
+        check("the undo moved all three back",
+              len(imap.held["Feed"]), 3)
+        now = {i.message_id: i.is_read for i in imap.held["Feed"]}
+        check("each message is read exactly as it was before the review",
+              now, was)
+        undo_flags = [c for c in imap.calls[before_undo:] if c[0] == "FLAG"]
+        check("two flag requests, one per group, both on the archive",
+              [(c[1][0], c[1][1], c[1][2]) for c in undo_flags],
+              [(F.ARCHIVE, 2, True), (F.ARCHIVE, 1, False)])
+
+    print("an undo that cannot move the mail back leaves the row gone")
+    # The scenario the requirement names and no check covered until now.
+    moves = []
+    def refuse_the_second_move(name, args):
+        if name != "MOVE":
+            return
+        moves.append(args)
+        # The first move is the review filing the row away; the second is
+        # the undo bringing it back, and that is the one to refuse.
+        if len(moves) > 1:
+            raise fakemail.refused("refused")
+
+    LINK7 = "see https://track.corp.invalid/issue/ZZA-700"
+    path = F.build({"Feed": [("ZZA-700 one", LINK7, {"seen": True}),
+                             ("ZZA-700 two", LINK7, {})]})
+    cfg = mail.Config(path, ("Feed",))
+    imap = server_for(path, ("Feed",), fail=refuse_the_second_move)
+    async with board(tracker_cfg=TRK, mail_cfg=cfg, imap=imap) as (
+            app, pilot, _p, _i, _o):
+        await select(app, pilot, app.is_mail)
+        await pilot.press("space")
+        await settle(pilot, 40)
+        check("the row was filed", len(imap.held[F.ARCHIVE]), 2)
+        await pilot.press("u")
+        await settle(pilot, 40)
+        check("the messages are still in the archive, none half moved",
+              (len(imap.held[F.ARCHIVE]), len(imap.held["Feed"])), (2, 0))
+        check("the row did not come back", rows(app), [])
+        check("and the board said the undo failed",
+              "could not be put back" in status(app), True)
+
+    print("a thread nobody had read costs one request, not two")
+    LINK6 = "see https://track.corp.invalid/issue/ZZA-600"
+    path = F.build({"Feed": [("ZZA-600 only", LINK6, {}),
+                             ("ZZA-600 also", LINK6, {})]})
+    cfg = mail.Config(path, ("Feed",))
+    imap = server_for(path, ("Feed",))
+    async with board(tracker_cfg=TRK, mail_cfg=cfg, imap=imap) as (
+            app, pilot, _p, _i, _o):
+        await select(app, pilot, app.is_mail)
+        await pilot.press("space")
+        await settle(pilot, 40)
+        before_undo = len(imap.calls)
+        await pilot.press("u")
+        await settle(pilot, 40)
+        undo_flags = [c for c in imap.calls[before_undo:] if c[0] == "FLAG"]
+        check("the empty group asked nothing",
+              [(c[1][1], c[1][2]) for c in undo_flags], [(2, False)])
+        check("and both came back unread",
+              sorted(i.is_read for i in imap.held["Feed"]), [False, False])
+
+
 async def main_():
     for part in (folding, ordering, opens, reviewing, confirming,
                  stays_gone, nothing_written, dropped_line, configuration,
-                 saying_so):
+                 saying_so, undo_restores_the_flag):
         await part()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1

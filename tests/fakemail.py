@@ -42,10 +42,14 @@ class Item:
     item.
     """
 
-    def __init__(self, message_id, folder):
+    def __init__(self, message_id, folder, is_read=False):
         self.message_id = message_id
         self.folder = folder
-        self.is_read = False
+        #: Whether the account has this message marked read.  A suite can set
+        #: it at the start, because the board now shows read mail and an undo
+        #: has to put the flag back as it found it -- which cannot be checked
+        #: against an account where nothing was ever read.
+        self.is_read = is_read
 
     def __repr__(self):
         return f"<Item {self.message_id} in {self.folder}>"
@@ -66,7 +70,12 @@ class FakeMailbox:
 
     def __init__(self, folders, fail=None, deny=(), readonly_flag=False):
         #: `{folder name: [Item, ...]}` -- the account's own contents.
-        self.held = {name: [Item(i, name) for i in idents]
+        #: An entry may be an identity or an (identity, is_read) pair, so a
+        #: suite can start an account with some of its mail already read.
+        def item(entry, name):
+            ident, read = entry if isinstance(entry, tuple) else (entry, False)
+            return Item(ident, name, read)
+        self.held = {name: [item(i, name) for i in idents]
                      for name, idents in folders.items()}
         #: Called with (command, args) before each request; raise from it to
         #: make that request fail, as the account would.

@@ -3281,104 +3281,6 @@ fetch anything to decide it.
 - **WHEN** time passes and no event's end has been crossed
 - **THEN** no row is redrawn, and the selected row is where it was
 
-### Requirement: The board reads named folders from a directory of maildirs
-
-The board SHALL read messages from the folders named in the environment,
-found inside a directory named there too. Reading SHALL make no network call
-and need no credentials.
-
-The path SHALL name a directory that holds maildirs, and each named folder
-SHALL be one of them: a directory of that name beside the others. This is the
-layout the sync tool that fills it writes. The path is not itself a maildir
-and the board SHALL NOT try to read it as one.
-
-The board SHALL read the named folders and no others. What wants processing
-daily is a few folders rather than every message an account has ever held,
-and reading only those is what keeps the queue a queue. Where no folder is
-named, the board SHALL show no mail and SHALL NOT report a failure: naming
-none is how a person turns mail off.
-
-Within those folders the board SHALL read the messages not yet marked read.
-A queue is what has not been dealt with; a message already read has been dealt
-with, whether here or in the program the person reads mail with, and showing
-it again would make the queue a list of everything instead.
-
-Where a named folder does not exist, the board SHALL say so rather than
-passing over it in silence: an empty queue and a misspelt folder look
-identical on screen and mean opposite things.
-
-How mail arrives in that directory SHALL NOT be the board's concern. A sync
-tool, a mail client, an export — whichever a person uses, and whichever they
-change to, the board reads the same directory. This is why the directory is
-the boundary rather than a protocol.
-
-The board SHALL alter nothing in the local mailbox at all: no flag, no name,
-no folder, no content. Not even to record that a message has been reviewed —
-that is recorded on the server, where it is authoritative, and a message moved
-by hand in a mirrored maildir is documented to break the sync that fills it.
-
-Where no mailbox is configured, the board SHALL show no mail and SHALL NOT
-report a failure. A board without one is an ordinary board.
-
-Where a mailbox is configured but cannot be read, the board SHALL say so once
-and SHALL otherwise carry on: the day's tasks, the tracker and the calendar
-SHALL be unaffected.
-
-#### Scenario: Messages are read from the named folders
-
-- **WHEN** a directory of maildirs is configured and folders are named in it
-- **THEN** the board reads their messages, and makes no network call to do so
-
-#### Scenario: A folder is a directory beside the others
-
-- **WHEN** a folder is named in the environment
-- **THEN** it is found as a directory of that name, not as a dot-prefixed subdirectory
-
-#### Scenario: Only the named folders are read
-
-- **WHEN** the directory holds folders beyond those named
-- **THEN** messages from the named folders appear and messages from the others do not
-
-#### Scenario: No folder named means no mail
-
-- **WHEN** a directory is configured but no folder is named
-- **THEN** the board shows no mail and reports no failure
-
-#### Scenario: The path is not read as a mailbox itself
-
-- **WHEN** the configured directory holds maildirs but is not one
-- **THEN** the board reads the named folders and does not report the directory unreadable
-
-#### Scenario: A folder that does not exist
-
-- **WHEN** a named folder is not in the directory
-- **THEN** the board says so rather than showing a queue quietly missing it
-
-#### Scenario: A message already read is not in the queue
-
-- **WHEN** a message in a named folder is marked read
-- **THEN** it does not appear, whether it was read here or in another program
-
-#### Scenario: Nothing is written to the mailbox
-
-- **WHEN** the board has read the mailbox, and a person has reviewed and promoted messages in it
-- **THEN** no message's flags, name, folder or content have changed on disk
-
-#### Scenario: No mailbox configured
-
-- **WHEN** no directory is configured
-- **THEN** the board shows no mail and reports no failure
-
-#### Scenario: A mailbox that cannot be read
-
-- **WHEN** a directory is configured but missing, unreadable, or holds no named folder
-- **THEN** the board says so once and the rest of the board works as it did
-
-#### Scenario: A message the board cannot make sense of
-
-- **WHEN** one message in a folder cannot be parsed
-- **THEN** the others are still shown, and the unreadable one does not take the view down with it
-
 ### Requirement: Messages are grouped into threads
 
 Messages SHALL be grouped into threads, and a thread SHALL be one row. A
@@ -3926,10 +3828,13 @@ those just moved, and those that turned out already to be elsewhere — it SHALL
 ask in the same opening. They concern one folder and there is no reason to
 open it twice.
 
-Undoing a review SHALL move the messages back to the folder they came from
-and SHALL mark them unread again, or the row would return to a queue that no
-longer counts it. The board SHALL say that the row returns only once the
-mirror next catches up, and SHALL NOT pretend the row is back before it is.
+Undoing a review SHALL move the messages back to the folder they came from,
+and SHALL restore each message to the read state it had before the review --
+read if it was read, unread if it was not. The read flag records what a person
+has looked at, which is theirs rather than the review's; an undo that marked
+everything unread would erase it, and one that marked everything read would
+invent it. The board SHALL say that the row returns only once the mirror next
+catches up, and SHALL NOT pretend the row is back before it is.
 
 An undo SHALL be all or nothing. Where it fails, every message SHALL be left
 where it was and the row SHALL NOT come back, rather than some messages
@@ -3966,7 +3871,17 @@ identities, asked once.
 #### Scenario: Undoing a review puts the mail back
 
 - **WHEN** a person undoes a review
-- **THEN** the messages are moved back to the folder they came from, unread again, and the board says the row returns when the mirror next catches up
+- **THEN** the messages are moved back to the folder they came from, each with the read state it had before the review, and the board says the row returns when the mirror next catches up
+
+#### Scenario: Undoing does not unread what a person had read
+
+- **WHEN** a person undoes a review of a thread whose messages they had already read elsewhere
+- **THEN** those messages are read afterwards, the undo having restored what was there rather than clearing it
+
+#### Scenario: Undoing a thread read in part
+
+- **WHEN** a thread holds both read and unread messages and its review is undone
+- **THEN** each message is left as it was before the review, the two groups being restored separately
 
 #### Scenario: Confirming a folded row costs no more openings than a single one
 
@@ -4206,6 +4121,11 @@ The log SHALL NOT be committable: it holds identities and folder names from a re
 
 - **WHEN** a mail row is reviewed and confirmed
 - **THEN** the log holds an entry saying what was attempted and one saying how it ended, each with a time, a level and a duration
+
+#### Scenario: An operation names the messages it acted on
+
+- **WHEN** an operation on the mail account succeeds
+- **THEN** the log names the identity of every message it acted on, so that what became of one message is answerable from the log alone rather than only from the account
 
 #### Scenario: A failure is logged
 
@@ -4929,4 +4849,121 @@ hidden work and for the tasks the inbox withholds.
 
 - **WHEN** a search is in force and work is being hidden as well
 - **THEN** the board reports both, and neither replaces the other
+
+### Requirement: The board reads every message in the named folders
+
+The board SHALL read messages from the folders named in the environment,
+found inside a directory named there too. Reading SHALL make no network call
+and need no credentials.
+
+The path SHALL name a directory that holds maildirs, and each named folder
+SHALL be one of them: a directory of that name beside the others. This is the
+layout the sync tool that fills it writes. The path is not itself a maildir
+and the board SHALL NOT try to read it as one.
+
+The board SHALL read the named folders and no others. What wants processing
+daily is a few folders rather than every message an account has ever held,
+and reading only those is what keeps the queue a queue. Where no folder is
+named, the board SHALL show no mail and SHALL NOT report a failure: naming
+none is how a person turns mail off.
+
+Within those folders the board SHALL read every message the folder holds,
+whether or not it has been marked read. A queue is what has not been dealt
+with, and being filed away is what dealing with a message means: filing moves
+it out of the folder, so what the folder still holds is exactly what is
+outstanding. The board SHALL NOT consult the read flag to decide what is in
+the queue.
+
+A message SHALL therefore leave the queue only by leaving the folder --
+reviewed from the board, or moved by hand in whatever program the person reads
+mail with. Reading a message SHALL NOT take it out of the queue: a person who
+opens a message to see what it is has not decided anything about it, and a
+queue that emptied itself on being read would lose the messages most worth
+keeping.
+
+Where a named folder does not exist, the board SHALL say so rather than
+passing over it in silence: an empty queue and a misspelt folder look
+identical on screen and mean opposite things.
+
+How mail arrives in that directory SHALL NOT be the board's concern. A sync
+tool, a mail client, an export — whichever a person uses, and whichever they
+change to, the board reads the same directory. This is why the directory is
+the boundary rather than a protocol.
+
+The board SHALL alter nothing in the local mailbox at all: no flag, no name,
+no folder, no content. Not even to record that a message has been reviewed —
+that is recorded on the server, where it is authoritative, and a message moved
+by hand in a mirrored maildir is documented to break the sync that fills it.
+
+Where no mailbox is configured, the board SHALL show no mail and SHALL NOT
+report a failure. A board without one is an ordinary board.
+
+Where a mailbox is configured but cannot be read, the board SHALL say so once
+and SHALL otherwise carry on: the day's tasks, the tracker and the calendar
+SHALL be unaffected.
+
+#### Scenario: Messages are read from the named folders
+
+- **WHEN** a directory of maildirs is configured and folders are named in it
+- **THEN** the board reads their messages, and makes no network call to do so
+
+#### Scenario: A folder is a directory beside the others
+
+- **WHEN** a folder is named in the environment
+- **THEN** it is found as a directory of that name, not as a dot-prefixed subdirectory
+
+#### Scenario: Only the named folders are read
+
+- **WHEN** the directory holds folders beyond those named
+- **THEN** messages from the named folders appear and messages from the others do not
+
+#### Scenario: No folder named means no mail
+
+- **WHEN** a directory is configured but no folder is named
+- **THEN** the board shows no mail and reports no failure
+
+#### Scenario: The path is not read as a mailbox itself
+
+- **WHEN** the configured directory holds maildirs but is not one
+- **THEN** the board reads the named folders and does not report the directory unreadable
+
+#### Scenario: A folder that does not exist
+
+- **WHEN** a named folder is not in the directory
+- **THEN** the board says so rather than showing a queue quietly missing it
+
+#### Scenario: A message already read is still in the queue
+
+- **WHEN** a message in a named folder is marked read, here or in another program
+- **THEN** it is still shown, because reading it decided nothing about it
+
+#### Scenario: A message filed by hand leaves the queue
+
+- **WHEN** a message is moved out of a named folder by another program
+- **THEN** it is no longer shown, the folder no longer holding it
+
+#### Scenario: A message whose flags cannot be read
+
+- **WHEN** a message's flags cannot be read at all
+- **THEN** it is shown like any other, an unreadable flag being no reason to withhold a message
+
+#### Scenario: Nothing is written to the mailbox
+
+- **WHEN** the board has read the mailbox, and a person has reviewed and promoted messages in it
+- **THEN** no message's flags, name, folder or content have changed on disk
+
+#### Scenario: No mailbox configured
+
+- **WHEN** no directory is configured
+- **THEN** the board shows no mail and reports no failure
+
+#### Scenario: A mailbox that cannot be read
+
+- **WHEN** a directory is configured but missing, unreadable, or holds no named folder
+- **THEN** the board says so once and the rest of the board works as it did
+
+#### Scenario: A message the board cannot make sense of
+
+- **WHEN** one message in a folder cannot be parsed
+- **THEN** the others are still shown, and the unreadable one does not take the view down with it
 

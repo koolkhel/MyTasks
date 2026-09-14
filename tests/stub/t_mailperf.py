@@ -1,16 +1,28 @@
 """How long the inbox takes to draw with the volume the real folders hold.
 
-The real directory holds some 1,200 unread messages folding to some 570 rows
--- 1,233 and ~460 when this change was planned, 1,137 and 574 measured the
-day it was built, which is the same order and the same shape. Every check
-about mail until now ran against a fixture of eighteen, where nothing about
-drawing could show. This builds a mailbox of that size -- synthetic
-throughout: generated subjects, invented project keys, `.invalid` addresses
--- reads it, and times the inbox drawing it beside a person's own tasks.
+The real directory holds some 900 messages in the watched folders, folding to
+some 390 rows -- 891 and 386 measured the day the queue stopped skipping the
+read ones. It held about 1,200 when the queue was the unread messages alone
+and this suite was written, which counted a larger folder and then threw
+three fifths of it away before parsing; the number fell because the account
+was worked down, not because the board reads less.
 
-The real read, for comparison with what this measures: 1,137 messages in
-0.50 s, folded in 0.02 s. Reading dominates drawing in both, and neither is
-anywhere near a person noticing.
+Read mail is the majority of it and every message of it is in the queue --
+being read is not being filed -- so this fixture is built with three in five
+already read. That is the whole point of the mix: the board parses a body
+for every message it keeps, parsing is the expensive half, and a fixture of
+unread mail only would measure a third of the real work while looking
+identical.
+
+Every check about mail until now ran against a fixture of eighteen, where
+nothing about drawing could show. This builds a mailbox of that size --
+synthetic throughout: generated subjects, invented project keys, `.invalid`
+addresses -- reads it, and times the inbox drawing it beside a person's own
+tasks.
+
+Measured here with the mix: 1,233 messages of which 740 already read, read in
+0.11 s, folded in 0.00 s, 453 rows drawn in 0.02 s. Reading dominates
+drawing, and neither is anywhere near a person noticing.
 
 Its numbers are of the machine that runs it, so the bounds are generous and
 the point is the ratio: whether drawing dominates reading, or the reverse.
@@ -63,14 +75,23 @@ def big_mailbox():
                 f"ZZA-{2000 + issue}: update {update}",
                 f"an update on {issue_url}"
                 + (f" at {issue_url}#comment-{update}" if update else ""),
-                {"Message-ID": f"<zz.f{issue}.{update}@example.invalid>"},
+                {"Message-ID": f"<zz.f{issue}.{update}@example.invalid>",
+                 # Three in five already read, which is the mix the real
+                 # folder has: 526 of 891 when this was measured.  Every one
+                 # of them is still in the queue -- being read is not being
+                 # filed -- so this is the population the board now parses,
+                 # and parsing is the expensive half.  The suite measured an
+                 # all-unread mailbox while the board skipped read mail
+                 # before parsing it, and would have gone on measuring a
+                 # third of the real work.
+                 "seen": (n % 5) < 3},
             ))
     # Then the rest as rows of their own, naming no issue at all.
     while len(messages) < MESSAGES:
         n += 1
         messages.append((
             f"build {n} finished", f"see https://ci.corp.invalid/job/{n}/console",
-            {"Message-ID": f"<zz.b{n}@example.invalid>"},
+            {"Message-ID": f"<zz.b{n}@example.invalid>", "seen": (n % 5) < 3},
         ))
     return F.build({"Bulk": messages}), folded, deep
 
@@ -87,6 +108,11 @@ async def main_():
     found = mail.read(config)
     read = monotonic() - started
     check("every message was read", len(found), MESSAGES)
+    already = sum(1 for m in found if m.seen)
+    check("and the mix is the real one: most of it already read",
+          0.5 <= already / MESSAGES <= 0.7, True)
+    print(f"  {already} of {MESSAGES} were already marked read, and all of "
+          f"them are in the queue")
 
     def fold(message):
         keys = TRK.keys_in(message.text)

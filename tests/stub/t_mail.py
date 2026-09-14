@@ -87,9 +87,12 @@ def snapshot(root):
 before = snapshot(SAMPLE)
 msgs = mail.read(cfg)
 after = snapshot(SAMPLE)
-# 18 messages across three folders read, one of them built with seen=True:
-# the board reads unread mail only, so 17 is the whole of the queue.
-check("every unread message is found", len(msgs), 18)
+# 19 messages across three folders, one of them built with seen=True. All 19
+# are the queue: filing is what takes a message out of it, and being read is
+# not filing.  This read 18 while the read one was skipped.
+check("every message the folders hold is found", len(msgs), 19)
+check("including the one already marked read",
+      sum(1 for m in msgs if m.seen), 1)
 check("each has a sender", all(m.sender for m in msgs), True)
 check("each has a subject", all(m.subject for m in msgs), True)
 check("each has an identity", all(m.ident for m in msgs), True)
@@ -213,9 +216,83 @@ try:
 except mail.MailboxUnreadable as exc:
     check("a folder that does not exist is reported, by name", "Nope" in str(exc), True)
 
+print("what is in the queue, and what takes a message out of it")
+# Built here rather than read from the sample, so that the read and unread
+# messages sit side by side in one folder and the only difference between
+# them is the flag.
+def built_with_seen(root=None):
+    root = root or tempfile.mkdtemp()
+    path = os.path.join(root, "mail_folders")
+    if os.path.exists(path): shutil.rmtree(path)
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
+    for subject, seen in (("already read", True), ("never opened", False)):
+        m = EmailMessage()
+        m["From"] = "someone@example.invalid"
+        m["Subject"] = subject
+        m["Date"] = "Tue, 08 Sep 2026 08:00:00 +0000"
+        m["Message-ID"] = f"<{subject.split()[0]}@example.invalid>"
+        m.set_content("body")
+        md = mailbox.MaildirMessage(m)
+        if seen: md.add_flag("S")
+        box.add(md)
+    box.flush()
+    return mail.Config(path, (FEED,)), os.path.join(path, FEED)
+
+mixed, feed = built_with_seen()
+got = mail.read(mixed)
+check("a read message and an unread one are both in the queue",
+      sorted(m.subject for m in got), ["already read", "never opened"])
+check("and each says which it was",
+      {m.subject: m.seen for m in got},
+      {"already read": True, "never opened": False})
+
+# Filing is a move, so the queue empties by the folder emptying.  Done here
+# with the filesystem rather than the gateway: what is being checked is that
+# `read` answers for the folder as it finds it, not how a message got out.
+# Through the mailbox rather than by filename: a maildir names its files by
+# key and flags, never by subject, so picking the file to remove by reading
+# the name is picking at random.
+_box = mailbox.Maildir(feed, create=False)
+for _k in list(_box.keys()):
+    if "S" not in _box[_k].get_flags():
+        _box.remove(_k)
+_box.flush()
+left = mail.read(mixed)
+check("a message moved out of the folder is no longer in the queue",
+      [m.subject for m in left], ["already read"])
+
+# A folder the board was not named holds nothing it will read, whatever is
+# in it.
+elsewhere = mail.Config(mixed.path, ("Nothing",))
+try:
+    mail.read(elsewhere)
+    check("an unnamed folder is not read", False, True)
+except mail.MailboxUnreadable:
+    check("a folder that is not there is reported rather than read as empty",
+          True, True)
+
+# A flag that cannot be read at all.  The message stays in the queue and
+# reports unread: an unreadable flag is evidence of nothing, and unread is
+# the answer that claims least.
+class _NoFlags:
+    def __init__(self, inner): self._inner = inner
+    def __getattr__(self, name): return getattr(self._inner, name)
+    def get_flags(self): raise OSError("flags unreadable")
+
+class _Box:
+    def __init__(self, inner): self._inner = inner
+    def keys(self): return self._inner.keys()
+    def __getitem__(self, k): return _NoFlags(self._inner[k])
+
+blind = mail._messages(_Box(mailbox.Maildir(feed, create=False)), FEED)
+check("a message whose flags cannot be read is still in the queue",
+      [m.subject for m in blind], ["already read"])
+check("and reports unread", [m.seen for m in blind], [False])
+
 print("threads")
 ths = mail.threads(mail.read(cfg))
-check("the mailbox's nine unread threads", len(ths), 9)
+check("the mailbox's ten threads", len(ths), 10)
 # Two chains for one issue, one for another, a merge-request pair and a run
 # of builds.  Most real notifications about an issue do carry the header, but
 # not all to the same message -- which is why folding beats threading here.

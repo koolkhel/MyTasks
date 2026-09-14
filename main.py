@@ -2280,7 +2280,11 @@ class TaskApp(App[None]):
             if config is None:
                 return False
             self.mail_started()
-            self.put_back(config, self.by_folder(messages), title)
+            # The messages carry what the account said about them when
+            # the board read them, so each flag goes back as it was
+            # found rather than all of them being cleared.
+            self.put_back(config, self.by_folder(messages), title,
+                          {m.ident for m in messages if m.seen})
             return True
 
         entry = Undoable(
@@ -2436,8 +2440,13 @@ class TaskApp(App[None]):
 
     @work(thread=True, group="mail-write")
     def put_back(self, config: Any, by_folder: dict[str, list[str]],
-                 title: str) -> None:
-        """Move a reviewed row's messages out of the archive again."""
+                 title: str, was_read: "set[str] | None" = None) -> None:
+        """Move a reviewed row's messages out of the archive again.
+
+        `was_read` names the ones the account already had marked read before
+        the review, so each goes back carrying the flag it had rather than
+        all of them coming back unread.
+        """
         # Forgotten first, so the row is free to come back the moment the
         # mailbox shows it again.  Before the move rather than after: a
         # restore that half succeeded must not leave the board hiding mail
@@ -2451,7 +2460,8 @@ class TaskApp(App[None]):
         try:
             with self._mail_gate:
                 outcome = gateway.restore(config, by_folder,
-                                          connect=self.gateway_connect)
+                                          connect=self.gateway_connect,
+                                          was_read=was_read)
         except (gateway.MoveFailed, gateway.GatewayUnreachable) as exc:
             journal.error(f"undo of {count} message(s) to {where_to} after "
                           f"{monotonic() - started:.1f}s: {exc}")
@@ -4454,7 +4464,8 @@ class TaskApp(App[None]):
             )
             if config is not None and messages:
                 self.mail_started()
-                self.put_back(config, self.by_folder(messages), title)
+                self.put_back(config, self.by_folder(messages), title,
+                              {m.ident for m in messages if m.seen})
             return True
 
         self.submit_write(

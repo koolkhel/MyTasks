@@ -105,9 +105,9 @@ async def the_view():
         # Mail follows the tasks.  It led them until the volume was
         # measured -- some 460 mail rows against 35 tasks -- which turned
         # the argument for leading with it into the argument against.
-        check("mail follows, and is contiguous", kinds, ["task"] + ["MAIL"] * 9)
+        check("mail follows, and is contiguous", kinds, ["task"] + ["MAIL"] * 10)
         check("both queues are counted",
-              ("9 thread(s)" in status(app), "18 message(s)" in status(app)),
+              ("10 thread(s)" in status(app), "19 message(s)" in status(app)),
               (True, True))
         tasks_only = sum(1 for t in app.tasks if not app.is_mail(t))
         check("and the task count counts tasks alone",
@@ -394,7 +394,7 @@ async def beside_the_other_sources():
             # groups of messages about one of its issues fold into one row
             # each.  The count where no tracker is configured is nine.
             check("the inbox holds the threads", sum(1 for t in app.tasks
-                                                     if app.is_mail(t)), 8)
+                                                     if app.is_mail(t)), 9)
             check("and no calendar event came into it",
                   any(app.is_event(t) for t in app.tasks), False)
             check("and nothing raised while getting there", app._exception is None
@@ -532,9 +532,9 @@ async def still_in_the_inbox():
         await pilot.pause()
         # Nine, the sample's threads with no tracker configured to fold them.
         check("every thread is there with the mode off",
-              sum(1 for t in app.tasks if app.is_mail(t)), 9)
+              sum(1 for t in app.tasks if app.is_mail(t)), 10)
         check("and none of them claims a project",
-              [t.project_id for t in app.tasks if app.is_mail(t)], [None] * 9)
+              [t.project_id for t in app.tasks if app.is_mail(t)], [None] * 10)
 
 
 async def legible_together():
@@ -553,7 +553,7 @@ async def legible_together():
             for _ in range(12): await pilot.pause()
             bar = str(app.query_one("#daybar", Static).render())
             check(f"at {width} columns the hidden count is whole",
-                  "work hidden (9)" in bar, True)
+                  "work hidden (10)" in bar, True)
             # The mailbox mark is padded to the right edge of the same bar.
             check(f"at {width} columns the mailbox mark is still there",
                   bar.rstrip()[-1:], main.MAIL_IDLE_MARK)

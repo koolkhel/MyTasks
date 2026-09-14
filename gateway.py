@@ -496,7 +496,7 @@ class Server:
         # folder to take them from.
         source = folder if isinstance(folder, str) else str(folder.name)
         self._talk("MOVE", lambda: self.mailbox.move(held, where),
-                   about=f"{source} n={len(held)} -> {name}")
+                   about=f"{source} n={len(held)} -> {name} {_named(held)}".strip())
 
     def number(self, folder: str, message_id: str):
         """One message in a folder, or None if it is not there."""
@@ -525,7 +525,29 @@ class Server:
         name = folder if isinstance(folder, str) else str(folder.name)
         self._talk("FLAG", lambda: self.mailbox.mark(held, seen),
                    about=f"{name} n={len(held)} "
-                         f"{'+' if seen else '-'}Seen")
+                         f"{'+' if seen else '-'}Seen "
+                         f"{_named(held)}".strip())
+
+
+def _named(items) -> str:
+    """The identities of these items, for the trace to record.
+
+    The log is required to hold message identities and forbidden to hold a
+    subject, a sender or any part of a body: an identity is what the gateway
+    addresses a message by and what a person would search the log on, and it
+    is the only one of the four that says which message a line is about.
+
+    It was left out of every successful operation until a message went
+    missing and the log could say only that fifty-three reviews had happened,
+    none of them naming a message.  A line saying `n=17` answers how many and
+    never which.
+
+    An item with no identity contributes nothing rather than an empty gap:
+    the service names its own items, and a message that reached the account
+    without a Message-ID is one the board already addresses by other means.
+    """
+    named = [str(getattr(item, "message_id", "") or "") for item in items]
+    return " ".join(i for i in named if i)
 
 
 @dataclass(frozen=True)
@@ -630,14 +652,21 @@ def archive(config: Config, by_folder: dict, connect=None,
     return Outcome(tuple(archived), tuple(already), tuple(missing))
 
 
-def restore(config: Config, by_folder: dict, connect=None) -> Outcome:
+def restore(config: Config, by_folder: dict, connect=None,
+            was_read: "set[str] | None" = None) -> Outcome:
     """Move these messages out of the archive, back where they came from.
 
     The reverse of `archive`, for undoing a review.  Whether the row comes
     back on screen is not this function's business and not the board's: the
     folder is a mirror, and the row returns when whatever fills it next
     catches up.
+
+    `was_read` names the messages that were already marked read before the
+    review, so each can be put back as it was found.  Omitting it says none
+    of them were, which is what this did when a read message could not reach
+    the board to be reviewed in the first place.
     """
+    already_read = was_read or set()
     back: list[str] = []
     missing: list[str] = []
     with Server(config, connect=connect) as srv:
@@ -652,14 +681,28 @@ def restore(config: Config, by_folder: dict, connect=None) -> Outcome:
             if not here:
                 continue
             moving = [found[i] for i in here]
-            # Unread again before they go back, and in that order: after a
-            # move a message is in another folder under another identity of
-            # the service's own, so marking it afterwards would mean finding
-            # it again.
+            # Put the read flag back as the review found it, before they go
+            # back, and in that order: after a move a message is in another
+            # folder under another identity of the service's own, so marking
+            # it afterwards would mean finding it again.
             #
-            # The queue is what has not been dealt with, and a message that
-            # returned read would return to a queue that does not show it.
-            srv.mark_seen(srv.archive, moving, seen=False)
+            # The flag records what a person has looked at, which is theirs
+            # rather than the review's.  A review marks every message it
+            # files read, so an undo that cleared them all would erase a
+            # person's own reading, and one that left them all read would
+            # invent reading that never happened.  Two groups, each asked for
+            # in one request, and an empty group asked nothing -- `mark_seen`
+            # answers immediately for an empty list.
+            #
+            # The read group is asked for rather than assumed, though a
+            # review leaves every message read and the request is therefore
+            # usually a no-op: this function should put messages into a
+            # stated state rather than depend on what another function left
+            # behind.
+            put_back_read = [found[i] for i in here if i in already_read]
+            put_back_unread = [found[i] for i in here if i not in already_read]
+            srv.mark_seen(srv.archive, put_back_read, seen=True)
+            srv.mark_seen(srv.archive, put_back_unread, seen=False)
             # One move for the row, which is what makes the undo all or
             # nothing: either the row comes back or none of it does.  A row
             # split between a folder and the archive is the state hardest to

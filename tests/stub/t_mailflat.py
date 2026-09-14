@@ -77,18 +77,26 @@ check("it falls back to its maildir key", len(nameless), 1)
 check("and is still addressable by that key",
       bool(nameless) and nameless[0].key == target)
 
-# -- unread only ----------------------------------------------------------
+# -- the folder is the queue ---------------------------------------------
 print("the queue is what has not been dealt with")
 box = F.copy()
 whole = len(mail.read(mail.Config(box, F.FOLDERS)))
 check("the committed mailbox has unread messages", whole > 1, True)
+was_read = sum(1 for m in mail.read(mail.Config(box, F.FOLDERS)) if m.seen)
 one = mail.read(mail.Config(box, F.FOLDERS))[0]
 folder = mail._folder_path(mail.Config(box, F.FOLDERS), one.folder)
 was_at = where_is(folder, one.key)
 os.rename(os.path.join(folder, was_at),
           os.path.join(folder, "cur", f"{one.key}:2,S"))
-check("a message flagged read by another program is gone",
-      len(mail.read(mail.Config(box, F.FOLDERS))), whole - 1)
+# Read elsewhere, and still outstanding.  This asserted the opposite while
+# the queue was the unread messages: the message vanished from the board and
+# stayed in the account's inbox, dealt with by nobody.  Filing is what takes
+# a message out of the queue, and a mail client marking it read is not that.
+after = mail.read(mail.Config(box, F.FOLDERS))
+check("a message flagged read by another program is still there",
+      len(after), whole)
+check("and says it was read",
+      sum(1 for m in after if m.seen), was_read + 1)
 
 box = F.copy()
 folder = os.path.join(box, "Jenkins")
@@ -98,6 +106,27 @@ shutil.move(os.path.join(folder, "new", first),
             os.path.join(folder, "cur", first))
 check("an unflagged message in cur/ counts as unread",
       len(mail.read(mail.Config(box, F.FOLDERS))), whole)
+
+# -- a thread does not care which of it was read --------------------------
+print("read and unread fold together")
+box = F.build({"Alerts": [
+    ("a thread", "body", {"Message-ID": "<t1@x.invalid>", "seen": True,
+                          "minutes": 1}),
+    ("Re: a thread", "body", {"Message-ID": "<t2@x.invalid>",
+                              "In-Reply-To": "<t1@x.invalid>", "seen": True,
+                              "minutes": 2}),
+    ("Re: a thread", "body", {"Message-ID": "<t3@x.invalid>",
+                              "In-Reply-To": "<t2@x.invalid>", "minutes": 3}),
+]})
+found = mail.read(mail.Config(box, ("Alerts",)))
+check("all three are read off the folder", len(found), 3)
+check("two of them were already read", sum(1 for m in found if m.seen), 2)
+ths = mail.threads(found)
+check("they are one thread", len(ths), 1)
+check("standing for all three, not for the unread one",
+      ths[0].count, 3)
+check("and the newest is what the row would show",
+      ths[0].newest.ident, "<t3@x.invalid>")
 
 # -- and nothing at all is written ----------------------------------------
 print("reading writes nothing")

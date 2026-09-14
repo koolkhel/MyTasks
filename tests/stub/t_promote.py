@@ -407,8 +407,13 @@ async def undoing():
               [t.id for t in app._base if t.id.startswith("tmp:")] != [], True)
         await pilot.press("u")
         await settle(pilot, 12)
-        check("the messages are already unread again",
-              len(mail.read(mail.Config(path, FOLDERS))), 18)
+        # Named for what it checks: the mailbox still holds every message.
+        # It read "already unread again" while the queue was the unread
+        # messages, where a restored count and a restored flag were the same
+        # observation.  They are not any more -- the count is the folder, and
+        # the flag is checked on its own in t_review.
+        check("the mailbox still holds every message",
+              len(mail.read(mail.Config(path, FOLDERS))), 19)
         app.client.gate.set()
         await settle(pilot, 60)
         check("the task the store made was deleted, by its real id",
@@ -440,7 +445,7 @@ async def refusals():
         check("nothing was created on a task", made(app), [])
         check("and the board says what the key is for",
               "turns a mail thread into a task" in status(app), True)
-        check("the mailbox is untouched", len(mail.read(mail.Config(path, FOLDERS))), 18)
+        check("the mailbox is untouched", len(mail.read(mail.Config(path, FOLDERS))), 19)
 
     print("on a calendar event")
     ev = ical.Event(title="a meeting", account="work", calendar="c",

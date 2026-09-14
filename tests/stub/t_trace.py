@@ -135,6 +135,14 @@ def every_request():
           all("n=" in a and "->" in a for a in by["MOVE"]))
     check("a flag names how many and which flag",
           all("n=" in a and "Seen" in a for a in by["FLAG"]))
+    #: And which messages, on every line that acted on one.  Not one
+    #: identity somewhere in the file -- every message in the request, on
+    #: the line for that request, because the question this answers is
+    #: "what became of THIS message" and a count cannot answer it.
+    check("a move names every message it moved",
+          all(all(ident(i) in a for i in range(3)) for a in by["MOVE"]), True)
+    check("a flag names every message it marked",
+          all(all(ident(i) in a for i in range(3)) for a in by["FLAG"]), True)
     check("the walk that names the folders carries no count",
           all("n=" not in a for a in by["FOLDERS"]))
 
@@ -275,14 +283,19 @@ def nothing_identifying():
     check("no body reached the trace", "ZZMARKERBODY" in text, False)
     check("no sender reached the trace", "zzsender" in text, False)
     check("the folder is there", "Feed" in text, True)
-    #: The identities are not.  A search used to name the one message it
-    #: asked about, there being one search a message; a search now names a
-    #: set, and the line says which folder and how many.  The rule the log
-    #: was written to allows either, and the shorter line carries fewer
-    #: identifiers onto disk, which is the better direction for a file that
-    #: describes somebody's mail.
-    check("how many, rather than which", "n=" in text, True)
-    check("and no identity is written down", ident(0) in text, False)
+    #: How many AND which.  The identities were dropped from the successful
+    #: lines once, on the reasoning that the rule allowed either and that
+    #: fewer identifiers on disk was the better direction.  The rule does not
+    #: allow either -- it says the log records message identities, and gives
+    #: the reason: an identity is what a person would search the log on.
+    #:
+    #: What that cost: a message went missing from the queue and a full day
+    #: of the log could say only that fifty-three reviews had happened and
+    #: how many messages each moved.  Which message was in which review was
+    #: not in the file, so the question had to be put to the account instead.
+    #: A line reading `n=17` answers how many and never which.
+    check("how many", "n=" in text, True)
+    check("and which", ident(0) in text, True)
 
     print("and no request asks for any, which is why")
     src = open(os.path.join(_REPO, "gateway.py"), encoding="utf-8").read()

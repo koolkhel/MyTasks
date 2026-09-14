@@ -1,7 +1,8 @@
 """Reading a mailbox kept on disk, and writing nothing to it.
 
-Only what a queue needs: the unread messages in the folders named, grouped
-into the threads they belong to.
+Only what a queue needs: every message in the folders named, grouped into the
+threads they belong to.  Every message, because filing is what takes one out
+of a folder and a mail client marking it read is not filing.
 
 Nothing here writes.  Not a flag, not a name, not a folder -- the board once
 marked a message read from here, and that path is gone: the directory is a
@@ -99,6 +100,16 @@ class Message:
     #: messages by.  Searching for the identity instead would be slower and
     #: still ambiguous for the messages that have none.
     key: str = ""
+    #: Whether the account had this message marked read when it was read off
+    #: the mirror.  Nothing about the queue depends on it -- a message is in
+    #: the queue because its folder holds it.  It is here because undoing a
+    #: review has to put the flag back as it found it, and a review sets it
+    #: on every message it files: without this an undo would either unread a
+    #: message the person had read or leave read one they never opened.
+    #:
+    #: False when the flag could not be read at all, which is the answer that
+    #: claims least about a message nobody can ask about.
+    seen: bool = False
 
 
 @dataclass(frozen=True)
@@ -302,12 +313,20 @@ def _when(raw: str | None) -> datetime:
 
 
 def read(config: Config) -> list[Message]:
-    """Every unread message in the folders named.
+    """Every message the folders named hold.
 
-    Unread, because a queue is what has not been dealt with.  A message
-    already marked read has been dealt with -- here, or in whatever program
-    the person reads mail with -- and showing it again would make the queue a
-    list of everything instead.
+    Every message, read or not.  A queue is what has not been dealt with, and
+    being filed away is what dealing with a message means: filing moves it out
+    of the folder, so what the folder still holds is exactly what is
+    outstanding.  The read flag is not consulted.
+
+    This read the unread messages once, on the reasoning that a message
+    already marked read had been dealt with, here or in whatever program the
+    person reads mail with.  That last part was wrong, and measurably: on the
+    account this was found on, 525 of 890 messages in the watched folder were
+    marked read and had never been filed -- opened in a mail client, decided
+    about by nobody, and gone from the queue with the board saying nothing.
+    A person who opens a message to see what it is has not decided anything.
 
     The named folders and no others.  Nothing is discovered: what wants
     processing daily is a few folders rather than every message an account
@@ -357,12 +376,18 @@ def _folder_path(config: Config, folder: str) -> str:
 
 
 def _messages(box, folder: str = "") -> list[Message]:
-    """Every unread message in one folder, skipping any that cannot be parsed.
+    """Every message in one folder, skipping any that cannot be parsed.
 
-    Read messages are skipped here rather than filtered afterwards: parsing
-    a body is the expensive part of reading a mailbox, and a folder holding
-    a year of dealt-with mail would pay it for every message to throw them
-    all away.
+    Read messages were once skipped here rather than filtered afterwards,
+    because parsing a body is the expensive part of reading a mailbox.  The
+    cost was real and is still paid -- this now parses every message the
+    folder holds -- but the saving was taken from the wrong place: the
+    messages skipped were not dealt with, only looked at.  Filing is what
+    empties this folder, so nothing here may withhold a message that is still
+    in it.
+
+    Whether a message was marked read is carried on it instead, because
+    undoing a review has to put that flag back the way it found it.
     """
     found = []
     try:
@@ -378,13 +403,14 @@ def _messages(box, folder: str = "") -> list[Message]:
             # Maildir keeps a message's flags in its filename, and `S` is
             # the one meaning seen.  A message still in `new/` has no flags
             # at all, which is what unread looks like there.
-            if "S" in raw.get_flags():
-                continue
+            seen = "S" in raw.get_flags()
         except Exception:
-            # A message whose flags cannot be read is shown rather than
-            # hidden: an unreadable flag is not evidence of having dealt
-            # with anything.
-            pass
+            # A message whose flags cannot be read is called unread, and is
+            # shown like any other.  An unreadable flag is not evidence of
+            # anything, and unread is the answer that claims least: it leaves
+            # the message in the queue, and an undo restoring it to unread
+            # leaves it as the board found it.
+            seen = False
         try:
             subject = _decoded(raw.get("Subject"))
             body = _body(raw)
@@ -401,6 +427,7 @@ def _messages(box, folder: str = "") -> list[Message]:
                 text=f"{subject}\n{body}",
                 folder=folder,
                 key=key,
+                seen=seen,
             ))
         except Exception:
             continue
