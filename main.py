@@ -455,6 +455,7 @@ class KeyBar(Static):
         "question_mark": "?",
         "left_square_bracket": "[",
         "right_square_bracket": "]",
+        "slash": "/",
         "space": "space",
         "enter": "enter",
     }
@@ -561,6 +562,45 @@ class TaskInput(ModalScreen[str]):
             self.dismiss(text)
         else:
             self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SearchInput(ModalScreen[str]):
+    """Ask for the term to narrow the view by.
+
+    Its own screen rather than the prompt the board already has, because
+    the two answer differently to an empty box.  Everywhere else an empty
+    title means there is nothing to do, which is what cancelling means as
+    well, so one answer covers both.  Here they are opposites -- an empty
+    term clears the search, cancelling leaves whatever is in force exactly
+    as it was -- and a screen that could not tell them apart would make one
+    of the two unreachable.
+
+    So: cancelling answers None, and confirming answers the term, which may
+    be the empty string.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, value: str = ""):
+        super().__init__()
+        self.value = value
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Search titles", id="dialog-title")
+            yield Input(value=self.value, id="dialog-input")
+            yield Label("enter to search · empty clears · esc to cancel",
+                        id="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    @on(Input.Submitted)
+    def submit(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -907,6 +947,14 @@ class Help(ModalScreen[None]):
   r                  reload from the server
   w                  hide the work project's tasks,
                      and press again to bring them back
+  / or ;             narrow the view to the rows whose
+                     title contains what you type — mail
+                     subjects and task titles, not
+                     senders, projects or message text.
+                     Stays on as you move between views,
+                     and the day bar names the term
+                     while it does
+  esc                clear the search
   u                  undo the last change, then the one
                      before it — says what it undid;
                      never deletes anything
@@ -1260,6 +1308,23 @@ class TaskApp(App[None]):
         Binding(keys("s"), "someday", "Someday"),
         Binding(keys("r"), "refresh", "Reload"),
         Binding(keys("w"), "toggle_work", "Hide work"),
+        # Two keys, because one of them cannot be reached in both layouts.
+        # `/` is what this gesture is in vi, less and every pager since, and
+        # the key that carries it types "." in a Russian layout -- which is
+        # already "done for today", and whose shifted "," is already help's
+        # twin.  So this is the first key the board has wanted whose twin is
+        # spent, and binding it alone would either take a key from an action
+        # a person already knows or leave search reachable in one layout
+        # only.  `;` carries the action into the other layout instead:
+        # punctuation rather than a letter, so it spends no mnemonic a later
+        # action might want, and its own twin is free.
+        Binding("slash," + keys("semicolon"), "search", "Search"),
+        # Not shown on the bar: with no search in force this key does
+        # nothing, and a permanent entry would say otherwise.  Where it does
+        # something the day bar names it beside the term -- which is the
+        # moment it is wanted, and the only thing on screen when the search
+        # matches nothing at all.
+        Binding("escape", "clear_search", "Clear search", show=False),
         Binding(keys("u"), "undo", "Undo"),
         # Named for both things it does: on a task it ticks, on a mail row
         # it files the message away where the board cannot show it again,
@@ -1360,6 +1425,14 @@ class TaskApp(App[None]):
         # on answering only where a task lives.  It lasts as long as the
         # board is open and writes nothing.
         self.hiding_work = False
+        #: The term a search is narrowing the view by, or None while no
+        #: search is in force.  A plain attribute, like the work filter's
+        #: mode and for the same reason: `repaint` reads it more than once
+        #: and must see one answer.  Nothing is written anywhere and it does
+        #: not survive the board closing.
+        self.searching: str | None = None
+        #: How many rows the search removed from the shown view.
+        self.hidden_by_search = 0
         # What the working window last said, and whether a press is
         # overruling it.  The mode stays a plain boolean because `repaint`
         # reads it three times and must see one answer; a property reading
@@ -3168,6 +3241,47 @@ class TaskApp(App[None]):
             self.reference and task.past_due_since(self.reference, self.tz)
         )
 
+    @staticmethod
+    def search_text(task: Task) -> str:
+        """What a row's title reads as to a search.
+
+        The title the row carries, not what the cell ends up showing.  Two
+        things happen to a title on its way to the table: a mail subject
+        gains ` (3)` for the messages folded behind it, and `shortened` cuts
+        it to the width of the column.  Searching what is drawn would mean a
+        search for a number matching thread counts, and a long subject
+        findable only by its first few words.
+
+        A third thing happens and then unhappens, which is the trap: the
+        cell is built as markup, so a `[` is escaped to `\\[` -- and
+        `shortened` then parses that markup back into text, leaving the
+        bracket as itself.  Matching the half-built markup string would
+        therefore break a search for a bracket while the finished cell looks
+        innocent.  Taking the title from the row settles all three.
+
+        One function, read by the search alone, so that what is drawn and
+        what is searched cannot drift apart as the row format changes.
+        `display_title` covers every kind of row: mail, calendar and tracker
+        rows keep their subject or title in the same place a task keeps its
+        own, which is what lets the rest of the board draw them without
+        knowing which source they came from.
+        """
+        return task.display_title
+
+    def matches(self, task: Task) -> bool:
+        """Whether this row's title contains the term being searched for.
+
+        A plain substring, and `casefold` rather than `lower` so that the
+        two alphabets the board is written in both fold: a subject is found
+        however its sender capitalised it.
+
+        True for every row while no search is in force, so that the caller
+        reads the same whether or not one is.
+        """
+        if not self.searching:
+            return True
+        return self.searching.casefold() in self.search_text(task).casefold()
+
     def repaint(self) -> None:
         """Rebuild the table from the fetched tasks and the pending writes.
 
@@ -3225,6 +3339,22 @@ class TaskApp(App[None]):
             issues = [t for t in issues if not self.is_work(t)]
             events = [t for t in events if not self.is_work(t)]
             mails = [t for t in mails if not self.is_work(t)]
+            self.shown_issues = len(issues)
+        # The search narrows what the work filter left, in the same place and
+        # for the same reason the comment above gives: a source narrowed
+        # anywhere but here is a source this key cannot reach, however its
+        # rows are marked.  Counted over all four before any is dropped, so
+        # the number reported is the number of rows removed rather than the
+        # number removed from one source.
+        self.hidden_by_search = (
+            sum(1 for t in tasks + issues + events + mails if not self.matches(t))
+            if self.searching else 0
+        )
+        if self.searching:
+            tasks = [t for t in tasks if self.matches(t)]
+            issues = [t for t in issues if self.matches(t)]
+            events = [t for t in events if self.matches(t)]
+            mails = [t for t in mails if self.matches(t)]
             self.shown_issues = len(issues)
         # The events take their place among the day's tasks by when they
         # happen; the tracker's block goes in whole, where the day's
@@ -3327,6 +3457,12 @@ class TaskApp(App[None]):
             why = self.window_reason()
             bits.append(f"{self.hidden_work} work hidden"
                         + (f" ({why})" if why else ""))
+        if self.hidden_by_search:
+            # Beside the other counts, as the work filter's is: the shown
+            # count stays the number of rows drawn.  The term itself is on
+            # the day bar rather than repeated here, so that a long search
+            # does not push the counts off a narrow line.
+            bits.append(f"{self.hidden_by_search} hidden by search")
         in_flight = sum(len(q) for q in self._pending.values())
         if in_flight:
             bits.append(f"{in_flight} saving")
@@ -3621,6 +3757,27 @@ class TaskApp(App[None]):
         count = f" ({self.hidden_work})" if self.hidden_work else ""
         return [f"work hidden{count}" + (f", {why}" if why else "")]
 
+    def search_note(self) -> list[str]:
+        """What the daybar says about a live search, if anything.
+
+        Said even when the search removes nothing, for the reason
+        `work_note` gives: a mode that hides nothing is otherwise
+        indistinguishable from a key that does not work.  And said in every
+        view, because the search applies to every view -- a day that is
+        quietly shorter would otherwise read as a light day.
+
+        The way out is named beside the term rather than left to the help.
+        A search matching nothing empties the list, and the bar is then the
+        only thing on screen with anything to say.
+
+        The term is escaped because it is the first thing a person types
+        that this bar has ever had to draw, and the bar renders what it is
+        given as markup: a search for `[` would otherwise open a tag.
+        """
+        if not self.searching:
+            return []
+        return [f'search "{escape(self.searching)}" · esc clears']
+
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
         if isinstance(self.position, Bucket):
@@ -3628,7 +3785,7 @@ class TaskApp(App[None]):
             if self.filed_out:
                 parts.append(f"{len(self.tasks)} shown")
                 parts.append(f"{self.filed_out} filed, hidden")
-            parts += self.work_note()
+            parts += self.work_note() + self.search_note()
             bar.update(self.with_mark("  ·  ".join(parts), bar))
             return
         today = datetime.now(self.tz).date()
@@ -3636,7 +3793,8 @@ class TaskApp(App[None]):
         relative = {0: "today", 1: "tomorrow", -1: "yesterday"}.get(
             delta, f"{abs(delta)} days {'ahead' if delta > 0 else 'ago'}"
         )
-        parts = [f"{self.position:%A %d %B %Y}", relative, *self.work_note()]
+        parts = [f"{self.position:%A %d %B %Y}", relative,
+                 *self.work_note(), *self.search_note()]
         bar.update(self.with_mark("  ·  ".join(parts), bar))
 
     def with_mark(self, said: str, bar: Static) -> str:
@@ -4033,6 +4191,35 @@ class TaskApp(App[None]):
         # clock or a person is hiding the work -- and so the next crossing
         # of the window knows there is an overrule to drop.
         self._work_override = self.hiding_work
+        self.repaint()
+
+    @work
+    async def action_search(self) -> None:
+        """Ask for a term, and draw only the rows whose title contains it.
+
+        Writes nothing: like the work filter, this only decides which of the
+        rows a view already chose are painted.
+
+        The prompt opens carrying whatever is in force, so that changing a
+        search is a correction rather than a retype.  An empty answer clears
+        the search; a cancelled prompt answers None and leaves it alone.
+        """
+        term = await self.push_screen_wait(SearchInput(self.searching or ""))
+        if term is None:
+            return
+        self.searching = term or None
+        self.repaint()
+
+    def action_clear_search(self) -> None:
+        """Clear the search and bring every row back.
+
+        Escape is bound on the board itself, so it arrives whether or not
+        there is a search to clear; with none in force this does nothing
+        rather than costing a redraw.
+        """
+        if self.searching is None:
+            return
+        self.searching = None
         self.repaint()
 
     def action_cancel_task(self) -> None:

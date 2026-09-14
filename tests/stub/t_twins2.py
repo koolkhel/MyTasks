@@ -176,10 +176,20 @@ def t_untouched():
         str([b.key for b in TaskInput.__dict__.get("BINDINGS",[])]))
 
 # ---------------- 3.1 / 3.2 the property over every binding ----------
+CLASSES=("TaskApp","Confirm","DatePicker","TaskFocus","Help","TaskInput",
+         "SearchInput")
+
 def t_property():
-    print("3.1 every binding that could have a twin has one")
-    missing=[]
-    for name in ("TaskApp","Confirm","DatePicker","TaskFocus","Help","TaskInput"):
+    print("3.1 every binding that could have a twin has one, or says why not")
+    # Every key any of these classes binds, so that "the twin already belongs
+    # to another action" can be answered rather than assumed.
+    owners={}
+    for name in CLASSES:
+        for b in getattr(M,name).__dict__.get("BINDINGS",[]):
+            for k in b.key.split(","):
+                owners.setdefault(k.strip(), set()).add((name, b.action))
+    missing=[]; unreachable=[]
+    for name in CLASSES:
         cls=getattr(M,name)
         for b in cls.__dict__.get("BINDINGS",[]):
             parts=[k.strip() for k in b.key.split(",")]
@@ -187,15 +197,31 @@ def t_property():
             # was added by the expansion; asking for its twin would be asking
             # for a twin of a twin.
             added={KEY_TWINS[k] for k in parts if k in KEY_TWINS}
+            # Whether a Russian layout can reach this action at all: by a key
+            # that is the same in both, or by a twin that is present.
+            reachable=False
             for k in parts:
-                if k in added: continue
+                if k in added:
+                    reachable=True; continue
                 t=KEY_TWINS.get(k)
-                if t is not None and t not in parts:
+                if t is None or t in parts:
+                    # Layout-independent, or twinned as it should be.
+                    reachable=True; continue
+                # The twin is absent.  Allowed only where it already belongs
+                # to another action, because taking it would cost that action
+                # the key a person already knows -- which is why `/` carries
+                # `;` alongside it rather than claiming `.` from did-today.
+                if not (owners.get(t, set()) - {(name, b.action)}):
                     missing.append(f"{name}: {b.key} lacks the twin of {k} ({t})")
-    chk("no binding is missing a twin", not missing, "; ".join(missing))
+            if not reachable:
+                unreachable.append(f"{name}: {b.key} ({b.action})")
+    chk("no binding is missing a twin that was free", not missing,
+        "; ".join(missing))
+    chk("every action is reachable in either layout", not unreachable,
+        "; ".join(unreachable))
     print("3.2 no twin collides")
     problems=[]
-    for name in ("TaskApp","Confirm","DatePicker","TaskFocus","Help","TaskInput"):
+    for name in CLASSES:
         cls=getattr(M,name); seen={}
         for b in cls.__dict__.get("BINDINGS",[]):
             for k in [x.strip() for x in b.key.split(",")]:
