@@ -92,6 +92,19 @@ class run:
         return await self.ctx.__aexit__(*exc)
 
 
+def ordered(tid, title, n):
+    """A task whose place in the day is set, so the view's order is known.
+
+    Without a stored order, tasks sharing a day fall back to being ordered by
+    title -- which is fine for the board and useless for a check about which
+    row comes next.  The first run of the group below asserted against the
+    order the fixtures were written in and failed on all of it.
+    """
+    task = mk(tid, title, TODAY)
+    task.raw["scheduleOrder"] = n * 100
+    return task
+
+
 def row(app, title):
     return next(t for t in app.tasks if (t.raw.get("title") or "") == title)
 
@@ -114,6 +127,41 @@ def titles_of(app):
 def status(app):
     return str(app.query_one("#status").content)
 
+# ---- reading what the table actually drew ---------------------------------
+
+def row_style(app, task):
+    """The style the table computes for a row's whole width."""
+    from rich.style import Style
+    table = app.query_one(DataTable)
+    at = next(i for i, t in enumerate(app.tasks) if t.id == task.id)
+    return table._get_row_style(at, Style())
+
+def line_of(app, task):
+    """The rendered line for a row, as segments.
+
+    Read through the table's own rendering rather than off the cell text, so
+    what is checked is what a person would see -- the padding between the
+    columns included, which is the difference between a bar and highlighted
+    words.
+    """
+    table = app.query_one(DataTable)
+    at = next(i for i, t in enumerate(app.tasks) if t.id == task.id)
+    return list(table.render_line(at + (1 if table.show_header else 0)))
+
+def backgrounds(app, task):
+    return {seg.style.bgcolor for seg in line_of(app, task) if seg.style}
+
+def title_segments(app, task):
+    """The segments carrying a row's title, with their colour and dimness."""
+    want = (task.raw.get("title") or "")[:12]
+    out = []
+    for seg in line_of(app, task):
+        if seg.style is not None and want and want[:8] in seg.text:
+            out.append(seg)
+    return out
+
+
+
 
 # ------------------------------------------------------------------ 3.1
 
@@ -126,8 +174,13 @@ async def group_3_1():
         await cursor_to(app, pilot, "first")
         await pilot.press("v")
         check("the row is marked", titles_of(app), ["first"])
+        # The key steps the cursor on, so taking a mark off means going back
+        # to the row first.  Pressing twice in place used to toggle; now it
+        # marks two rows, which is the point of the change.
+        await cursor_to(app, pilot, "first")
         await pilot.press("v")
-        check("pressing it again takes the mark off", titles_of(app), [])
+        check("pressing it again on that row takes the mark off",
+              titles_of(app), [])
 
         print("\n  the order is the order of pressing, not the order drawn")
         await cursor_to(app, pilot, "third")
@@ -180,6 +233,9 @@ async def group_3_2():
         # would vanish on exactly the row a person is looking at.
         table = app.query_one(DataTable)
         at = next(i for i, t in enumerate(app.tasks) if t.id == first.id)
+        # Marking steps the cursor on, so it has to be brought back to read
+        # the row as the selected one.
+        await cursor_to(app, pilot, "first")
         check("the marked row is the selected one", table.cursor_row, at)
         # Compared against the unmarked cell rather than against what this
         # row drew a moment ago.  Comparing a cell with itself passes
@@ -339,12 +395,290 @@ async def group_3_5():
               "marked" in status(app), False)
 
 
+
+
+# ------------------------------------------------------ the bar (group 1)
+
+async def group_bar():
+    print("\n1.2/1.3 a marked row is drawn as a bar across its whole width")
+    app = make(position=TODAY, tasks=[ordered("t1", "marked one", 1),
+                                      ordered("t2", "plain one", 2),
+                                      ordered("t3", "the cursor sits here", 3)])
+    async with run(app) as pilot:
+        marked = await cursor_to(app, pilot, "marked one")
+        await pilot.press("v")
+        # The key moves the cursor on, so park it well away from the row
+        # being read -- the cursor's own bar would otherwise be what is
+        # measured, and every check below would pass for the wrong reason.
+        await cursor_to(app, pilot, "the cursor sits here")
+        plain = row(app, "plain one")
+        cursor = row(app, "the cursor sits here")
+
+        m_style, p_style = row_style(app, marked), row_style(app, plain)
+        check("the marked row's computed style differs from a plain one's",
+              m_style != p_style, True)
+        check("and differs in its background", m_style.bgcolor != p_style.bgcolor,
+              True)
+        check("which is the one the selected row uses",
+              m_style.bgcolor,
+              app.query_one(DataTable).get_component_styles(
+                  "datatable--cursor").rich_style.bgcolor)
+        check("nothing else about the style changed",
+              (m_style.color, m_style.bold), (p_style.color, p_style.bold))
+
+        print("\n  and it covers the padding, not only the characters")
+        # One background across the whole rendered line is the difference
+        # between a bar and highlighted words: a bar built out of cell
+        # styles would leave the gaps between columns unpainted, and this
+        # is the check that would catch it.
+        check("the marked row's line carries exactly one background",
+              len(backgrounds(app, marked)), 1)
+        check("and it is the bar's",
+              backgrounds(app, marked).pop(), m_style.bgcolor)
+        # The padding itself, named rather than inferred.  A line with one
+        # background passes that check whether the background is the bar or
+        # the ground, so on its own it says nothing; this asks for the bar
+        # under a run of spaces, which is exactly what a bar built out of
+        # cell styles would fail to paint.
+        gaps = [seg for seg in line_of(app, marked)
+                if seg.text and not seg.text.strip()]
+        check("there is padding on the line to check",
+              bool(gaps), True)
+        check("and the bar is painted under it",
+              {seg.style.bgcolor for seg in gaps if seg.style}, {m_style.bgcolor})
+        check("a plain row's line is not painted with it",
+              m_style.bgcolor in backgrounds(app, plain), False)
+
+    print("\n1.4 the bar shows against either theme's ground")
+    for theme in ("turbo-cpp-dark", "turbo-cpp-blue"):
+        app = make(position=TODAY, tasks=[ordered("t1", "marked one", 1),
+                                          ordered("t2", "plain one", 2),
+                                          ordered("t3", "park here", 3)])
+        async with run(app) as pilot:
+            app.theme = theme
+            await settle(pilot, 6)
+            marked = await cursor_to(app, pilot, "marked one")
+            await pilot.press("v")
+            # Marking steps the cursor onto the next row, which would then
+            # be wearing the cursor's own bar -- the very colour this is
+            # about to look for on a row that should not have it.
+            await cursor_to(app, pilot, "park here")
+            await settle(pilot, 4)
+            bar = row_style(app, marked).bgcolor
+            ground = backgrounds(app, row(app, "plain one"))
+            # A difference in both themes, rather than a colour named here:
+            # the two have different grounds, and a check naming one would
+            # pass by luck on the other.
+            check(f"the bar differs from the ground in {theme}",
+                  bar not in ground, True)
+
+
+# --------------------------------------- the row stays readable (group 2)
+
+async def group_readable():
+    print("\n2.1 a marked row keeps neither its past-due colour nor its dimming")
+    late = mk("t1", "overdue one", TODAY - dt.timedelta(days=3))
+    app = make(position=TODAY, tasks=[late, mk("t2", "ordinary one", TODAY),
+                                      mk("t3", "park here", TODAY)])
+    async with run(app) as pilot:
+        overdue = await cursor_to(app, pilot, "overdue one")
+        await pilot.press("v")
+        await cursor_to(app, pilot, "park here")
+        ordinary = row(app, "ordinary one")
+        marked_fg = {s.style.color for s in title_segments(app, overdue)}
+        plain_fg = {s.style.color for s in title_segments(app, ordinary)}
+        check("the marked past-due title carries no colour of its own",
+              marked_fg, plain_fg)
+        check("and the row still says how overdue it is",
+              "ago" in str(app.row_for(overdue)[2]), True)
+
+    print("\n  the same row unmarked still carries it")
+    app = make(position=TODAY, tasks=[mk("t1", "overdue one",
+                                         TODAY - dt.timedelta(days=3)),
+                                      mk("t2", "ordinary one", TODAY)])
+    async with run(app) as pilot:
+        overdue, ordinary = row(app, "overdue one"), row(app, "ordinary one")
+        await cursor_to(app, pilot, "ordinary one")
+        unmarked_fg = {s.style.color for s in title_segments(app, overdue)}
+        plain_fg = {s.style.color for s in title_segments(app, ordinary)}
+        check("an unmarked past-due row is drawn in its own colour",
+              unmarked_fg != plain_fg, True)
+
+    print("\n2.2 a strike survives being marked, a dim does not")
+    app = make(position=TODAY, tasks=[mk("t1", "finished one", TODAY, checked=CHECKED),
+                                      mk("t2", "park here", TODAY)])
+    async with run(app) as pilot:
+        done = await cursor_to(app, pilot, "finished one")
+        await pilot.press("v")
+        await cursor_to(app, pilot, "park here")
+        segs = title_segments(app, done)
+        check("the finished title is still struck through",
+              any(s.style.strike for s in segs), True)
+        check("and is no longer dimmed", any(s.style.dim for s in segs), False)
+
+    app = make(position=TODAY, tasks=[mk("t1", "finished one", TODAY, checked=CHECKED),
+                                      mk("t2", "park here", TODAY)])
+    async with run(app) as pilot:
+        done = row(app, "finished one")
+        await cursor_to(app, pilot, "park here")
+        segs = title_segments(app, done)
+        check("an unmarked finished row is still dimmed",
+              any(s.style.dim for s in segs), True)
+        check("and still struck through",
+              any(s.style.strike for s in segs), True)
+
+
+# ------------------------------------- cursor against mark (group 3)
+
+async def group_cursor():
+    print("\n3.1/3.3 the cursor is still tellable from a mark")
+    app = make(position=TODAY, tasks=[ordered("t1", "first", 1),
+                                      ordered("t2", "second", 2),
+                                      ordered("t3", "third", 3)])
+    async with run(app) as pilot:
+        first = await cursor_to(app, pilot, "first")
+        await pilot.press("v")
+        second = await cursor_to(app, pilot, "second")
+        await pilot.press("v")
+        # Cursor now on "third"; "first" and "second" are marked.
+        await cursor_to(app, pilot, "second")
+        on_cursor = {(s.style.color, s.style.bold)
+                     for s in title_segments(app, second)}
+        off_cursor = {(s.style.color, s.style.bold)
+                      for s in title_segments(app, first)}
+        check("a marked row under the cursor is drawn as the selected row",
+              on_cursor != off_cursor, True)
+        check("they share the bar",
+              backgrounds(app, first) == backgrounds(app, second), True)
+        # A named difference, not mere inequality: two styles differing in
+        # something invisible would pass an inequality check and fail a
+        # person looking at the screen.
+        colours = {c for c, _ in on_cursor} | {c for c, _ in off_cursor}
+        check("and differ in text colour", len(colours), 2)
+        check("the cursor's text is the bold one",
+              (all(b for _, b in on_cursor), any(b for _, b in off_cursor)),
+              (True, False))
+
+    print("\n3.2 the mark's own character stays on the row under the cursor")
+    app = make(position=TODAY, tasks=[mk("t1", "only row", TODAY)])
+    async with run(app) as pilot:
+        only = await cursor_to(app, pilot, "only row")
+        await pilot.press("v")
+        await settle(pilot, 4)
+        check("marking the last row leaves the cursor on it",
+              app.tasks[app.query_one(DataTable).cursor_row].id, only.id)
+        check("and the mark character is there to say it is marked",
+              main.COPY_MARK in cell(app, only), True)
+        await pilot.press("v")
+        await settle(pilot, 4)
+        check("pressing again takes it off, visibly",
+              main.COPY_MARK in cell(app, only), False)
+
+
+# ------------------------------------------- the cursor moves on (group 4)
+
+async def group_advance():
+    print("\n4.1/4.2 marking moves the cursor on, so a run needs one key")
+    names = ["one", "two", "three", "four", "five", "six"]
+    app = make(position=TODAY,
+               tasks=[ordered(f"t{n}", name, n) for n, name in enumerate(names)])
+    async with run(app) as pilot:
+        table = app.query_one(DataTable)
+        await cursor_to(app, pilot, "one")
+        await pilot.press("v")
+        check("one press marks the row and steps down",
+              (titles_of(app), app.tasks[table.cursor_row].raw.get("title")),
+              (["one"], "two"))
+        for _ in range(3):
+            await pilot.press("v")
+            await settle(pilot, 3)
+        check("four presses mark the first four, in order",
+              titles_of(app), ["one", "two", "three", "four"])
+        check("and leave the cursor on the fifth",
+              app.tasks[table.cursor_row].raw.get("title"), "five")
+        check("no row was marked twice", len(app.marked), len(set(app.marked)))
+
+    print("\n4.3 taking a mark off moves on as well")
+    app = make(position=TODAY, tasks=[ordered("t1", "one", 1),
+                                      ordered("t2", "two", 2),
+                                      ordered("t3", "three", 3)])
+    async with run(app) as pilot:
+        table = app.query_one(DataTable)
+        await cursor_to(app, pilot, "one")
+        await pilot.press("v")
+        await cursor_to(app, pilot, "one")
+        await pilot.press("v")
+        check("the mark came off", titles_of(app), [])
+        check("and the cursor moved on just the same",
+              app.tasks[table.cursor_row].raw.get("title"), "two")
+
+    print("\n4.4 the last row keeps the cursor")
+    app = make(position=TODAY, tasks=[ordered("t1", "one", 1),
+                                      ordered("t2", "last", 2)])
+    async with run(app) as pilot:
+        table = app.query_one(DataTable)
+        await cursor_to(app, pilot, "last")
+        await pilot.press("v")
+        check("the last row is marked", titles_of(app), ["last"])
+        check("and the cursor stayed on it",
+              app.tasks[table.cursor_row].raw.get("title"), "last")
+        await pilot.press("v")
+        check("pressing again unmarks it", titles_of(app), [])
+        check("and the cursor is still there",
+              app.tasks[table.cursor_row].raw.get("title"), "last")
+
+    print("\n4.5 the step follows what is drawn, not what is held")
+    app = make(position=TODAY, tasks=[ordered("t1", "keep alpha", 1),
+                                      ordered("t2", "hide beta", 2),
+                                      ordered("t3", "keep gamma", 3)])
+    async with run(app) as pilot:
+        table = app.query_one(DataTable)
+        app.searching = "keep"
+        app.repaint()
+        await settle(pilot, 6)
+        check("the search removed the middle row",
+              [t.raw.get("title") for t in app.tasks],
+              ["keep alpha", "keep gamma"])
+        await cursor_to(app, pilot, "keep alpha")
+        await pilot.press("v")
+        check("the cursor stepped over the row the search removed",
+              app.tasks[table.cursor_row].raw.get("title"), "keep gamma")
+
+
+def group_hook():
+    print("\n5.1 the framework hook the bar depends on")
+    import inspect
+    from textual.widgets import DataTable as _DataTable
+    # Private API, deliberately overridden: it is the only place a row that
+    # is not the cursor can be given a background across its whole width.  A
+    # rename in a future Textual would leave marks silently undrawn -- no
+    # error, no failed import, just no bar -- so the name is asserted rather
+    # than assumed.  The same guard `t_crash` puts on its own hook.
+    check("Textual still calls its hook _get_row_style",
+          hasattr(_DataTable, "_get_row_style"), True)
+    check("and the board overrides it rather than adding a new name",
+          "_get_row_style" in vars(main.TaskTable), True)
+    check("the override goes on to the framework's",
+          "super()._get_row_style" in
+          open(_os.path.join(_REPO, "main.py"), encoding="utf-8").read(), True)
+    # The arguments too: a hook that kept its name and changed its shape
+    # would fail at the first redraw rather than here, which is worse.
+    check("it still takes the row and a base style",
+          list(inspect.signature(_DataTable._get_row_style).parameters)[1:],
+          ["row_index", "base_style"])
+
+
 def main_():
     asyncio.run(group_3_1())
     asyncio.run(group_3_2())
     asyncio.run(group_3_3())
     asyncio.run(group_3_4())
     asyncio.run(group_3_5())
+    asyncio.run(group_bar())
+    asyncio.run(group_readable())
+    asyncio.run(group_cursor())
+    asyncio.run(group_advance())
+    group_hook()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1
 

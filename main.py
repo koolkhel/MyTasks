@@ -26,6 +26,7 @@ from datetime import date, datetime, time, timedelta
 from time import monotonic, sleep
 from typing import Any, Callable, Iterable, Iterator
 
+from rich.style import Style
 from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
@@ -551,6 +552,47 @@ def from_markdown(line: str) -> "tuple[str, bool] | None":
     if not text:
         return None
     return text, done
+
+
+class TaskTable(DataTable):
+    """The board's list, which can draw a bar on a row that is not the cursor.
+
+    The table draws a cell in two layers: a style under the cell's own markup
+    and a style over it.  A row's background comes from the first, so the
+    cell's markup paints on top of it; the selected row's colours come from
+    the second, which is why they replace whatever the cell asked for.  That
+    second layer is built from the cursor and hover flags and from nothing
+    else, so there is no way to put an arbitrary row's style there.
+
+    Hence a subclass.  `_get_row_style` is the one place a row that is not
+    the cursor can be given a background across its whole width -- the
+    padding between columns included, which is what makes it read as a bar
+    rather than as highlighted words.
+
+    It is a private method of the framework's, and a version that renamed it
+    would leave marks silently undrawn: no error, no failed import, just no
+    bar.  A suite checks the name exists rather than leaving that to be
+    noticed on screen.
+    """
+
+    def _get_row_style(self, row_index: int, base_style: Style) -> Style:
+        style = super()._get_row_style(row_index, base_style)
+        app = self.app
+        marked = getattr(app, "marked", None)
+        if not marked or row_index < 0:
+            return style
+        tasks = getattr(app, "tasks", ())
+        if row_index >= len(tasks):
+            return style
+        if tasks[row_index].id not in marked:
+            return style
+        # The selected row's own background, not a colour of this board's
+        # invention: the themes declare the DOS sixteen colours and nothing
+        # else, and a blended or dimmed one would be a value neither holds.
+        # The text is left alone, so a marked row carries the ordinary
+        # colour where the selected row carries its bolder, paler one.
+        return style + Style(bgcolor=self.get_component_styles(
+            "datatable--cursor").rich_style.bgcolor)
 
 
 class KeyBar(Static):
@@ -1830,7 +1872,7 @@ class TaskApp(App[None]):
             # No zebra striping: it paints every other row a lighter shade,
             # which stops the ground being the ground.  Turbo C++ had no
             # alternating rows either.
-            yield DataTable(id="tasks", cursor_type="row")
+            yield TaskTable(id="tasks", cursor_type="row")
             # The pane scrolls, and the text still goes to `#detail`.  Two
             # widgets rather than one scrollable `Static` because that id is
             # an interface: four suites read the note back through it, and
@@ -3924,7 +3966,12 @@ class TaskApp(App[None]):
                 # finished and how the notification itself draws the issue's
                 # key.  One vocabulary for "this is done" rather than two.
                 # The row keeps its own mark, so it is still a mail row.
-                subject = f"[strike dim]{subject}[/]"
+                #
+                # The dimming goes while the row is marked, for the reason
+                # the same drop is made on a task below: dimmed text on the
+                # bar cannot be read.  The strike stays, being a style.
+                subject = (f"[strike]{subject}[/]" if task.id in self.marked
+                           else f"[strike dim]{subject}[/]")
             return (
                 "",
                 self.marked_cell(task, MAIL_ROW_MARK),
@@ -3953,7 +4000,10 @@ class TaskApp(App[None]):
                 "",
                 self.marked_cell(task, EVENT_ROW_MARK),
                 _event_label(task.raw.get(EVENT_MINUTES)),
-                self.shortened(f"[dim]{name}[/dim]" if over else name, self.title_width),
+                self.shortened(
+                    f"[dim]{name}[/dim]" if over and task.id not in self.marked
+                    else name,
+                    self.title_width),
                 self.shortened(
                     f"[dim]{escape(task.raw.get(EVENT_CALENDAR) or '')}[/dim]",
                     _PROJECT_WIDTH,
@@ -3970,9 +4020,21 @@ class TaskApp(App[None]):
             if late
             else task.start_label(self.tz)
         )
+        # A marked row is drawn on a bar, and neither of these survives it.
+        # Measured against that bar: the past-due colour comes out at 1.30
+        # to 1 and dimmed text lower still, where the ordinary colour is
+        # 2.68 to 1 -- so a marked row keeping them would be a row nobody
+        # could read.  Dropping them is not a new rule: the selected row
+        # already loses its title colour, and a past-due row that is
+        # selected is told apart by the age it shows instead.  A marked one
+        # is told apart the same way.
+        #
+        # The strike stays.  It is a style rather than a colour and is as
+        # legible on the bar as off it.
+        marked = task.id in self.marked
         if task.done or task.cancelled:
-            title = f"[strike dim]{title}[/]"
-        elif late:
+            title = f"[strike]{title}[/]" if marked else f"[strike dim]{title}[/]"
+        elif late and not marked:
             title = f"[{self.late_colour}]{title}[/]"
         project = self.projects.get(task.project_id or "", "")
         return (
@@ -4671,6 +4733,21 @@ class TaskApp(App[None]):
         else:
             self.marked.append(task.id)
             self._marked_rows[task.id] = task
+        # And on to the next row, so a run can be marked by pressing the one
+        # key over and over: the rows a person marks are usually next to each
+        # other, and leaving the cursor put made every mark cost a second
+        # press that was nearly always the same one.  Whether the press put a
+        # mark on or took one off, which is one rule rather than two.
+        #
+        # The next row the view is drawing, not the next the board holds, so
+        # a search in force is followed rather than stepped over.  And set
+        # before the redraw rather than after: redrawing puts the cursor back
+        # on whatever is recorded as selected, so moving it first is what
+        # makes the move survive -- the same order ticking already uses.
+        rows = self.tasks
+        here = next((i for i, row in enumerate(rows) if row.id == task.id), None)
+        if here is not None and here + 1 < len(rows):
+            self._selected_id = rows[here + 1].id
         self.repaint()
 
     def marked_tasks(self) -> list[Task]:
