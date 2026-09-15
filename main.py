@@ -4365,6 +4365,18 @@ class TaskApp(App[None]):
         self.load()
 
     def action_toggle(self) -> None:
+        if self.marked:
+            # A mail row in the set is passed over like any other row the
+            # board does not own.  On one row this key files the message
+            # away on the server, which is a different thing entirely, and
+            # folding it in would make one press do two unlike things to two
+            # kinds of row -- one of them over the network.
+            got = self.rows_for_write()
+            if got is None:
+                return
+            rows, passed, _ = got
+            self.toggle_many(rows, passed)
+            return
         task = self.selected
         if task is None or self.client is None:
             return
@@ -4390,34 +4402,65 @@ class TaskApp(App[None]):
             select=self.next_open_after(task) if want_done else None,
         )
 
+    def toggle_many(self, rows: "list[Task]", passed: int) -> None:
+        """Finish a marked set, or bring it all back.
+
+        Driven to one state rather than flipped row by row.  Where any row is
+        unfinished they all become finished; where every one is finished they
+        all come back.  A person pressing this over a set means "make these
+        done" -- flipping each against its own state answers a question
+        nobody asked, and is what a loop over the single-row code would
+        produce by accident.
+
+        The selection moves nowhere.  Moving on exists so that one key works
+        a list down a row at a time, and a set is not worked down: there is
+        no next row that follows from having finished several at once.
+        """
+        client = self.client
+        want_done = any(not task.done for task in rows)
+        label = "Ticking" if want_done else "Unticking"
+        self.submit_many(
+            rows, True, label,
+            lambda task: (lambda tid: client.set_done(task, want_done)),
+            lambda task: {"checked": CHECKED if want_done else EMPTY},
+        )
+        self.say_what_happened("Finished" if want_done else "Brought back",
+                               len(rows), passed)
+
     def action_done_for_today(self) -> None:
         """Record today's work on the selected task and move it to tomorrow.
 
         Distinct from ticking on purpose: this leaves the task open.
         """
-        task = self.selected
-        if task is None or self.client is None:
+        got = self.rows_for_write()
+        if got is None:
             return
+        rows, passed, many = got
         client = self.client
         # Where it lands: tomorrow, all-day, and no longer set aside -- the
         # same schedule `done_for_today` applies once the record is in.
         tomorrow = datetime.now(self.tz).date() + timedelta(days=1)
-        self.submit_write(
-            "Done for today",
-            task,
-            lambda tid: client.done_for_today(task),
-            {
-                "start": singularity.iso_z(
-                    datetime.combine(tomorrow, time.min, tzinfo=self.tz)
-                ),
-                "useTime": False,
-                "deferred": False,
-            },
+        landing = {
+            "start": singularity.iso_z(
+                datetime.combine(tomorrow, time.min, tzinfo=self.tz)
+            ),
+            "useTime": False,
+            "deferred": False,
+        }
+        self.submit_many(
+            rows, many, "Done for today",
+            lambda task: (lambda tid: client.done_for_today(task)),
+            lambda task: dict(landing),
+            # Said once for the whole set: the writes share a group, so the
+            # entry they join carries this note once however many rows it
+            # holds.
             undo_note=(
                 "the date came back, but the record of the day's work "
                 "cannot be withdrawn"
             ),
         )
+        if many:
+            self.say_what_happened("Recorded", len(rows), passed)
 
     def move_task(self, step: int, label: str) -> None:
         """Carry the selected task past its neighbour and store where it lands.
@@ -4793,6 +4836,119 @@ class TaskApp(App[None]):
                 rows.append(task)
         return rows
 
+    def acting_on(self) -> "tuple[list[Task], int]":
+        """Which rows the key being pressed is about, and how many it cannot write.
+
+        The marked rows where any row is marked, the selected one otherwise.
+        Where rows are marked the selected row takes no part: a mark is a
+        choice somebody made, and the cursor is only where they happen to be
+        standing.
+
+        Rows the board does not own are separated out rather than refused.  A
+        set gathered by hand across views will hold a message or an event
+        sooner or later, and giving up on the whole action on account of one
+        would make marking useless in the inbox, which is where rows most
+        want gathering.  They are counted so that a set of six which wrote
+        four is not read as a set of four.
+
+        Answered in one place so that seven keys cannot come to answer it
+        seven ways.  A key that forgot to ask would go on acting on the
+        selected row and nothing would fail, which is why each of them is
+        checked by name rather than the rule being checked once.
+        """
+        if self.marked:
+            rows = self.marked_tasks()
+        else:
+            one = self.selected
+            rows = [one] if one is not None else []
+        mine = [t for t in rows if not self.is_foreign(t)]
+        return mine, len(rows) - len(mine)
+
+    def say_what_happened(self, did: str, wrote: int, passed: int) -> None:
+        """Report one action's effect on a set, once.
+
+        One sentence however many rows were written, because a set is one
+        thing a person did.  The rows passed over are counted rather than
+        listed: they are not what the action was about, and naming them
+        would put a message's subject on the status line.
+
+        Said only of a set.  A single row acting alone is what every one of
+        these keys did before marking existed, and it reports itself by the
+        row changing on screen.
+        """
+        if passed:
+            self.notice(f"{did} {wrote} \u00b7 {passed} not this board's to change")
+        else:
+            self.notice(f"{did} {wrote}")
+
+    def rows_for_write(self) -> "tuple[list[Task], int, bool] | None":
+        """The rows a write key should act on, or None where there are none.
+
+        Answers the rows, how many were set aside as not this board's, and
+        whether this is a set -- which decides whether the action reports
+        itself, a single row reporting by changing on screen.
+
+        With nothing marked the single-row path is kept exactly as it was,
+        refusal wording included: a message refused by name says where it
+        lives, which "1 row passed over" would not.  The set path cannot use
+        that wording, having several rows to speak for.
+
+        Answers None where there is nothing to write, having already said so.
+        """
+        if self.client is None:
+            return None
+        if not self.marked:
+            task = self.selected
+            if task is None or self.refuse_foreign(task):
+                return None
+            return [task], 0, False
+        rows, passed = self.acting_on()
+        if not rows:
+            self.notice(
+                f"Nothing marked here is this board's to change \u00b7 "
+                f"{passed} row(s) passed over", True)
+            return None
+        return rows, passed, True
+
+    def submit_many(
+        self,
+        rows: "list[Task]",
+        paced: bool,
+        label: str,
+        run_for: "Callable[[Task], Callable[[str], Any]]",
+        patch_for: "Callable[[Task], dict[str, Any]] | None" = None,
+        **kw: Any,
+    ) -> None:
+        """Queue one write per row, sharing one group so one undo reverses them.
+
+        Paced only for a set.  A single row goes straight to the queue as it
+        always did: pacing it would change the timing of every write key on
+        the board to solve a problem only a set has.
+        """
+        group = str(uuid.uuid4())
+        for task in rows:
+            def send(task: Task = task) -> str:
+                self.submit_write(
+                    label, task, run_for(task),
+                    patch_for(task) if patch_for is not None else None,
+                    group=group, **kw,
+                )
+                return task.id
+            if paced:
+                self.submit_paced(send)
+            else:
+                send()
+
+    def marks_off_screen(self) -> bool:
+        """Whether the marked set holds a row this view is not drawing.
+
+        Asked before a deletion, which cannot be undone.  Marks follow a
+        person between views, so the rows that would go cannot always be
+        seen, and a count alone reads as a count of what is on screen.
+        """
+        shown = {t.id for t in self.tasks}
+        return any(i not in shown for i in self.marked)
+
     def forget_gone_marks(self) -> None:
         """Drop the mark on a row the board no longer holds.
 
@@ -4836,28 +4992,33 @@ class TaskApp(App[None]):
         self.marked = keep
 
     def action_cancel_task(self) -> None:
-        task = self.selected
-        if task is None or self.client is None:
+        got = self.rows_for_write()
+        if got is None:
             return
+        rows, passed, many = got
         client = self.client
-        self.submit_write(
-            "Cancelling",
-            task,
-            lambda tid: client.cancel_task(tid),
-            {"checked": CANCELLED},
+        self.submit_many(
+            rows, many, "Cancelling",
+            lambda task: (lambda tid: client.cancel_task(tid)),
+            lambda task: {"checked": CANCELLED},
         )
+        if many:
+            self.say_what_happened("Cancelled", len(rows), passed)
 
     @work
     async def action_schedule(self) -> None:
-        task = self.selected
-        if task is None or self.client is None:
+        got = self.rows_for_write()
+        if got is None:
             return
-        if self.refuse_foreign(task):
-            return
+        rows, passed, many = got
         today = datetime.now(self.tz).date()
-        choice = await self.push_screen_wait(
-            DatePicker(f"Date for “{escape(task.title)}”", today)
-        )
+        # Asked once for the whole set.  The answer is the same for every row
+        # by construction -- it is one decision about rows somebody chose --
+        # and asking per row is the twenty-questions problem the board's own
+        # rule about confirmations warns against.
+        about = (f"Date for {len(rows)} marked task(s)" if many
+                 else f"Date for “{escape(rows[0].title)}”")
+        choice = await self.push_screen_wait(DatePicker(about, today))
         if choice is None:
             return
         if choice == "today":
@@ -4893,12 +5054,17 @@ class TaskApp(App[None]):
                 "useTime": False,
                 "deferred": False,
             }
-        self.submit_write(
-            f"Moving to {label}",
-            task,
-            lambda tid: client.set_schedule(tid, target),
-            patch,
+        # No stored order is sent, here or anywhere a date is set.  That is
+        # what lets a set land on another day without disturbing the sequence
+        # already there: each task keeps the order it had and the day sorts
+        # them by it.
+        self.submit_many(
+            rows, many, f"Moving to {label}",
+            lambda task: (lambda tid: client.set_schedule(tid, target)),
+            lambda task: dict(patch),
         )
+        if many:
+            self.say_what_happened(f"Moved to {label}:", len(rows), passed)
 
     @work
     async def action_add(self) -> None:
@@ -5229,45 +5395,55 @@ class TaskApp(App[None]):
         Moving a task that is already filed gives up nothing it still has, so
         it is not asked.
         """
-        task = self.selected
-        if task is None or self.client is None:
+        got = self.rows_for_write()
+        if got is None:
             return
-        if self.refuse_foreign(task):
-            return
+        rows, passed, many = got
         if not self.projects:
             self.set_status("No projects to file into", True)
             return
+        was = rows[0].project_id if not many else None
+        about = (f"Project for {len(rows)} marked task(s)" if many
+                 else f"Project for “{escape(rows[0].title)}”")
         chosen = await self.push_screen_wait(
-            ProjectPicker(f"Project for “{escape(task.title)}”", self.projects,
-                          task.project_id)
+            ProjectPicker(about, self.projects, was)
         )
-        if chosen is None or chosen == task.project_id:
+        if chosen is None:
             return
-        if task.project_id is None:
-            ok = await self.push_screen_wait(
-                Confirm(
-                    f"File “{escape(task.title)}” under "
-                    f"{escape(self.projects[chosen])}? "
-                    "It cannot be un-filed here."
-                )
+        rows = [t for t in rows if t.project_id != chosen]
+        if not rows:
+            return
+        # Confirmed where any row has no project yet, once for the set.  The
+        # question names how many would be filed for the first time, because
+        # that is the part of the set that cannot be taken back.
+        unfiled = [t for t in rows if t.project_id is None]
+        if unfiled:
+            question = (
+                f"File {len(unfiled)} task(s) with no project under "
+                f"{escape(self.projects[chosen])}? It cannot be un-filed here."
+                if many else
+                f"File “{escape(rows[0].title)}” under "
+                f"{escape(self.projects[chosen])}? It cannot be un-filed here."
             )
-            if not ok:
+            if not await self.push_screen_wait(Confirm(question)):
                 return
         client = self.client
-        self.submit_write(
-            f"Filing under {self.projects[chosen]}",
-            task,
-            lambda tid: client.set_project(tid, chosen),
-            {"projectId": chosen},
+        self.submit_many(
+            rows, many, f"Filing under {self.projects[chosen]}",
+            lambda task: (lambda tid: client.set_project(tid, chosen)),
+            lambda task: {"projectId": chosen},
             # A task that had no project cannot be returned to having none:
             # the API refuses every value that would.  Moving between
             # projects is ordinary, because a project to go back to exists.
             undo_reason=(
                 "filing a task that had no project cannot be undone · "
                 "the API cannot return it to having none"
-                if task.project_id is None else None
+                if unfiled else None
             ),
         )
+        if many:
+            self.say_what_happened(f"Filed under {self.projects[chosen]}:",
+                                   len(rows), passed)
 
     def action_green(self) -> None:
         """Mark the selected task as green, or take the mark off again.
@@ -5285,9 +5461,11 @@ class TaskApp(App[None]):
         the tag comes off again, so pressing the key twice leaves the task
         exactly as it was found.
         """
-        task = self.selected
-        if task is None or self.client is None:
+        got = self.rows_for_write()
+        if got is None:
             return
+        rows, passed, many = got
+        task = rows[0]
         if self.green_tag is None:
             self.set_status(
                 "No tag is set · put GREEN_TAG in .env to mark tasks", True
@@ -5303,57 +5481,75 @@ class TaskApp(App[None]):
                 f"The configured tag {self.green_tag} was not found", True
             )
             return
-        # A task the API answered without the field carries no tags, which
-        # is an empty list rather than nothing.  Settling that before the
-        # write is recorded matters: an undo sends the previous value back,
-        # and the API refuses a null where it wants an array.
-        task.raw.setdefault("tags", [])
-        marked = task.has_tag(self.green_tag)
-        tags = [t for t in task.tags if t != self.green_tag]
-        if not marked:
-            tags.append(self.green_tag)
-        client, wanted = self.client, list(tags)
+        # Driven to one state, like ticking: where any marked row lacks the
+        # mark they all get it, and where every one has it they all lose it.
+        # The tag each row ends up with is still its own -- this is the
+        # board's one read-modify-write, and the write carries back every
+        # other tag that row holds.  Building one list for the set would
+        # have taken those tags off every row but the first.
+        want_green = any(not t.has_tag(self.green_tag) for t in rows)
+        marked = not want_green
+        wanted_for = {}
+        for row in rows:
+            # A task the API answered without the field carries no tags,
+            # which is an empty list rather than nothing.  Settling that
+            # before the write is recorded matters: an undo sends the
+            # previous value back, and the API refuses a null where it wants
+            # an array.
+            row.raw.setdefault("tags", [])
+            tags = [t for t in row.tags if t != self.green_tag]
+            if want_green:
+                tags.append(self.green_tag)
+            wanted_for[row.id] = tags
+        client = self.client
 
-        def write(tid: str) -> Any:
-            """Send the tags, and for a removal make sure it actually took.
+        def write_for(row: Task) -> "Callable[[str], Any]":
+            wanted = list(wanted_for[row.id])
+            return lambda tid: self.send_tags(client, tid, wanted)
 
-            Runs on the queue that serialises this one task's writes, so
-            neither the wait nor a re-read holds up anything else: the board
-            has already shown the row without its mark and answers every key
-            meanwhile.
-
-            A removal waits behind a recent tag write, because the store
-            drops one that arrives too soon.  Waiting makes that rare, not
-            impossible, so the removal is then read back and sent again if
-            the tag is still there.  Only a removal needs this; setting a
-            tag was never seen to fail.
-            """
-            if wanted:
-                result = client.set_tags(tid, wanted)
-                self._tag_written[tid] = monotonic()
-                return result
-            result = None
-            for attempt in range(TAG_REMOVAL_ATTEMPTS):
-                since = self._tag_written.get(tid)
-                if since is not None:
-                    left = TAG_SETTLE_SECONDS - (monotonic() - since)
-                    if left > 0:
-                        sleep(left)
-                result = client.set_tags(tid, wanted)
-                self._tag_written[tid] = monotonic()
-                if attempt == TAG_REMOVAL_ATTEMPTS - 1:
-                    break
-                if not client.task_tags(tid):
-                    break
-            return result
-
-        self.submit_write(
+        self.submit_many(
+            rows, many,
             f"Unmarking {self.green_title or 'green'}" if marked
             else f"Marking {self.green_title or 'green'}",
-            task,
-            write,
-            {"tags": wanted},
+            write_for,
+            lambda row: {"tags": list(wanted_for[row.id])},
         )
+        if many:
+            self.say_what_happened(
+                "Unmarked" if marked else "Marked", len(rows), passed)
+
+    def send_tags(self, client: Any, tid: str, wanted: "list[str]") -> Any:
+        """Send the tags, and for a removal make sure it actually took.
+
+        Runs on the queue that serialises this one task's writes, so
+        neither the wait nor a re-read holds up anything else: the board
+        has already shown the row without its mark and answers every key
+        meanwhile.
+
+        A removal waits behind a recent tag write, because the store
+        drops one that arrives too soon.  Waiting makes that rare, not
+        impossible, so the removal is then read back and sent again if
+        the tag is still there.  Only a removal needs this; setting a
+        tag was never seen to fail.
+        """
+        if wanted:
+            result = client.set_tags(tid, wanted)
+            self._tag_written[tid] = monotonic()
+            return result
+        result = None
+        for attempt in range(TAG_REMOVAL_ATTEMPTS):
+            since = self._tag_written.get(tid)
+            if since is not None:
+                left = TAG_SETTLE_SECONDS - (monotonic() - since)
+                if left > 0:
+                    sleep(left)
+            result = client.set_tags(tid, wanted)
+            self._tag_written[tid] = monotonic()
+            if attempt == TAG_REMOVAL_ATTEMPTS - 1:
+                break
+            if not client.task_tags(tid):
+                break
+        return result
 
     @work
     async def action_rename(self) -> None:
@@ -5424,26 +5620,35 @@ class TaskApp(App[None]):
 
     @work
     async def action_delete(self) -> None:
-        task = self.selected
-        if task is None or self.client is None:
+        got = self.rows_for_write()
+        if got is None:
             return
-        if self.refuse_foreign(task):
-            return
+        rows, passed, many = got
         # The API deletes for real -- a deleted task 404s afterwards, it does
-        # not land in the basket -- so this always asks first.
-        ok = await self.push_screen_wait(
-            Confirm(f"Delete “{escape(task.title)}” for good?")
-        )
-        if not ok:
+        # not land in the basket -- so this always asks first.  Once for the
+        # whole set: asking per row would turn a set of twenty into twenty
+        # questions and teach a person to answer without reading.
+        if many:
+            # The count, and whether the set reaches past what is on screen.
+            # Marks follow a person between views, so the rows that would go
+            # cannot always be seen, and a count alone reads as a count of
+            # what is in front of them.
+            unseen = (" Some are not in this view."
+                      if self.marks_off_screen() else "")
+            question = f"Delete {len(rows)} marked task(s) for good?{unseen}"
+        else:
+            question = f"Delete “{escape(rows[0].title)}” for good?"
+        if not await self.push_screen_wait(Confirm(question)):
             return
         client = self.client
-        self.submit_write(
-            "Deleting",
-            task,
-            lambda tid: client.delete_task(tid),
+        self.submit_many(
+            rows, many, "Deleting",
+            lambda task: (lambda tid: client.delete_task(tid)),
             removes=True,
             undo_reason="a deletion cannot be undone · the task is gone for good",
         )
+        if many:
+            self.say_what_happened("Deleted", len(rows), passed)
 
     def action_focus_task(self) -> None:
         task = self.selected

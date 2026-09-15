@@ -18,7 +18,7 @@ sys.path.insert(0, _REPO)
 from harness import *
 import main, ical, mail, tracker
 from main import TaskApp
-from singularity import Bucket, CHECKED
+from singularity import Bucket, CHECKED, EMPTY
 from textual.widgets import DataTable
 
 TODAY = dt.datetime.now(TZ).date()
@@ -314,13 +314,20 @@ async def group_3_4():
         await cursor_to(app, pilot, "first")
         await pilot.press("v")
         print("\n  a write landing rebuilds the table")
+        # The cursor is parked on a row that is NOT marked.  A write key with
+        # anything marked acts on the marked rows and not on the row under
+        # the cursor, so this ticks "first" -- and the point of the check is
+        # that rebuilding the table around that write leaves the mark where
+        # it was put.
         await cursor_to(app, pilot, "second")
-        await pilot.press("space")            # tick the other row
+        await pilot.press("space")
         await settle(pilot, 10)
         check("the mark is still on the row it was put on",
               titles_of(app), ["first"])
-        check("and the row that was ticked is not marked",
-              row(app, "second").checked, CHECKED)
+        check("the marked row is the one that was ticked",
+              row(app, "first").checked, CHECKED)
+        check("and the row under the cursor was left alone",
+              row(app, "second").checked, EMPTY)
 
     print("\n  marks gathered from several views")
     app = make(position=TODAY,
