@@ -164,14 +164,29 @@ def t_no_shell():
         launch.count("Popen(") == 1
         and "start_new_session=True" in launch.split("Popen(", 1)[1],
         launch.split("Popen(", 1)[-1][:200])
-    chk("every stream of the started program goes nowhere",
-        launch.count("subprocess.DEVNULL") == 3
-        and all(f"{s}=subprocess.DEVNULL" in launch
-                for s in ("stdin", "stdout", "stderr")),
-        launch[-160:])
-    chk("and hands it the list it was given, unformatted",
-        "subprocess.Popen(argv" in launch and "f\"" not in launch
-        and "%" not in launch and ".join(" not in launch, launch[-200:])
+    # What the program says goes nowhere it could be seen from here.  The
+    # spec puts the weight on the session rather than the streams -- a child
+    # can open the terminal directly and bypass every stream it inherited --
+    # so these say what the streams are for: nothing the program writes may
+    # reach the view.
+    chk("nothing the started program writes can reach the board",
+        all(f"{s}=subprocess.DEVNULL" in launch for s in ("stdout", "stderr")),
+        launch[-200:])
+    # Its input is the board's to give, and never the terminal.  Either it
+    # gets nothing, or it gets exactly the text a caller handed over -- down
+    # a pipe, which is closed so the program can finish.
+    chk("its input is the board's to give, and is never the terminal",
+        "stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL"
+        in launch, launch[-300:])
+    chk("and what is fed is closed, so the program can end",
+        "stdin.write(feed" in launch and "stdin.close()" in launch,
+        launch[-300:])
+    chk("no stream is left to be inherited",
+        launch.count("stdin=") == 1 and launch.count("stdout=") == 1
+        and launch.count("stderr=") == 1, launch[-200:])
+    chk("and it hands over the list it was given, unformatted",
+        "Popen(\n            argv," in launch and "f\"" not in launch
+        and "%" not in launch and ".join(" not in launch, launch[-260:])
 
 
 async def t_refusals():

@@ -170,6 +170,15 @@ class StubClient:
         self._record("set_done", task.id, done)
         self.store[task.id].raw["checked"] = CHECKED if done else EMPTY
 
+    def complete_task(self, tid):
+        # The store has no way to create a finished task, so anything that
+        # makes one -- a pasted line arriving ticked -- creates it and then
+        # calls this.  Recorded separately from `set_done` so a suite can
+        # tell the two apart.
+        self._record("complete_task", tid)
+        self.store[tid].raw["checked"] = CHECKED
+        return self.store[tid]
+
     def cancel_task(self, tid):
         self._record("cancel_task", tid)
         self.store[tid].raw["checked"] = CANCELLED

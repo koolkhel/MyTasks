@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import subprocess
 import sys
 import threading
@@ -26,12 +27,13 @@ from time import monotonic, sleep
 from typing import Any, Callable, Iterable, Iterator
 
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.markup import escape
+from textual.message import Message
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.theme import Theme
@@ -112,6 +114,38 @@ MAIL_PREFIX = "mail:"
 #: tracker's arrow and an event's diamond: four kinds of row that cannot be
 #: ticked would otherwise look like four of the same thing.
 MAIL_ROW_MARK = "@"
+#: Shown beside a row's own mark while it is marked for copying.  The
+#: row-mark column is two cells wide and every row draws one character in it,
+#: so this costs no width anywhere.
+#:
+#: Plain ASCII, unlike every other mark on this board.  The rest sit in a
+#: column of their own or at the end of a line; this one sits beside another
+#: glyph in a fixed two-cell box, where a character the terminal renders two
+#: cells wide would push its neighbour out.  Every likely candidate --
+#: `▪`, `•`, `▸` -- is East-Asian-Ambiguous and is drawn double
+#: width in a CJK-configured terminal.  `+` is one cell everywhere, says
+#: "added to what I am taking", and is used nowhere else.
+COPY_MARK = "+"
+#: The local program that owns the clipboard.  It always works on the
+#: machine the board is running on and never works through a remote session;
+#: the terminal escape sequence is the other way round.  Neither covers
+#: both, so the board uses both.
+CLIPBOARD_COMMAND = ("pbcopy",)
+#: How many of one action's writes may be in flight at once.
+#:
+#: Measured against the store rather than chosen.  Creating tasks in
+#: parallel, 5 of 5 arrived and so did 10 of 10; at 20 three were refused and
+#: at 40 thirty-five were, each refusal an HTTP 500 naming a queue inside the
+#: store and how deep it had grown.  So it is the store's own queue backing
+#: up rather than a rate limit, and an unpaced paste of forty lines would
+#: lose thirty-five tasks without a word.
+#:
+#: Five rather than the ten that also passed whole: the board writes while a
+#: paste is running -- a tick, a move, a date -- and an action that took the
+#: whole proven-safe budget would push those into the same failure.  Every
+#: request took about the same time whatever the width, so the smaller cap
+#: costs rounds rather than throughput.
+PACED_AT_ONCE = 5
 #: The three things the mailbox indicator says, in one cell at the right of
 #: the day bar.  Chosen for width as much as for looks: every glyph here is
 #: unambiguously one terminal cell, where `◐` and `◑` are width-ambiguous
@@ -437,6 +471,88 @@ def worked_for(since: datetime, now: datetime) -> str:
     return f"{minutes // 60}h {minutes % 60:02d}m"
 
 
+#: A line's list decoration, in the order it has to come off: any indentation,
+#: then a bullet or a number, then a checkbox, then a struck-out pair.  Each is
+#: its own pattern rather than one that matches the lot, because a line may
+#: carry any of them without the others -- an outliner writes a bullet with no
+#: box, and this board writes a box after its bullet.
+#:
+#: The bullet may end the line as well as be followed by a space, so that an
+#: empty list item is decoration with nothing in it rather than a task called
+#: "-".  Requiring the space left a lone bullet looking like a title.
+_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])(?:\s+|$)")
+_BOX = re.compile(r"^\[([ xX])\]\s*")
+_STRUCK = re.compile(r"^~~(.+)~~$")
+
+
+def as_markdown(title: str, state: int = EMPTY) -> str:
+    """One row as the line a person pastes into an editor.
+
+    Markdown has two boxes and this board has three states, so a cancelled
+    task is written as a ticked box with its title struck through.  Without
+    the striking it would be indistinguishable from an ordinary finished
+    task, in the editor and on the way back.
+
+    A row the board does not own -- a message, an event, an issue -- has no
+    state of its own and is written unfinished, which is what the empty box
+    means here: nothing has been said about it either way.
+
+    Takes the title rather than a row so that what is written cannot depend
+    on how the row was drawn.  The cell a person sees has been shortened to
+    the column and may carry a count of messages; neither belongs in a line
+    somebody is going to paste somewhere else.
+    """
+    if state == CANCELLED:
+        return f"- [x] ~~{title}~~"
+    return f"- [{'x' if state == CHECKED else ' '}] {title}"
+
+
+def from_markdown(line: str) -> "tuple[str, bool] | None":
+    """A pasted line as a title and whether it is already finished.
+
+    Answers None where the line holds no task: an empty line, one of nothing
+    but whitespace, and one whose decoration is all there was.  A paste is
+    somebody's list, and a list has blank lines in it.
+
+    The decoration comes off in the order it goes on.  The indentation goes
+    because this board has no nesting to put it in -- an outliner's child is
+    a task here like any other.  The box is read rather than merely removed,
+    so a row copied out of the board and pasted straight back comes back as
+    it left.  The struck-out pair goes because the board itself writes it for
+    a cancelled task; the task comes back finished, which is the one thing a
+    round trip cannot carry, markdown having no third box.  It goes only
+    from a line whose box was ticked, which is the only kind of line the
+    board writes it on, so a title genuinely wrapped in tildes keeps them.
+
+    Nothing else is touched.  Whatever the editor left behind -- a tag, a
+    date, a note of its own -- stays in the title, because interpreting it
+    would mean guessing, and a guess that is wrong puts words in somebody's
+    task that they did not write and cannot see were changed.
+    """
+    text = line.strip()
+    if not text:
+        return None
+    text = _BULLET.sub("", text, count=1)
+    done = False
+    box = _BOX.match(text)
+    if box:
+        done = box.group(1) in "xX"
+        text = text[box.end():]
+    # Only where the box was ticked, because that is the only line this
+    # board writes them on -- a cancelled task is `- [x] ~~title~~` and there
+    # is no other.  Stripping them from an unticked line as well cost a task
+    # genuinely titled with a struck-out phrase its tildes, for no gain: no
+    # line the board writes could ever have looked like that one.
+    if done:
+        struck = _STRUCK.match(text.strip())
+        if struck:
+            text = struck.group(1)
+    text = text.strip()
+    if not text:
+        return None
+    return text, done
+
+
 class KeyBar(Static):
     """Every binding the board advertises, wrapped over as many rows as it takes.
 
@@ -540,6 +656,39 @@ class KeyBar(Static):
         self.rebuild()
 
 
+class TitleInput(Input):
+    """The prompt's box, which notices when a paste held more than one line.
+
+    Textual's input keeps the first line of a paste, drops the rest and
+    stops the event, so nothing further up ever learns the other lines
+    existed.  That is the right shape for a box holding one title and the
+    wrong silence: pressing the add key and pasting a list is the obvious
+    thing to try, and it quietly made one task out of five.
+
+    Overridden here rather than handled on the screen, because the screen
+    never sees the event: the input stops it.  Overriding costs nothing that
+    has to be handed back -- Textual calls every handler of this name up the
+    class chain, so the inherited one still runs and still fills the box.
+    """
+
+    class Truncated(Message):
+        """A paste held more lines than the box took."""
+
+        def __init__(self, dropped: int) -> None:
+            super().__init__()
+            self.dropped = dropped
+
+    def _on_paste(self, event: events.Paste) -> None:
+        # No call to the handler this overrides.  Textual walks the whole
+        # class chain and calls every `_on_paste` it finds, so the one on
+        # `Input` runs of its own accord -- calling it again put the pasted
+        # text in the box twice, which the first run of the suite caught as
+        # "firstfirst".  This only counts what the box did not take.
+        dropped = max(len(event.text.splitlines()) - 1, 0)
+        if dropped:
+            self.post_message(self.Truncated(dropped))
+
+
 class TaskInput(ModalScreen[str]):
     """One-line prompt used for adding and renaming tasks."""
 
@@ -553,11 +702,26 @@ class TaskInput(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Label(self.prompt, id="dialog-title")
-            yield Input(value=self.value, id="dialog-input")
+            yield TitleInput(value=self.value, id="dialog-input")
             yield Label("enter to confirm · esc to cancel", id="dialog-hint")
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
+
+    @on(TitleInput.Truncated)
+    def say_what_was_dropped(self, event: TitleInput.Truncated) -> None:
+        """Report the lines the box could not take.
+
+        The first line still lands in the box, which is what somebody
+        pasting a single line wants; only the rest is reported.  Where the
+        whole list is wanted, escape and paste onto the board itself, which
+        makes a task of every line -- so the message says that rather than
+        leaving a person to find it.
+        """
+        self.query_one("#dialog-hint", Label).update(
+            f"{event.dropped} more line(s) not taken · esc, then paste onto "
+            f"the board to add them all"
+        )
 
     @on(Input.Submitted)
     def submit(self, event: Input.Submitted) -> None:
@@ -958,10 +1122,12 @@ class Help(ModalScreen[None]):
                      Stays on as you move between views,
                      and the day bar names the term
                      while it does
-  esc                clear the search
+  esc                clear the search and any marked rows
   u                  undo the last change, then the one
-                     before it — says what it undid;
-                     never deletes anything
+                     before it — says what it undid.
+                     Deletes nothing, with one exception:
+                     undoing a paste removes the tasks
+                     that paste itself created
 
 [b]Looking at a task[/b]
   enter              show the selected task in full
@@ -975,6 +1141,27 @@ class Help(ModalScreen[None]):
                      Reading a note changes nothing, so
                      these work on a mail, calendar or
                      tracker row too
+
+[b]Taking tasks in and out[/b]
+  v                  mark the row under the cursor, or
+                     take the mark off it. Marks stay as
+                     you move between views, so you can
+                     gather rows from several days; the
+                     status line says how many you have.
+                     Any row can be marked, a message,
+                     an event or an issue included
+  y                  copy every marked row to the
+                     clipboard as markdown — "- [ ] " for
+                     an unfinished task and "- [x] " for
+                     a finished one. The marks stay, so
+                     you can paste twice; esc clears them
+  paste              paste lines into the board and each
+                     one becomes a task in the shown view.
+                     Bullets, numbers and checkboxes are
+                     stripped, a ticked box makes a
+                     finished task, and blank lines are
+                     skipped. One press of u removes the
+                     whole paste
 
 [b]Changing tasks[/b]
   space              tick / untick the selected task —
@@ -1139,6 +1326,10 @@ class Pending:
     # here is queued under a placeholder id, and whatever is queued behind
     # its creation must go to the real id the server hands back.
     run: Callable[[str], Any]
+    #: What the write is about, for a message naming it.  A failure used to
+    #: say only what kind of write had failed, which is enough when a person
+    #: pressed a key on one task and not enough when one action wrote forty.
+    subject: str = ""
     patch: dict[str, Any] = field(default_factory=dict)
     previous: dict[str, Any] = field(default_factory=dict)
     # Deleting is a change of existence, not of fields, so no patch can
@@ -1329,6 +1520,12 @@ class TaskApp(App[None]):
         # moment it is wanted, and the only thing on screen when the search
         # matches nothing at all.
         Binding("escape", "clear_search", "Clear search", show=False),
+        # The pair vim uses for the same two jobs: choose rows, then take
+        # them.  Both letters were free, and being the ones a person's
+        # fingers already know for "select" and "yank" is worth more here
+        # than any mnemonic spelt out of "mark" or "copy" would be.
+        Binding(keys("v"), "mark", "Mark"),
+        Binding(keys("y"), "copy_marked", "Copy"),
         Binding(keys("u"), "undo", "Undo"),
         # Named for both things it does: on a task it ticks, on a mail row
         # it files the message away where the board cannot show it again,
@@ -1437,6 +1634,32 @@ class TaskApp(App[None]):
         self.searching: str | None = None
         #: How many rows the search removed from the shown view.
         self.hidden_by_search = 0
+        #: The rows a person has marked to copy, by identity and in the order
+        #: they were marked.  Identities rather than row numbers because
+        #: `repaint` rebuilds the table from scratch whenever a write lands
+        #: or a source answers, and a row number would then name a different
+        #: row; a list rather than a set because the copied lines come out in
+        #: the order the rows were marked, which is the only order defined
+        #: when they were gathered from views that share none.  Nothing is
+        #: written anywhere and it does not survive the board closing.
+        self.marked: list[str] = []
+        #: The rows those identities named, as they were when marked.  Kept
+        #: because marks follow a person between views and a row marked in
+        #: the inbox is not in the day the copy happens from -- and because
+        #: the count has to be exact: a mark the copy could not turn into a
+        #: line would be a mark counted and not copied.  The shown copy is
+        #: preferred over this one where the board still holds it, which is
+        #: how undo already reaches a task the person has navigated away
+        #: from.
+        self._marked_rows: dict[str, Task] = {}
+        #: Writes waiting for room to be sent, and the tasks whose writes are
+        #: out and holding that room.  One action on this board can write
+        #: many tasks at once -- a paste, and the undo that takes it back --
+        #: and the store refuses them in bulk.  Everything else the board
+        #: does writes one task, takes no place in this queue and is not
+        #: slowed by it.
+        self._paced: "deque[Callable[[], str | None]]" = deque()
+        self._paced_out: set[str] = set()
         # What the working window last said, and whether a press is
         # overruling it.  The mode stays a plain boolean because `repaint`
         # reads it three times and must see one answer; a property reading
@@ -2658,6 +2881,32 @@ class TaskApp(App[None]):
         self.recheck_elapsed()
         self.apply_window()
 
+    def is_foreign(self, task: "Task | None") -> bool:
+        """Whether a row came from somewhere the board only reads.
+
+        The question `refuse_foreign` answers, without answering it out loud.
+        That one says so and reports having said so, which is right for a
+        write and wrong for anything that merely reads a row -- copying one
+        is not a refusal and must not put a notice on the screen.
+        """
+        return bool(self.is_mail(task) or self.is_event(task)
+                    or self.is_tracker(task))
+
+    def copy_line(self, task: Task) -> str:
+        """One row as the line it is copied out as.
+
+        The title comes off the row rather than out of the drawn cell: the
+        cell has been shortened to the column, and a mail row's carries the
+        count of messages behind the thread.  Neither belongs in text
+        somebody is about to paste into an editor.
+
+        A row the board does not own has no state of its own to write, so it
+        is written unfinished whatever the source says about it.
+        """
+        title = task.raw.get("title") or ""
+        state = EMPTY if self.is_foreign(task) else task.checked
+        return as_markdown(title, state)
+
     def refuse_foreign(self, task: Task | None) -> bool:
         """Say a row is not the board's to change, and report having said so.
 
@@ -2739,6 +2988,7 @@ class TaskApp(App[None]):
             task_id=task.id,
             label=label,
             run=run,
+            subject=subject or task.title,
             patch=patch,
             previous={key: task.raw.get(key) for key in patch},
             removes=removes,
@@ -2927,6 +3177,7 @@ class TaskApp(App[None]):
             for task in self._base:
                 if task.id == key:
                     task.raw.update(pending.patch)
+        self.settled(key)
         self.repaint()
         return key
 
@@ -2950,6 +3201,12 @@ class TaskApp(App[None]):
                 pending.task_id = new
         self._draining.discard(key)
         self._draining.add(new)
+        if key in self._paced_out:
+            # The place in the queue moves with the task, like everything
+            # else filed under the placeholder.  Left behind, it would be a
+            # place nothing could ever give back.
+            self._paced_out.discard(key)
+            self._paced_out.add(new)
         if self._selected_id == key:
             self._selected_id = new
         # An undo entry filed under the placeholder would reach an id that
@@ -2962,6 +3219,11 @@ class TaskApp(App[None]):
                 del entry.tasks[key]
             if key in entry.previous:
                 entry.previous[new] = entry.previous.pop(key)
+        # A creation never reaches the ordinary end of a write, which is
+        # where a place in the paced queue is given back -- it returns
+        # through here instead.  Asked under the new identity, because that
+        # is what anything queued behind the creation is filed under now.
+        self.settled(new)
         self.repaint()
         return new
 
@@ -2981,7 +3243,11 @@ class TaskApp(App[None]):
             # The task never came into being, so its row goes with it.
             self._base = [t for t in self._base if t.id != key]
         also = f" · {abandoned} more dropped" if abandoned else ""
-        self._notice = (f"{pending.label} failed: {message}{also}", True)
+        # Named, because one action can write many tasks: "pasting failed"
+        # across forty rows says nothing about which line the store refused.
+        about = f" “{pending.subject}”" if pending.subject else ""
+        self._notice = (f"{pending.label}{about} failed: {message}{also}", True)
+        self.settled(key)
         self.repaint()
 
     # -- rendering ---------------------------------------------------------
@@ -3316,6 +3582,10 @@ class TaskApp(App[None]):
         # The title column was declared before the table had a size, so the
         # first paint is where it learns how wide it really is.
         self.fit_columns()
+        # Before anything is drawn or counted: a mark on a row that has gone
+        # must not reach the count, and this is the one place every source
+        # has already answered.
+        self.forget_gone_marks()
         previous = table.cursor_row
         # Where the view was, because rebuilding the table loses it:
         # `DataTable.clear()` sets its scroll position to zero, and
@@ -3481,6 +3751,13 @@ class TaskApp(App[None]):
             # the day bar rather than repeated here, so that a long search
             # does not push the counts off a narrow line.
             bits.append(f"{self.hidden_by_search} hidden by search")
+        if self.marked:
+            # Every mark, not the ones this view draws.  Marks follow a
+            # person between views, so the count is the only place a mark
+            # made somewhere else -- or one a filter is hiding here -- can
+            # be seen at all.  Nothing is said with none marked: this
+            # reports something a person did, not a permanent fixture.
+            bits.append(f"{len(self.marked)} marked")
         in_flight = sum(len(q) for q in self._pending.values())
         if in_flight:
             bits.append(f"{in_flight} saving")
@@ -3595,6 +3872,22 @@ class TaskApp(App[None]):
             text.truncate(width, overflow="ellipsis")
         return text
 
+    def marked_cell(self, task: Task, mark: str) -> str:
+        """A row's own mark, with the copy mark in front of it if it carries one.
+
+        The column is two cells and every kind of row draws one character
+        there, so the mark goes in the cell already paid for rather than in
+        a column of its own -- which every view would pay for, on a board
+        that fits its title column to the terminal.
+
+        A character rather than a colour, for a reason measured on this
+        board before: the row cursor replaces a colour outright while a
+        style survives it, so a coloured mark would vanish on exactly the
+        row a person is looking at.  A glyph is neither, and survives by
+        being there.
+        """
+        return f"{COPY_MARK}{mark}" if task.id in self.marked else mark
+
     def row_for(self, task: Task) -> tuple[str, str, str, str, str]:
         mark = GREEN_MARK if self.is_green(task) else ""
         if self.is_tracker(task):
@@ -3609,7 +3902,7 @@ class TaskApp(App[None]):
             return (
                 _priority_letter(task.raw.get(TRACKER_PRIORITY) or "",
                                  task.raw.get(TRACKER_PRIORITY_VALUE) or ""),
-                TRACKER_ROW_MARK,
+                self.marked_cell(task, TRACKER_ROW_MARK),
                 _state_label(task.raw.get(TRACKER_STATE) or ""),
                 self.shortened(escape(task.raw.get("title") or ""), self.title_width),
                 self.shortened(
@@ -3634,7 +3927,7 @@ class TaskApp(App[None]):
                 subject = f"[strike dim]{subject}[/]"
             return (
                 "",
-                MAIL_ROW_MARK,
+                self.marked_cell(task, MAIL_ROW_MARK),
                 self._mail_when(task.raw.get(MAIL_WHEN) or 0),
                 self.shortened(subject, self.title_width),
                 self.shortened(
@@ -3658,7 +3951,7 @@ class TaskApp(App[None]):
             name = escape(task.raw.get("title") or "")
             return (
                 "",
-                EVENT_ROW_MARK,
+                self.marked_cell(task, EVENT_ROW_MARK),
                 _event_label(task.raw.get(EVENT_MINUTES)),
                 self.shortened(f"[dim]{name}[/dim]" if over else name, self.title_width),
                 self.shortened(
@@ -3684,7 +3977,7 @@ class TaskApp(App[None]):
         project = self.projects.get(task.project_id or "", "")
         return (
             mark,
-            MARKS[task.checked],
+            self.marked_cell(task, MARKS[task.checked]),
             when,
             self.shortened(title, self.title_width),
             self.shortened(f"[dim]{project}[/dim]", _PROJECT_WIDTH) if project else "",
@@ -4235,16 +4528,208 @@ class TaskApp(App[None]):
         self.repaint()
 
     def action_clear_search(self) -> None:
-        """Clear the search and bring every row back.
+        """Clear the search and the marks, and bring every row back.
 
         Escape is bound on the board itself, so it arrives whether or not
-        there is a search to clear; with none in force this does nothing
+        there is anything to clear; with neither in force this does nothing
         rather than costing a redraw.
+
+        Both at once, deliberately.  Escape is this board's one answer to
+        "never mind", and having it mean that for one of the two things a
+        person set and not the other would leave them pressing it and
+        watching half of what they did survive.
         """
-        if self.searching is None:
+        if self.searching is None and not self.marked:
             return
         self.searching = None
+        self.marked = []
+        self._marked_rows = {}
         self.repaint()
+
+    def clipboard_program(self, text: str) -> bool:
+        """Hand text to the local clipboard program, saying whether it took it.
+
+        A method of its own so that a suite can assert what would be handed
+        over without a program running and a person's clipboard being
+        replaced in the middle of a test run.
+
+        Through `launch` rather than starting a process here.  That is the
+        one place this board starts anything, and what it does about the
+        hazards -- no shell, a list of arguments, every stream sent nowhere,
+        and a session of the child's own so it cannot reach the terminal the
+        board is drawn on -- is wanted here as much as anywhere.
+        """
+        try:
+            return self.launch(list(CLIPBOARD_COMMAND), feed=text)
+        except OSError:
+            # No such program on this machine, which is an ordinary machine
+            # -- and the escape sequence may well have carried the text
+            # anyway, so this is answered rather than raised.
+            return False
+
+    def to_clipboard(self, text: str) -> list[str]:
+        """Put text on the system clipboard, by every route there is.
+
+        Two routes, because neither is enough on its own.  The escape
+        sequence is written out and the terminal may act on it, ignore it, or
+        want the permission turning on first; it is the only one of the two
+        that works through a remote session.  The local program always works
+        on the machine the board is running on and never works through one.
+
+        Which terminals do what is deliberately not written down here.  This
+        board holds no list of terminals and branches on none: it says the
+        standard thing and lets the terminal answer, which is the same rule
+        the tab title follows.
+
+        Writing the clipboard twice costs nothing and takes nothing away, so
+        there is no reason to choose.  Which routes were attempted is
+        answered rather than logged, so that a suite can tell.
+        """
+        routes = ["terminal"]
+        self.copy_to_clipboard(text)
+        if self.clipboard_program(text):
+            routes.append("program")
+        return routes
+
+    def submit_paced(self, submit: "Callable[[], str | None]") -> None:
+        """Send a write when the store has room for it, not before.
+
+        `submit` does the submitting and answers the identity it queued
+        under, or None if it queued nothing.  A callable rather than the
+        write itself so that the row's placeholder, its undo group and its
+        failure handling are all made at the moment it is sent, by the same
+        `submit_write` every other action goes through.
+        """
+        self._paced.append(submit)
+        self.send_paced()
+
+    def send_paced(self) -> None:
+        """Start as many waiting writes as there is room for.  UI thread only."""
+        while self._paced and len(self._paced_out) < PACED_AT_ONCE:
+            ident = self._paced.popleft()()
+            if ident is not None:
+                self._paced_out.add(ident)
+
+    def settled(self, key: str) -> None:
+        """A task's writes are done with; give its place back if it held one.
+
+        Held until the task has nothing queued at all rather than until its
+        first write lands: a pasted line that arrives finished is a creation
+        with a completion queued behind it, and counting the place back at
+        the creation would put twice the intended number of requests in the
+        air.
+        """
+        if key not in self._paced_out or self._pending.get(key):
+            return
+        self._paced_out.discard(key)
+        self.send_paced()
+
+    def action_copy_marked(self) -> None:
+        """Put the marked rows on the clipboard, as markdown.
+
+        Every marked row, including one this view is not drawing and one a
+        filter is hiding: a mark is on a row rather than on a drawn line,
+        and the count on the status line has been saying how many there are.
+        A row copied while hidden is not a row copied in secret.
+
+        The marks are left in place.  Copying is a reading, and a person who
+        wanted the same rows in two places would otherwise have to mark them
+        twice; escape is how they go.
+        """
+        rows = self.marked_tasks()
+        if not rows:
+            # Rather than replacing whatever is on the clipboard with
+            # nothing, which is the one outcome a person cannot undo from
+            # here -- the board has no way to read a clipboard back.
+            self.notice("Nothing is marked · v marks the row under the cursor",
+                        True)
+            return
+        text = "".join(f"{self.copy_line(task)}\n" for task in rows)
+        self.to_clipboard(text)
+        self.notice(f"Copied {len(rows)} row(s)")
+
+    def action_mark(self) -> None:
+        """Mark the row under the cursor, or take the mark off it.
+
+        Every row the board draws, a message, an event and an issue
+        included.  Marking one does not change it -- the same argument that
+        lets a person scroll the note on a row the board does not own -- and
+        a day is most worth copying whole.
+
+        Writes nothing and asks nothing.  The mark is the only state on this
+        board that no request follows.
+        """
+        task = self.selected
+        if task is None:
+            return
+        # Acting again supersedes whatever was last said, as everywhere else
+        # on this board.
+        self._notice = None
+        if task.id in self.marked:
+            self.marked.remove(task.id)
+            self._marked_rows.pop(task.id, None)
+        else:
+            self.marked.append(task.id)
+            self._marked_rows[task.id] = task
+        self.repaint()
+
+    def marked_tasks(self) -> list[Task]:
+        """The marked rows, in the order they were marked.
+
+        The shown view's copy of a row where the board still has one, the
+        copy remembered at marking otherwise -- the same rule undo follows,
+        and for the same reason: marks outlive the view they were made in,
+        and a row renamed since should be copied as it is now.
+        """
+        known = {t.id: t for t in self.tasks}
+        rows = []
+        for ident in self.marked:
+            task = known.get(ident) or self._marked_rows.get(ident)
+            if task is not None:
+                rows.append(task)
+        return rows
+
+    def forget_gone_marks(self) -> None:
+        """Drop the mark on a row the board no longer holds.
+
+        A task deleted, or a message filed away somewhere else, would
+        otherwise leave a mark that can be neither seen nor taken off -- and
+        counted, so the board would go on reporting a row that is gone.
+
+        A row counts as gone only where the shown view would have drawn it
+        and did not.  The board fetches one view at a time, so a task missing
+        from what is in hand is usually missing because the person walked to
+        another day -- reading that as a deletion cleared every mark on the
+        first view change, which is the whole reason this is asked of the
+        view rather than of the fetch.
+
+        The calendar and the tracker are left alone entirely.  The calendar
+        is fetched a day at a time and the tracker answers for today, so
+        neither can say whether a row it is not currently reporting still
+        exists.  A mark on one of those lasts until it is taken off or
+        escape clears it.
+        """
+        if not self.marked:
+            return
+        held = {t.id for t in self._base}
+        held |= {f"{MAIL_PREFIX}{t.newest.ident}" for t in self.mail_threads}
+        def gone(ident: str) -> bool:
+            if ident in held:
+                return False
+            task = self._marked_rows.get(ident)
+            if task is None or self.is_event(task) or self.is_tracker(task):
+                return False
+            if self.is_mail(task):
+                # Mail is drawn in the inbox and nowhere else, so only the
+                # inbox can say a thread has left the folder.
+                return self.shows_mail
+            return self.belongs(task)
+        keep = [i for i in self.marked if not gone(i)]
+        if len(keep) == len(self.marked):
+            return
+        for ident in set(self.marked) - set(keep):
+            self._marked_rows.pop(ident, None)
+        self.marked = keep
 
     def action_cancel_task(self) -> None:
         task = self.selected
@@ -4363,6 +4848,123 @@ class TaskApp(App[None]):
                 "if you meant to"
             ),
         )
+
+    def on_paste(self, event: events.Paste) -> None:
+        """Text pasted onto the board becomes tasks in the shown view.
+
+        No key of the board's own.  The terminal delivers pasted text to the
+        application as one event carrying the whole of it, and a person
+        pasting into a task board means to put tasks on it.
+
+        The prompt for a title has a paste of its own and never reaches
+        here: an input that has focus takes the event and stops it.
+        """
+        self.paste_tasks(event.text)
+
+    def paste_tasks(self, text: str) -> None:
+        """One task for each line the text holds, in the view on screen.
+
+        Placed by the rules the add key follows -- undated in the inbox,
+        deferred in someday, on the shown day otherwise -- because a person
+        pasting into a view means it to land where what they add lands.
+
+        Every row appears at once and the writes follow a few at a time.
+        Both halves matter: forty rows a person can see is what makes the
+        paste feel like one action, and a store that takes forty creations
+        together refuses most of them.
+
+        One group, so one press of the undo key takes the whole paste back.
+        """
+        items = [read for read in (from_markdown(line)
+                                   for line in text.splitlines()) if read]
+        if not items or self.client is None:
+            return
+        client = self.client
+        if isinstance(self.position, Bucket):
+            common: dict[str, Any] = {"deferred": self.position.deferred}
+            orders: list[int | None] = [None] * len(items)
+        else:
+            common = {
+                "start": singularity.iso_z(
+                    datetime.combine(self.position, time.min, tzinfo=self.tz)
+                ),
+                "useTime": False,
+            }
+            # Spaced here rather than read once per task.  The day's last
+            # place is read off what is on screen, and nothing this paste
+            # writes is on screen yet, so asking again for each line answers
+            # the same number every time -- and every pasted task would tie
+            # with every other and fall back to being ordered by title.
+            first = self.next_order()
+            orders = [first + n * singularity.ORDER_STEP
+                      for n in range(len(items))]
+
+        group = str(uuid.uuid4())
+        made: list[Task] = []
+        for (title, done), order in zip(items, orders):
+            fields = dict(common)
+            if order is not None:
+                fields["scheduleOrder"] = order
+            made.append(Task({"id": f"tmp:{uuid.uuid4()}", "title": title,
+                              **fields}))
+        self._base = self._base + made
+        self._selected_id = made[0].id
+
+        def reverse(wrote: dict[str, Task]) -> bool:
+            """Delete every task the paste created."""
+            left = list(wrote.values())
+            if not left:
+                # Said rather than passed over: the entry has been taken off
+                # the stack by now, so silence would look like a key that
+                # did nothing.
+                self.notice("those tasks are no longer here · "
+                            "nothing to undo there", True)
+                return False
+            for task in left:
+                # Through the same queue the paste went through.  Forty
+                # deletions at once would meet the refusal the paste itself
+                # is paced to avoid, and a refused deletion leaves a task
+                # behind that the person believes they have taken back.
+                def drop(task=task) -> str:
+                    self.submit_write(
+                        "Deleting", task,
+                        lambda tid: client.delete_task(tid),
+                        removes=True, record=False,
+                    )
+                    # The identity, so the queue knows whose place this is.
+                    # Answering None -- which `submit_write` does -- left
+                    # every deletion unpaced and all forty going at once,
+                    # which is the failure the paste itself is paced to
+                    # avoid.
+                    return task.id
+                self.submit_paced(drop)
+            return True
+
+        for task, (title, done) in zip(made, items):
+            def send(task=task, title=title, done=done) -> str:
+                self.submit_write(
+                    "Pasting", task,
+                    lambda tid: client.create_task(
+                        title, **{k: v for k, v in task.raw.items()
+                                  if k not in ("id", "title")}),
+                    creates=True, group=group, subject=title,
+                    undo_action=reverse,
+                    undo_note=f"{len(items)} task(s) added by one paste",
+                )
+                if done:
+                    # The store cannot create a finished task, so this is a
+                    # creation with a completion queued behind it.  Queued
+                    # under the placeholder, which the adoption moves onto
+                    # the real identity when the creation confirms.
+                    self.submit_write(
+                        "Ticking", task,
+                        lambda tid: client.complete_task(tid),
+                        {"checked": CHECKED}, group=group, subject=title,
+                        record=False,
+                    )
+                return task.id
+            self.submit_paced(send)
+        self.notice(f"Pasted {len(items)} task(s)")
 
     def action_promote(self) -> None:
         """Turn the selected mail thread into a task on today.
@@ -4881,8 +5483,14 @@ class TaskApp(App[None]):
         # counts because every card counts, not because this key opened it.
         self.show_focus(task)
 
-    def launch(self, argv: list[str]) -> None:
+    def launch(self, argv: list[str], feed: str | None = None) -> bool:
         """Run a program and do not wait for it.
+
+        `feed` is text to hand the program on its standard input, for the one
+        caller that has something to say to a program rather than something
+        to ask of it.  It goes through here rather than starting a process of
+        its own so that everything below holds for it too -- the suites count
+        the places this board can start a process, and the count is one.
 
         A list of arguments and no shell, ever: the values in it come from a
         tracker and from a person, and neither is the board's to vouch for.
@@ -4918,9 +5526,24 @@ class TaskApp(App[None]):
         whatever it tries.  Nothing it does can be drawn on this terminal, and
         nothing it does can be read from it as though somebody had typed.
         """
-        subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        started = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        if feed is not None and started.stdin is not None:
+            # Written and closed, never waited on.  A program reading its
+            # input needs the end of it before it can finish, and nothing
+            # here wants its exit code.  The write cannot block in practice:
+            # what is fed this way is a list of task titles, far inside a
+            # pipe's buffer.
+            try:
+                started.stdin.write(feed.encode("utf-8"))
+                started.stdin.close()
+            except OSError:
+                return False
+        return True
 
     def note_step(self) -> int:
         """How far one press of a scrolling key moves the pane.

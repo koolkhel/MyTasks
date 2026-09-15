@@ -19,7 +19,7 @@ from harness import *
 import main, ical, mail, tracker
 from main import TaskApp, KeyBar, SearchInput
 from singularity import Bucket
-from textual.widgets import Input
+from textual.widgets import DataTable, Input
 
 TODAY = dt.datetime.now(TZ).date()
 WORK = "P-work-0001"
@@ -371,6 +371,40 @@ async def t_escape_clears():
         await settle(pilot)
         check("escape with no search in force does nothing",
               (app.searching, sorted(titles(app))), (None, ["alpha", "beta"]))
+
+    print("\n  and it clears the marked rows along with the search")
+    # Escape is this board's one answer to "never mind".  Clearing one of the
+    # two things a person set and not the other would leave them pressing it
+    # and watching half of what they did survive.
+    app = make(Bucket.INBOX, tasks=[triage("a", "alpha"), triage("b", "beta")])
+    async with run(app) as pilot:
+        table = app.query_one(DataTable)
+        table.move_cursor(row=0)
+        await settle(pilot, 2)
+        await pilot.press("v")
+        table.move_cursor(row=1)
+        await settle(pilot, 2)
+        await pilot.press("v")
+        await search(pilot, app, "alpha")
+        check("two rows marked and a search in force",
+              (len(app.marked), app.searching, len(app.tasks)), (2, "alpha", 1))
+        await pilot.press("escape")
+        await settle(pilot)
+        check("one press cleared both",
+              (app.marked, app.searching), ([], None))
+        check("and every row is back", sorted(titles(app)), ["alpha", "beta"])
+
+    print("\n  marks alone are cleared by it too")
+    app = make(Bucket.INBOX, tasks=[triage("a", "alpha"), triage("b", "beta")])
+    async with run(app) as pilot:
+        table = app.query_one(DataTable)
+        table.move_cursor(row=0)
+        await settle(pilot, 2)
+        await pilot.press("v")
+        check("one marked, no search", (len(app.marked), app.searching), (1, None))
+        await pilot.press("escape")
+        await settle(pilot)
+        check("escape clears the mark with no search in force", app.marked, [])
 
 async def t_cancel_and_empty():
     print("3.4 cancelling keeps the search, an empty term clears it")

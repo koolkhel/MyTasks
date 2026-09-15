@@ -152,8 +152,14 @@ async def t_refused():
               not any(r.startswith("tmp:") for r in rows(app)) and len(rows(app)) == 1,
               str(rows(app)))
         check("the original task is untouched", rows(app) == ["T-a"], str(rows(app)))
+        # The report names the task as well as the kind of write.  One
+        # action can now write many tasks -- a paste makes one per line --
+        # and "adding failed" across forty rows says nothing about which
+        # one the store would not take.
         check("the refusal is reported",
-              "Adding failed" in status(app) and "no room" in status(app), status(app))
+              "Adding" in status(app) and "no room" in status(app), status(app))
+        check("and it names the task it was about",
+              "doomed" in status(app), status(app))
 
 
 async def main_():
