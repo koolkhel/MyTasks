@@ -61,6 +61,38 @@ def build(messages):
     box.flush()
     return mail.Config(path, (FEED,))
 
+HOST = "https://track.example.invalid"
+
+def build_issues(entries):
+    """A mailbox of tracker-shaped notifications: (subject, key, done).
+
+    The markup shape a notification has and nothing else of it: invented
+    project keys, an .invalid host.  Two links to the issue, as a real one
+    carries -- the key, struck when the issue is finished, and the summary,
+    never struck.
+    """
+    root = tempfile.mkdtemp()
+    path = os.path.join(root, "mail_folders")
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
+    for i, (subject, key, done) in enumerate(entries):
+        style = "color:#676E75;" + (" text-decoration: line-through;" if done else "")
+        html = (f'<html><body><a style="{style}" href="{HOST}/issue/{key}">{key}</a>'
+                f'<a style="color:#1466c6;" href="{HOST}/issue/{key}">summary</a>'
+                f'</body></html>')
+        m = EmailMessage()
+        m["From"] = "tracker@example.invalid"
+        m["Subject"] = subject
+        m["Date"] = (NOW - dt.timedelta(minutes=(len(entries) - i) * 5)).strftime(
+            "%a, %d %b %Y %H:%M:%S %z")
+        m["Message-ID"] = f"<n{i}@example.invalid>"
+        m[mail.ISSUE_HEADER] = key
+        m.set_content("the plain part")
+        m.add_alternative(html, subtype="html")
+        box.add(mailbox.MaildirMessage(m))
+    box.flush()
+    return mail.Config(path, (FEED,))
+
 #: "not specified" must be tellable from "no mailbox", or the helper cannot
 #: express the very case it is asked to test.
 UNSET = object()
@@ -559,6 +591,56 @@ async def legible_together():
                   bar.rstrip()[-1:], main.MAIL_IDLE_MARK)
 
 
+async def issue_done_rows():
+    print("a row whose issue is finished says so")
+    cfg = build_issues([("still open", "ZZA-1", False),
+                        ("all done", "ZZA-2", True)])
+    async with board(mail_cfg=cfg, tasks=[]) as (app, pilot, opened):
+        drawn = {str(app.row_for(t)[3]).strip(): app.row_for(t) for t in app.tasks}
+        check("both rows are there", sorted(drawn), ["all done", "still open"])
+        # `row_for` hands back rich text; the styling is on the text rather
+        # than in the characters, so the check reads the styles.
+        done_cell = drawn["all done"][3]
+        open_cell = drawn["still open"][3]
+        check("the finished row is struck through",
+              any(sp.style and "strike" in str(sp.style) for sp in done_cell.spans), True)
+        check("the unfinished row is not",
+              any(sp.style and "strike" in str(sp.style) for sp in open_cell.spans), False)
+        check("and the finished row is still a mail row",
+              drawn["all done"][1], main.MAIL_ROW_MARK)
+        check("its subject is unchanged as text",
+              str(done_cell).strip(), "all done")
+
+    print("the mark is legible on the selected row")
+    async with board(mail_cfg=cfg, tasks=[]) as (app, pilot, opened):
+        row = await select(app, pilot, lambda t: "all done" in (t.raw.get("title") or ""))
+        table = app.query_one(DataTable)
+        check("the finished row is the selected one",
+              app.tasks[table.cursor_row].id, row.id)
+        # The board's own note records that the cursor replaces a colour
+        # outright while dim survives.  Strike is a style like dim rather
+        # than a colour, so it has to survive too -- if it did not, the mark
+        # would vanish on exactly the row a person is looking at.
+        cell = app.row_for(row)[3]
+        check("and it is still struck while selected",
+              any(sp.style and "strike" in str(sp.style) for sp in cell.spans), True)
+
+    print("nothing is asked of the tracker")
+    seen = []
+    async with board(mail_cfg=cfg, tasks=[], tracker_cfg=None) as (app, pilot, opened):
+        none_cfg = sorted(str(app.row_for(t)[3]).strip() for t in app.tasks)
+        none_marked = sorted(str(app.row_for(t)[3]).strip() for t in app.tasks
+                             if t.raw.get(main.MAIL_DONE))
+    async with board(mail_cfg=cfg, tasks=[], tracker_cfg=TRK) as (app, pilot, opened):
+        with_cfg = sorted(str(app.row_for(t)[3]).strip() for t in app.tasks)
+        with_marked = sorted(str(app.row_for(t)[3]).strip() for t in app.tasks
+                             if t.raw.get(main.MAIL_DONE))
+    check("the same rows with a tracker configured and without",
+          with_cfg, none_cfg)
+    check("and the same ones marked", with_marked, none_marked)
+    check("which is the finished one", none_marked, ["all done"])
+
+
 async def main_():
     await beside_the_other_sources()
     await never_delays()
@@ -570,6 +652,7 @@ async def main_():
     await counting_as_work()
     await still_in_the_inbox()
     await legible_together()
+    await issue_done_rows()
     print()
     print(f"{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1

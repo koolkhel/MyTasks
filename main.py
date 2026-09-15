@@ -101,6 +101,10 @@ MAIL_TEXT = "_mail_text"
 #: plain scalar: nothing else can find a message's file, since an identity is
 #: a header and the same header may sit in two folders.
 MAIL_MESSAGES = "_mail_messages"
+#: Set on a mail row whose issue the tracker has marked finished, read off the
+#: newest message in the thread.  Nothing asks the tracker: the notification
+#: carries it.
+MAIL_DONE = "_mail_done"
 #: Prefixes a mail row's id.  Built from the newest message's identity, which
 #: is unique within the mailbox.
 MAIL_PREFIX = "mail:"
@@ -2170,6 +2174,10 @@ class TaskApp(App[None]):
                 # things need all of them: reviewing files away the whole
                 # row, and an anchored address is looked for across it.
                 MAIL_MESSAGES: thread.messages,
+                # What the newest message says about the issue, that being the
+                # most recent word on it and the message this row already
+                # shows.  False for every row that is not about an issue.
+                MAIL_DONE: newest.issue_done,
                 # Where a task keeps its note, so the detail area shows what
                 # the message says with no knowledge of mail at all -- the
                 # same path a calendar event's description takes.  The
@@ -3618,6 +3626,12 @@ class TaskApp(App[None]):
             subject = escape(task.raw.get("title") or "")
             if count > 1:
                 subject = f"{subject} [dim]({count})[/dim]"
+            if task.raw.get(MAIL_DONE):
+                # Struck, which is how the board already draws a task that is
+                # finished and how the notification itself draws the issue's
+                # key.  One vocabulary for "this is done" rather than two.
+                # The row keeps its own mark, so it is still a mail row.
+                subject = f"[strike dim]{subject}[/]"
             return (
                 "",
                 MAIL_ROW_MARK,

@@ -290,6 +290,129 @@ check("a message whose flags cannot be read is still in the queue",
       [m.subject for m in blind], ["already read"])
 check("and reports unread", [m.seen for m in blind], [False])
 
+print("a notification that says its issue is finished")
+# The markup shape a tracker's notification has, copied in shape and nothing
+# else: invented project keys, an .invalid host, generated subjects.  A
+# notification carries TWO links to its own issue -- the key, struck when the
+# issue is finished, and the summary, never struck.
+def issue_mail(root, messages):
+    """messages: (subject, header_key, html) -> a mailbox holding them."""
+    path = os.path.join(root, "mail_folders")
+    if os.path.exists(path): shutil.rmtree(path)
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
+    for i, (subject, key, html) in enumerate(messages):
+        m = EmailMessage()
+        m["From"] = "tracker@example.invalid"
+        m["Subject"] = subject
+        m["Date"] = "Tue, 08 Sep 2026 08:00:00 +0000"
+        m["Message-ID"] = f"<n{i}@example.invalid>"
+        if key: m[mail.ISSUE_HEADER] = key
+        m.set_content("the plain part, which is what _body reads")
+        m.add_alternative(html, subtype="html")
+        box.add(mailbox.MaildirMessage(m))
+    box.flush()
+    return mail.Config(path, (FEED,))
+
+HOST = "https://track.example.invalid"
+def key_link(key, struck):
+    style = "font-size: 15px; color: #676E75;"
+    if struck: style += " text-decoration: line-through; "
+    return f'<a title="A Project" style="{style}" href="{HOST}/issue/{key}">{key}</a>'
+def summary_link(key):
+    # The second link every notification carries, and never struck.
+    return (f'<a title="created by somebody" style="font-size: 15px; color: #1466c6;"'
+            f' href="{HOST}/issue/{key}">a summary of the issue</a>')
+def page(*bits):
+    return "<html><body><table><tr><td>" + "".join(bits) + "</td></tr></table></body></html>"
+
+room = tempfile.mkdtemp()
+cfg2 = issue_mail(room, [
+    ("finished", "ZZA-1", page(key_link("ZZA-1", True), summary_link("ZZA-1"))),
+    ("unfinished", "ZZA-2", page(key_link("ZZA-2", False), summary_link("ZZA-2"))),
+])
+got = {m.subject: m for m in mail.read(cfg2)}
+check("a struck key marks the message done", got["finished"].issue_done, True)
+check("an unstruck one does not", got["unfinished"].issue_done, False)
+check("and the plain part is still what is read",
+      "the plain part" in got["finished"].body, True)
+
+# The header decides which issue is looked at, not the links.  A notification
+# about ZZA-3 that also links a finished ZZA-9 is not about ZZA-9.
+cfg2 = issue_mail(room, [
+    ("mentions another", "ZZA-3",
+     page(key_link("ZZA-3", False), summary_link("ZZA-3"),
+          "<p>see also ", key_link("ZZA-9", True), "</p>")),
+])
+got = mail.read(cfg2)
+check("another issue's struck key does not mark this message",
+      [m.issue_done for m in got], [False])
+
+# Any self-link struck is enough: the summary link is never struck, so
+# requiring all of them would never fire.
+cfg2 = issue_mail(room, [
+    ("key struck, summary not", "ZZA-4",
+     page(summary_link("ZZA-4"), key_link("ZZA-4", True))),
+])
+check("any self-link struck is enough, whatever its order",
+      [m.issue_done for m in mail.read(cfg2)], [True])
+
+# Nothing that is not a tracker notification is marked, and none of it raises.
+cfg2 = issue_mail(room, [
+    ("no header at all", None, page(key_link("ZZA-5", True))),
+    ("header, no link", "ZZA-6", page("<p>nothing linked here</p>")),
+    ("header, broken html", "ZZA-7", "<p>unclosed <a href='" + HOST + "/issue/ZZA-7'"),
+])
+got = {m.subject: m for m in mail.read(cfg2)}
+check("a message with no issue header is not marked",
+      got["no header at all"].issue_done, False)
+check("a message whose HTML links no issue is not marked",
+      got["header, no link"].issue_done, False)
+check("a message whose HTML will not parse is not marked, and does not raise",
+      got["header, broken html"].issue_done, False)
+
+# A message with no HTML part at all: every message from the folders that are
+# not tracker mail.
+plain = build([("just text", {mail.ISSUE_HEADER: "ZZA-8"}, "no html here")])
+check("a message with no HTML part is not marked",
+      [m.issue_done for m in mail.read(plain)], [False])
+
+# The canary.  This is the only warning the board will get if the tracker
+# changes its template: nothing would be marked, and nothing would say so.
+# It checks the shape this repository believes a notification has -- it
+# cannot check the shape the real server sends tomorrow.
+check("the canary: the shape the detector looks for is the shape checked here",
+      mail._issue_done(
+          __import__("email").message_from_string(
+              f"{mail.ISSUE_HEADER}: ZZA-1\n\n"),
+          page(key_link("ZZA-1", True))),
+      True)
+
+print("reading reaches nothing")
+# Shown rather than asserted: every way of opening a socket is replaced with
+# one that raises, and the mailbox is read anyway.  A read that touched the
+# network would fail here instead of answering.
+import socket as _socket
+_saved = (_socket.socket, _socket.create_connection, _socket.getaddrinfo)
+def _refuse(*a, **k):
+    raise AssertionError("reading the mailbox tried to reach the network")
+_socket.socket = _refuse
+_socket.create_connection = _refuse
+_socket.getaddrinfo = _refuse
+# Its own mailbox, not whatever `cfg2` was last set to: a check that reads a
+# variable left over from an earlier block measures whatever ran before it.
+offline = issue_mail(tempfile.mkdtemp(),
+                     [("finished", "ZZA-1",
+                       page(key_link("ZZA-1", True), summary_link("ZZA-1")))])
+try:
+    reached = mail.read(offline)
+    check("a mailbox of notifications reads with the network taken away",
+          len(reached), 1)
+    check("and still decides about the issue",
+          [m.issue_done for m in reached], [True])
+finally:
+    _socket.socket, _socket.create_connection, _socket.getaddrinfo = _saved
+
 print("threads")
 ths = mail.threads(mail.read(cfg))
 check("the mailbox's ten threads", len(ths), 10)

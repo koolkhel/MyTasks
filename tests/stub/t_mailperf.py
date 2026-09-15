@@ -76,6 +76,13 @@ def big_mailbox():
                 f"an update on {issue_url}"
                 + (f" at {issue_url}#comment-{update}" if update else ""),
                 {"Message-ID": f"<zz.f{issue}.{update}@example.invalid>",
+                 # A real notification carries an HTML part; the board parses
+                 # one for every message that has it, and about one issue in
+                 # five is finished, which is what decides how often that
+                 # parse can be skipped.
+                 "html": F.html_marker(f"ZZA-{2000 + issue}",
+                                       done=(issue % 5 == 0)),
+                 mail.ISSUE_HEADER: f"ZZA-{2000 + issue}",
                  # Three in five already read, which is the mix the real
                  # folder has: 526 of 891 when this was measured.  Every one
                  # of them is still in the queue -- being read is not being
@@ -91,7 +98,9 @@ def big_mailbox():
         n += 1
         messages.append((
             f"build {n} finished", f"see https://ci.corp.invalid/job/{n}/console",
-            {"Message-ID": f"<zz.b{n}@example.invalid>", "seen": (n % 5) < 3},
+            {"Message-ID": f"<zz.b{n}@example.invalid>", "seen": (n % 5) < 3,
+             "html": F.html_marker(f"ZZB-{n}", done=False),
+             mail.ISSUE_HEADER: f"ZZB-{n}"},
         ))
     return F.build({"Bulk": messages}), folded, deep
 
@@ -127,6 +136,15 @@ async def main_():
     check("and folded to the rows it should", len(rows), expected)
     print(f"  read in {read:.2f}s, folded in {grouped:.2f}s "
           f"-> {len(rows)} rows")
+    # The measurement is only of the real path while the parse actually runs.
+    # It did not, twice: first the fixture built plain-text messages so there
+    # was no HTML to parse, then it carried the markup but not the header
+    # naming the issue, so the detector answered from the header alone.  Both
+    # times the suite reported a believable number for the wrong work.
+    marked = sum(1 for m in found if m.issue_done)
+    check("the fixture's finished issues are recognised, so the parse ran",
+          marked > 0, True)
+    print(f"  {marked} of {MESSAGES} present their issue as finished")
     check("the row count is of the order the real folders give",
           400 <= len(rows) <= 600, True)
 

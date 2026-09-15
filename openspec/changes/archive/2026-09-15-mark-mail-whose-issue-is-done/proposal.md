@@ -80,13 +80,21 @@ None.
 
 **Code**
 
-- `mail.py` — the HTML reader already sees every start tag and its attributes
-  on its way to producing text; it would also notice the anchor pointing at the
-  message's own issue and whether that anchor is struck. A field on `Message`
-  carries the answer, the same shape as the field added for the read flag.
+- `mail.py` — the HTML part gains a parse of its own. This was planned as
+  riding on a parse already happening and that was wrong: `_body` prefers a
+  message's plain-text part, and a tracker notification carries both, so the
+  HTML of the messages this is about is never read today. The existing reader
+  does the work — it already watches links and their attributes — but it has to
+  be pointed at the part `_body` skips. A field on `Message` carries the
+  answer, the same shape as the field added for the read flag.
 - `main.py` — the row builder draws the title struck when the thread's newest
   message says the issue is done. The board already draws a finished task that
   way, so this is the existing expression applied to another row.
+
+**Cost** — one extra parse of the HTML for every message that has one. The
+reader is measured at 0.06 ms a message, so on the order of a thousand
+notifications this is tens of milliseconds against a read path measured in
+hundreds; the performance suite measures the read path rather than assuming it.
 
 **Not affected** — no request to the tracker, no request to the mail account,
 no configuration, and nothing about folding, reviewing, promoting or the

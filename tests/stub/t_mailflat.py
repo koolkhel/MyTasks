@@ -11,6 +11,7 @@ stronger thing: that no file changed at all.
 Synthetic mail only: a copy of the committed mailbox, and throwaway ones built
 here.
 """
+import mailbox
 import os
 import shutil
 import sys
@@ -127,6 +128,61 @@ check("standing for all three, not for the unread one",
       ths[0].count, 3)
 check("and the newest is what the row would show",
       ths[0].newest.ident, "<t3@x.invalid>")
+
+# -- the newest message decides what the thread says about its issue ------
+print("a thread reports its newest message's issue state")
+HOST = "https://track.example.invalid"
+def note(key, struck, mid, answers=None, minute=0):
+    style = "color:#676E75;" + (" text-decoration: line-through;" if struck else "")
+    html = (f'<html><body><a style="{style}" href="{HOST}/issue/{key}">{key}</a>'
+            f'<a style="color:#1466c6;" href="{HOST}/issue/{key}">the summary</a>'
+            f'</body></html>')
+    h = {"Message-ID": mid, mail.ISSUE_HEADER: key, "minutes": minute}
+    if answers: h["In-Reply-To"] = answers
+    return ("an issue moves", html, h)
+
+def issue_box(entries):
+    root = tempfile.mkdtemp()
+    path = os.path.join(root, "mail_folders")
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, "Alerts"), create=True)
+    from email.message import EmailMessage
+    for subject, html, headers in entries:
+        m = EmailMessage()
+        m["From"] = "tracker@example.invalid"
+        m["Subject"] = subject
+        m["Date"] = f"Tue, 08 Sep 2026 08:{headers.get('minutes', 0):02d}:00 +0000"
+        m["Message-ID"] = headers["Message-ID"]
+        m[mail.ISSUE_HEADER] = headers[mail.ISSUE_HEADER]
+        if headers.get("In-Reply-To"):
+            m["In-Reply-To"] = headers["In-Reply-To"]
+            m["References"] = headers["In-Reply-To"]
+        m.set_content("the plain part")
+        m.add_alternative(html, subtype="html")
+        box.add(mailbox.MaildirMessage(m))
+    box.flush()
+    return mail.Config(path, ("Alerts",))
+
+# Older messages say unfinished, the newest says finished.
+cfg2 = issue_box([
+    note("ZZA-1", False, "<a1@x.invalid>", minute=1),
+    note("ZZA-1", False, "<a2@x.invalid>", answers="<a1@x.invalid>", minute=2),
+    note("ZZA-1", True, "<a3@x.invalid>", answers="<a2@x.invalid>", minute=3),
+])
+ths = mail.threads(mail.read(cfg2))
+check("the three are one thread", len(ths), 1)
+check("its newest says the issue is finished", ths[0].newest.issue_done, True)
+check("even though its older messages do not",
+      [m.issue_done for m in ths[0].messages], [False, False, True])
+
+# And the reverse: reopened, so the newest says unfinished.
+cfg2 = issue_box([
+    note("ZZA-2", True, "<b1@x.invalid>", minute=1),
+    note("ZZA-2", False, "<b2@x.invalid>", answers="<b1@x.invalid>", minute=2),
+])
+ths = mail.threads(mail.read(cfg2))
+check("a thread whose newest says unfinished reports unfinished",
+      ths[0].newest.issue_done, False)
 
 # -- and nothing at all is written ----------------------------------------
 print("reading writes nothing")

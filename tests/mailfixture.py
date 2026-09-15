@@ -36,6 +36,23 @@ def copy():
     return where
 
 
+def html_marker(key, done):
+    """A tracker notification's markup, as a body suffix a fixture can append.
+
+    Shape only: an `.invalid` host and an invented key.  Two links to the
+    issue, as a real notification carries -- the key, struck when the issue is
+    finished, and the summary, never struck.
+    """
+    strike = " text-decoration: line-through;" if done else ""
+    host = "https://track.example.invalid"
+    return (
+        f'\n<html><body>'
+        f'<a title="A Project" style="color:#676E75;{strike}"'
+        f' href="{host}/issue/{key}">{key}</a>'
+        f'<a style="color:#1466c6;" href="{host}/issue/{key}">summary</a>'
+        f'</body></html>')
+
+
 def build(folders, archive=True):
     """A mailbox built here, from `{folder: [(subject, body, headers), ...]}`.
 
@@ -60,7 +77,22 @@ def build(folders, archive=True):
             if headers.get("In-Reply-To"):
                 m["In-Reply-To"] = headers["In-Reply-To"]
                 m["References"] = headers["In-Reply-To"]
+            # Anything else named like a header is one.  The keys this helper
+            # acts on itself are directions to it rather than headers, and
+            # none of them looks like one; a suite that needs a header this
+            # does not know about should not have to teach it the name.
+            for name, value in headers.items():
+                if name in ("From", "Message-ID", "In-Reply-To") or "-" not in name:
+                    continue
+                if value is not None and name not in m:
+                    m[name] = value
             m.set_content(body)
+            # An HTML alternative where one is asked for, because the board
+            # parses one for every message that has it and a real
+            # notification always does.  A fixture of plain parts measures a
+            # read that skips that work entirely.
+            if headers.get("html"):
+                m.add_alternative(headers["html"], subtype="html")
             md = mailbox.MaildirMessage(m)
             if headers.get("seen"):
                 md.add_flag("S")

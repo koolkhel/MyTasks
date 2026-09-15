@@ -531,9 +531,51 @@ async def saying_so():
     check("and no longer claims a read flag is the one write",
           "marking a message read" in mail_src, False)
 
+async def the_mark_stays_behind():
+    print("a task promoted from a finished issue carries no mark")
+    # A notification presenting its issue as finished, in the shape a real
+    # one has: two links to the issue, only the key struck.  Invented keys
+    # and an .invalid host.
+    import mailbox as _mb, tempfile as _tf
+    from email.message import EmailMessage as _EM
+    root = _tf.mkdtemp(); path = os.path.join(root, "mail_folders")
+    os.makedirs(path)
+    box = _mb.Maildir(os.path.join(path, FEED), create=True)
+    host = "https://track.example.invalid"
+    m = _EM()
+    m["From"] = "tracker@example.invalid"
+    m["Subject"] = "an issue that is finished"
+    m["Date"] = "Tue, 08 Sep 2026 08:00:00 +0000"
+    m["Message-ID"] = "<done1@example.invalid>"
+    m[mail.ISSUE_HEADER] = "ZZA-1"
+    m.set_content("the plain part")
+    m.add_alternative(
+        f'<html><body><a style="text-decoration: line-through;"'
+        f' href="{host}/issue/ZZA-1">ZZA-1</a>'
+        f'<a href="{host}/issue/ZZA-1">summary</a></body></html>', subtype="html")
+    box.add(_mb.MaildirMessage(m)); box.flush()
+
+    async with board(mail_path=path, tasks=[]) as (app, pilot, path_, _o):
+        row = await select(app, pilot, app.is_mail)
+        check("the row is marked as finished", row.raw.get(main.MAIL_DONE), True)
+        await pilot.press("f")
+        await settle(pilot, 32)
+        made_task = made(app)
+        check("a task was made", len(made_task), 1)
+        # The mark belongs to the mail row.  A task is the board's own, and
+        # nothing keeps it in step with mail afterwards -- so carrying the
+        # mark over would be a claim the board cannot keep.
+        check("the task carries no mark",
+              made_task[0].raw.get(main.MAIL_DONE), None)
+        check("and is not drawn struck",
+              any(sp.style and "strike" in str(sp.style)
+                  for sp in app.row_for(made_task[0])[3].spans), False)
+
+
 async def main_():
     for part in (becomes_a_task, shown_at_once, what_it_carries,
-                 filed_as_work, undoing, refusals, saying_so):
+                 filed_as_work, undoing, refusals, saying_so,
+                 the_mark_stays_behind):
         await part()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     sys.exit(0 if all(ok) else 1)

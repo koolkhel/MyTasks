@@ -81,12 +81,47 @@ This is measurable rather than a guess: of 100 messages, 100 carried more than
 one self-link, and the ones whose links disagreed were exactly the ones whose
 issue was done.
 
-### Detected while the HTML is already being parsed
+### Detected by a parse of its own, because the HTML is not otherwise read
 
-`mail.py` turns a notification's HTML into readable text, and its reader sees
-every start tag with its attributes on the way through. The anchor and its
-style pass under it already; nothing new has to be parsed and no second pass
-over the body is needed.
+This was planned as riding on a parse the board already does, and that was
+wrong. `_body` prefers a message's plain-text part and only falls back to the
+HTML when there is no plain one -- and a tracker notification carries both. So
+for exactly the messages this feature is about, the HTML is never parsed at
+all, and the anchor never passes under anything.
+
+The marker therefore needs its own pass over the HTML part. The existing
+reader is the right tool for it -- it already watches `a` tags and their
+attributes -- but it has to be pointed at a part `_body` deliberately skipped.
+
+The cost is a second parse of the HTML for every message that has one, and it
+is larger than it first looked. This said 0.06 ms a message, taken from the
+reader's own note about rendering text. Measured against real notifications it
+was **0.316 ms a message** -- about a third of a read path of roughly 0.9 ms a
+message, or some 380 ms added to a folder of a thousand, against a real read
+of 0.50 s. Five times the figure claimed, and a third of the work rather than
+a rounding error.
+
+So the parse is skipped where it cannot find anything: the styling has to
+appear somewhere in the markup for any link to carry it, so its absence in the
+document settles the question without parsing. That is a necessary condition,
+never a sufficient one, so it can turn a True into nothing it should not --
+only a False into a faster False. Measured after: **0.106 ms a message**, a
+third of what it was, because most notifications are about issues that are not
+finished and never contain the styling at all.
+
+The lesson worth keeping: the first figure was quoted from a docstring about a
+different operation and never measured for this one. It was wrong by five
+times in the direction that flatters the change.
+
+*Alternative considered: matching the raw HTML with a pattern instead of
+parsing it.* Cheaper still, and rejected: a pattern over markup breaks on
+attribute order, quoting and whitespace, and the parser is already cheap
+enough that the saving would buy nothing but fragility.
+
+*Alternative considered: having `_body` prefer the HTML part so one parse
+serves both.* Rejected as a change to what the detail pane shows, which is
+outside this change and a worse reading experience besides -- the plain part
+is what the sender wrote for reading.
 
 The answer rides on `Message` as one field, which is the shape the read flag
 took: something the account said, carried off the parse, for the board to use
