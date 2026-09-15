@@ -148,6 +148,28 @@ def line_of(app, task):
     at = next(i for i, t in enumerate(app.tasks) if t.id == task.id)
     return list(table.render_line(at + (1 if table.show_header else 0)))
 
+def _ch(v):
+    v /= 255
+    return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+def lum(colour):
+    """Relative luminance, for comparing two colours without naming either.
+
+    Named values would pass on the theme they were written against and say
+    nothing about the other; the two themes have different grounds and the
+    same two bars.
+    """
+    r, g, b = colour.triplet
+    return 0.2126 * _ch(r) + 0.7152 * _ch(g) + 0.0722 * _ch(b)
+
+def ratio(a, b):
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+def cursor_style(app):
+    return app.query_one(DataTable).get_component_styles(
+        "datatable--cursor").rich_style
+
 def backgrounds(app, task):
     return {seg.style.bgcolor for seg in line_of(app, task) if seg.style}
 
@@ -419,10 +441,17 @@ async def group_bar():
               m_style != p_style, True)
         check("and differs in its background", m_style.bgcolor != p_style.bgcolor,
               True)
-        check("which is the one the selected row uses",
-              m_style.bgcolor,
-              app.query_one(DataTable).get_component_styles(
-                  "datatable--cursor").rich_style.bgcolor)
+        # Its own colour, and deliberately not the selected row's.  Reading
+        # the bar off the cursor's style is what kept the two identical, and
+        # that failure is invisible: nothing errors, the bars simply match.
+        cur = cursor_style(app)
+        check("which is not the one the selected row uses",
+              m_style.bgcolor != cur.bgcolor, True)
+        check("and the selected row's is the brighter of the two",
+              lum(cur.bgcolor) > lum(m_style.bgcolor), True)
+        apart = ratio(cur.bgcolor, m_style.bgcolor)
+        check(f"far enough apart to tell at a glance (>=2:1, got {apart:.2f}:1)",
+              apart >= 2.0, True)
         check("nothing else about the style changed",
               (m_style.color, m_style.bold), (p_style.color, p_style.bold))
 
@@ -548,8 +577,14 @@ async def group_cursor():
                       for s in title_segments(app, first)}
         check("a marked row under the cursor is drawn as the selected row",
               on_cursor != off_cursor, True)
-        check("they share the bar",
-              backgrounds(app, first) == backgrounds(app, second), True)
+        # They must NOT share it.  A cursor sitting in a run of marked rows
+        # was one bar among several, and finding it meant reading the weight
+        # of every row's text in turn -- which is the thing a glance is for.
+        check("they do not share the bar",
+              backgrounds(app, first) == backgrounds(app, second), False)
+        check("and the row under the cursor wears the brighter one",
+              lum(cursor_style(app).bgcolor)
+              > lum(row_style(app, first).bgcolor), True)
         # A named difference, not mere inequality: two styles differing in
         # something invisible would pass an inequality check and fail a
         # person looking at the screen.
@@ -645,6 +680,65 @@ async def group_advance():
               app.tasks[table.cursor_row].raw.get("title"), "keep gamma")
 
 
+async def group_themes():
+    print("\n4.1 the selected row stands out among marked ones, in either theme")
+    for theme in ("turbo-cpp-dark", "turbo-cpp-blue"):
+        app = make(position=TODAY, tasks=[ordered("t1", "above", 1),
+                                          ordered("t2", "the cursor", 2),
+                                          ordered("t3", "below", 3)])
+        async with run(app) as pilot:
+            app.theme = theme
+            await settle(pilot, 6)
+            above = await cursor_to(app, pilot, "above")
+            await pilot.press("v")          # steps onto "the cursor"
+            await cursor_to(app, pilot, "below")
+            await pilot.press("v")          # steps past the end, stays on "below"
+            await cursor_to(app, pilot, "the cursor")
+            await settle(pilot, 4)
+            check(f"{theme}: the rows either side are the marked ones",
+                  sorted(titles_of(app)), ["above", "below"])
+            cur = cursor_style(app).bgcolor
+            neighbours = {row_style(app, above).bgcolor,
+                          row_style(app, row(app, "below")).bgcolor}
+            check(f"{theme}: the selected row's bar differs from theirs",
+                  cur in neighbours, False)
+            # And from the ground as well, so it is findable with nothing
+            # marked at all -- which it was not before this change.
+            ground = app.query_one(DataTable).background_colors[1]
+            from rich.color import Color as _RC
+            g = _RC.parse(ground.hex)
+            check(f"{theme}: and from the ground (>=3:1, got {ratio(cur, g):.2f}:1)",
+                  ratio(cur, g) >= 3.0, True)
+
+    print("\n4.2 the text on each bar is legible against it")
+    for theme in ("turbo-cpp-dark", "turbo-cpp-blue"):
+        app = make(position=TODAY, tasks=[ordered("t1", "marked one", 1),
+                                          ordered("t2", "park here", 2)])
+        async with run(app) as pilot:
+            app.theme = theme
+            await settle(pilot, 6)
+            marked = await cursor_to(app, pilot, "marked one")
+            await pilot.press("v")      # marks it, and steps onto "park here"
+            await settle(pilot, 4)
+            cur = cursor_style(app)
+            bar = row_style(app, marked).bgcolor
+            # The board's own rule: dark text on a light bar and the reverse
+            # on a dark one.  Asked as a comparison of luminance rather than
+            # by naming a colour, so one form covers both themes.
+            check(f"{theme}: the selected row's bar is light, its text dark",
+                  lum(cur.bgcolor) > lum(cur.color), True)
+            r = ratio(cur.color, cur.bgcolor)
+            check(f"{theme}: and legible on it (>=4.5:1, got {r:.2f}:1)",
+                  r >= 4.5, True)
+            # The marked row carries an ordinary title, whose colour the row
+            # style leaves alone -- so what is checked is that the bar did
+            # not take the text down with it.
+            title = {sg.style.color for sg in title_segments(app, marked)}
+            worst = min(ratio(c, bar) for c in title if c is not None)
+            check(f"{theme}: a marked row's title still reads on its bar "
+                  f"(>=2.4:1, got {worst:.2f}:1)", worst >= 2.4, True)
+
+
 def group_hook():
     print("\n5.1 the framework hook the bar depends on")
     import inspect
@@ -678,6 +772,7 @@ def main_():
     asyncio.run(group_readable())
     asyncio.run(group_cursor())
     asyncio.run(group_advance())
+    asyncio.run(group_themes())
     group_hook()
     print(f"\n{sum(ok)}/{len(ok)} checks passed")
     return 0 if all(ok) else 1

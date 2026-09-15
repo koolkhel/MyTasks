@@ -1147,7 +1147,9 @@ The board SHALL offer two themes reproducing the Turbo C++ editor theme: one on 
 
 ### Requirement: A theme keeps the board's distinctions visible
 
-Whatever theme is active, the board SHALL keep apart the things its other requirements rely on being told apart: a past-due title from an ordinary one, muted text from ordinary text, the selected row from the rest, and the text on any bar or panel from the surface behind it. A theme that renders any of these indistinguishable SHALL NOT be offered.
+Whatever theme is active, the board SHALL keep apart the things its other requirements rely on being told apart: a past-due title from an ordinary one, muted text from ordinary text, the selected row from the rest, the selected row from a marked one, and the text on any bar or panel from the surface behind it. A theme that renders any of these indistinguishable SHALL NOT be offered.
+
+The selected row SHALL differ from the rows around it whether or not those rows are marked. Marked rows carry a bar of their own, so "differs from the surrounding rows" is a claim about the marked case as much as the ordinary one -- and it was the marked case that made it false.
 
 #### Scenario: A past-due title still reads as past due
 
@@ -1173,6 +1175,11 @@ Whatever theme is active, the board SHALL keep apart the things its other requir
 
 - **WHEN** a task's title carries a link under any offered theme
 - **THEN** the link is drawn differently from the rest of the title
+
+#### Scenario: The selected row stands out among marked ones
+
+- **WHEN** the rows above and below the selected one are marked, under any offered theme
+- **THEN** the selected row's background differs from theirs, and its text is legible against it
 
 ### Requirement: A write shows its outcome before the server confirms it
 
@@ -5092,16 +5099,18 @@ The board SHALL forget the mark on a row it no longer holds, so that a task
 deleted or a message filed elsewhere cannot leave behind a mark that can
 neither be seen nor cleared.
 
-A marked row SHALL be drawn as a bar across the whole of the row, in the
-colour the selected row's bar already uses, so that how much of a list is
-chosen can be seen at a glance rather than read one character at a time.
+A marked row SHALL be drawn as a bar across the whole of the row, so that
+how much of a list is chosen can be seen at a glance rather than read one
+character at a time.
 
-A marked row SHALL still be tellable from the selected one. The cursor keeps
-the bolder, paler text it already carries on that bar where a marked row
-carries the ordinary text: both are bars, and the cursor is the bold one. The
-cursor is where a person is; a mark is what they chose; they are still
-different things, and what separates them is now weight and colour rather than
-a character against no character.
+A marked row SHALL be tellable from the selected one by the colour of its bar,
+not by the weight of its text. The selected row's bar SHALL be the brighter of
+the two. Weight has to be read; colour is seen from the corner of the eye, and
+a cursor sitting in a run of marked rows is exactly the case where reading
+each row in turn is what a person is trying to avoid.
+
+The cursor is where a person is; a mark is what they chose. They are different
+things and are drawn in different colours.
 
 A row that is both marked and selected SHALL be drawn as the selected row,
 because where a person is outranks what they chose. It SHALL nonetheless still
@@ -5170,6 +5179,17 @@ The bar SHALL be drawn under every theme the board offers.
 
 - **WHEN** a row is marked and the board is switched between the themes it offers
 - **THEN** the bar is visible against the ground in both
+
+#### Scenario: A cursor inside a run of marked rows
+
+- **WHEN** several adjacent rows are marked and the cursor is on one of them
+- **THEN** that row's bar is a different colour from the bars either side of it
+
+#### Scenario: Which bar is brighter
+
+- **WHEN** a marked row and the selected row are both drawn
+- **THEN** the selected row's bar is the brighter of the two
+
 ### Requirement: A marked row's title is drawn plainly
 
 While a row is marked, its title SHALL be drawn in the ordinary text colour:

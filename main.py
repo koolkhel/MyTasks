@@ -575,6 +575,13 @@ class TaskTable(DataTable):
     noticed on screen.
     """
 
+    #: The marked row's bar, declared here so it sits in the stylesheet
+    #: beside the selected row's rather than being read off it.  Reading it
+    #: off the selected row's is what kept the two identical, which is the
+    #: one thing a person cannot see past: a cursor among marked rows was a
+    #: bar among bars.
+    COMPONENT_CLASSES = {"tasktable--marked"}
+
     def _get_row_style(self, row_index: int, base_style: Style) -> Style:
         style = super()._get_row_style(row_index, base_style)
         app = self.app
@@ -586,13 +593,15 @@ class TaskTable(DataTable):
             return style
         if tasks[row_index].id not in marked:
             return style
-        # The selected row's own background, not a colour of this board's
-        # invention: the themes declare the DOS sixteen colours and nothing
-        # else, and a blended or dimmed one would be a value neither holds.
+        # Its own colour, not the selected row's.  Both are values the
+        # themes declare -- nothing here is blended or invented -- but they
+        # are different values, and the difference is the whole point: the
+        # selected row has to be findable in a run of marked ones, and
+        # colour is what finds it where the weight of text has to be read.
         # The text is left alone, so a marked row carries the ordinary
-        # colour where the selected row carries its bolder, paler one.
+        # colour of a title.
         return style + Style(bgcolor=self.get_component_styles(
-            "datatable--cursor").rich_style.bgcolor)
+            "tasktable--marked").rich_style.bgcolor)
 
 
 class KeyBar(Static):
@@ -1468,7 +1477,25 @@ class TaskApp(App[None]):
         background: $background;
         background-tint: transparent;
     }
-    DataTable > .datatable--cursor { background: $accent; color: $text; }
+    /* The selected row takes the brighter of the two bars.  The bar is the
+       whole of the fix: asking the theme for "whatever contrasts" gave a
+       light colour against the mid-tone this used to sit on -- 2.48:1, less
+       legible than the rows either side of it, on the one row that has to be
+       found in a hurry.  Against the brighter bar the same question is
+       answered dark, and the ratio is 13.67:1 in both themes.
+
+       So the text colour is left to the theme rather than stated.  Stating
+       it was tried and measured worse: naming the ground as the text colour
+       gave 17:1 under the dark theme but 10.84:1 under the blue one, where
+       the derived answer gives 13.67:1 under both.  What makes deriving safe
+       here is the check on it -- a suite asserts the bar is the lighter of
+       bar and text and that the two are at least 4.5:1 apart, so a framework
+       that changed its threshold would fail a run rather than a person. */
+    DataTable > .datatable--cursor { background: $primary; color: $text; }
+    /* And the marked row keeps the bar the selected one used to have.  Set
+       here rather than read off the cursor's style at draw time, which is
+       what made the two identical. */
+    TaskTable > .tasktable--marked { background: $accent; }
 
     #notes {
         /* Nine, for eight rows of text: `border-top` counts inside the
