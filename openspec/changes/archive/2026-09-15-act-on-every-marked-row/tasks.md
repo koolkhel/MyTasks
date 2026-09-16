@@ -44,5 +44,5 @@ and nothing would fail.
 
 ## 7. At the board, by hand
 
-- [ ] 7.1 Mark a set spanning two views on the real board, copy it, then delete it. Passing is the confirmation naming the count and saying the set is not all on screen, and every marked row gone afterwards from both views.
-- [ ] 7.2 Mark a set holding a mail row and tick it. Passing is the tasks finished, the mail row untouched and still in the inbox, and the board saying one row was passed over.
+- [x] 7.1 Mark a set spanning two views on the real board, copy it, then delete it. Passing is the confirmation naming the count and saying the set is not all on screen, and every marked row gone afterwards from both views. **Result: confirmed at the board. The confirmation named the count and said the set reached past the view: “Delete 2 marked task(s) for good? Some are not in this view.”, and the marked rows went from both views.**
+- [x] 7.2 Mark a set holding a mail row and tick it. Passing is the tasks finished, the mail row untouched and still in the inbox, and the board saying one row was passed over. **Result: confirmed at the board. The set was ticked with a message in it, and the board said the message was passed over, in the wording this change designed: “· 1 not this board's to change”.**
