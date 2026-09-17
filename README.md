@@ -6,7 +6,9 @@ decided about on the same list as your tasks.
 
 It is a personal tool, published because the shape of it might be useful to
 somebody else. Everything below is real behaviour; the data in the pictures is
-invented.
+invented — they are taken from the board itself by `docs/screenshots.py`,
+against a stubbed store, so a new feature can be shown by adding a board to
+that file and running it.
 
 ![The day's board](docs/today.png)
 
@@ -180,6 +182,7 @@ refusal apart from a failure.
 | `singularity.py` | the task store's API, and the ordering |
 | `ical.py`, `tracker.py`, `mail.py`, `gateway.py` | the other three sources |
 | `openspec/` | what the board must do, as requirements and scenarios |
+| `docs/screenshots.py` | the pictures above, taken from the board on invented data |
 
 `openspec/specs/` is the description the code is held to — 161 requirements and
 778 scenarios about behaviour rather than implementation. Changes are proposed,
