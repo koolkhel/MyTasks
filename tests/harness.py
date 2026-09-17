@@ -3,6 +3,9 @@
 No real task data is used anywhere: every task here is generated.
 """
 import sys, threading, itertools
+# Passed on so a suite that imports the harness has it too; it lives
+# next door because importing this file changes what a suite measures.
+from parts import run_parts
 from datetime import date, datetime, time, timedelta
 import os as _os, sys as _sys
 # Where this suite is, and therefore where its neighbours and the board are.
@@ -81,6 +84,7 @@ def mk(tid, title, start=None, checked=0, deferred=False, project=None, deadline
     if deadline is not None:
         raw["deadline"] = iso_z(datetime.combine(deadline, time.min, tzinfo=TZ))
     return Task(raw)
+
 
 
 class StubClient:

@@ -19,7 +19,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 import main
 import singularity
 from main import (TaskApp, Confirm, DatePicker, LinkPicker, NoteInput,
@@ -215,10 +215,16 @@ async def things_to_choose():
                   [d for d in drawn_list if d.endswith("a build log")
                    and "[dim]" in d], drawn_list[:1])
 
-async def main_():
-    for part in (the_key_bar, the_status_line, the_prompts, things_to_choose):
-        await part()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    sys.exit(0 if all(ok) else 1)
 
-asyncio.run(main_())
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    the_key_bar,
+    the_status_line,
+    the_prompts,
+    things_to_choose,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

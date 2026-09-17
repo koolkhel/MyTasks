@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date, datetime, timedelta
 import main as M
 from main import TaskApp, KeyBar
@@ -213,9 +213,23 @@ async def t_keybar():
         allk={k.strip() for b in app.BINDINGS for k in b.key.split(",")}
         chk("its Russian twin came free", "ц" in allk, str(sorted(k for k in allk if k in ("w","ц"))))
 
-for fn in (t_hide, t_belongs_unchanged, t_counts, t_hides_nothing, t_beside_pastdue,
-           t_every_view, t_inbox, t_no_writes, t_config, t_keybar):
-    asyncio.run(fn())
-t_default_off()
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_hide,
+    t_belongs_unchanged,
+    t_counts,
+    t_hides_nothing,
+    t_beside_pastdue,
+    t_every_view,
+    t_inbox,
+    t_no_writes,
+    t_config,
+    t_keybar,
+    t_default_off,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

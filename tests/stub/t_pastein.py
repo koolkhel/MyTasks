@@ -329,13 +329,18 @@ async def group_5_7():
               screen.query_one(Input).value, "just one line")
 
 
-def main_():
-    for group in (group_5_1, group_5_2, group_5_3, group_5_4,
-                  group_5_5, group_5_6, group_5_7):
-        asyncio.run(group())
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
-
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    group_5_1,
+    group_5_2,
+    group_5_3,
+    group_5_4,
+    group_5_5,
+    group_5_6,
+    group_5_7,
+)
 
 if __name__ == "__main__":
-    raise SystemExit(main_())
+    raise SystemExit(run_parts(PARTS, ok))

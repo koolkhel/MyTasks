@@ -240,15 +240,17 @@ async def optimistic():
               "Note" in str(app.query_one("#keybar").render()), True)
 
 
-async def main_():
-    await editing()
-    await contents()
-    await leaving()
-    await undo_first()
-    await refusals()
-    await optimistic()
-    print()
-    print(f"{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    editing,
+    contents,
+    leaving,
+    undo_first,
+    refusals,
+    optimistic,
+)
 
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

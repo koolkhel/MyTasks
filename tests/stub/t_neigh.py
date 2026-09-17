@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date, datetime, timedelta
 from main import TaskApp
 import singularity
@@ -106,7 +106,15 @@ async def t_only_one():
               str([t.id for t in app.tasks]))
         check("all orders still distinct", len(set(after.values()))==8, str(sorted(after.values())))
 
-for fn in (t_boundaries, t_ties, t_only_one):
-    asyncio.run(fn())
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_boundaries,
+    t_ties,
+    t_only_one,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

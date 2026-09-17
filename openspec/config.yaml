@@ -20,6 +20,16 @@ context: |
     the ones sharing the store's quota are paced apart. `--all` runs every
     tier this machine can, naming the ones it skips.
 
+    Each self-contained suite names the parts it is made of in a `PARTS`
+    tuple and does nothing at import; the runner starts it with pytest, one
+    process per suite, and `tests/conftest.py` turns each part into something
+    reported, selectable and re-runnable on its own. Collection is confined
+    to that tier, because collecting a suite means importing it and a suite
+    from any other tier builds a client on the way up. The other tiers are
+    still run as scripts. `tests/parts.py` holds the helper a suite uses to
+    run its own parts, kept out of the harness because importing the harness
+    blanks the configuration loaders that two suites exist to check.
+
     The account has two tokens. SINGULARITY_TOKEN is the board's;
     SINGULARITY_TEST_TOKEN is the suites', and every suite that talks to the
     store adopts it before building a client. Both live in the gitignored

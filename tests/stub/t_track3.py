@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import datetime, timedelta
 import main as M, tracker
 from main import TaskApp, ProjectPicker, Confirm
@@ -131,7 +131,15 @@ async def t_failure_isolated():
         await pilot.press("u"); await settle(pilot, app)
         chk("5.6 undo still works too", not stub.store["T-a"].done)
 
-for fn in (t_all_actions, t_slow, t_failure_isolated):
-    asyncio.run(fn())
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_all_actions,
+    t_slow,
+    t_failure_isolated,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

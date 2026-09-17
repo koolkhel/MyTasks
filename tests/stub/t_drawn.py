@@ -118,8 +118,13 @@ async def the_line_under_them_agrees():
         check("the status line is what was decided", shown, answer.status)
 
 
-for part in (the_table_holds_what_was_decided, the_line_under_them_agrees):
-    asyncio.run(part())
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    the_table_holds_what_was_decided,
+    the_line_under_them_agrees,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

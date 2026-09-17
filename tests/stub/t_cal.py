@@ -345,17 +345,19 @@ async def all_day_leads():
         ical.fetch = saved
 
 
-async def main_():
-    await all_day_leads()
-    await never_waits()
-    await ordering()
-    await row_shape()
-    await refusals()
-    await work_filter()
-    await configuration()
-    await day_change()
-    print()
-    print(f"{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    all_day_leads,
+    never_waits,
+    ordering,
+    row_shape,
+    refusals,
+    work_filter,
+    configuration,
+    day_change,
+)
 
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

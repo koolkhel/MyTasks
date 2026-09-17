@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date, datetime, timedelta
 import main as M, tracker
 from main import TaskApp, KeyBar
@@ -395,8 +395,23 @@ async def t_priority():
         all(len(c) == 1 for pair in seen.values() for c in pair), f"{seen}")
 
 
-for fn in (t_block, t_only_today, t_unmoved, t_work_filter, t_counts, t_readonly,
-           t_reorder, t_tasks_still_work, t_open, t_down, t_unconfigured, t_priority):
-    asyncio.run(fn())
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_block,
+    t_only_today,
+    t_unmoved,
+    t_work_filter,
+    t_counts,
+    t_readonly,
+    t_reorder,
+    t_tasks_still_work,
+    t_open,
+    t_down,
+    t_unconfigured,
+    t_priority,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

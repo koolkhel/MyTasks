@@ -418,14 +418,19 @@ def not_committable():
           [l for l in listed.stdout.splitlines() if "imap-" in l], [])
 
 
-every_request()
-what_failed()
-a_day_at_a_time()
-nothing_identifying()
-nothing_secret()
-costs_nothing()
-no_repetition()
-not_committable()
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    every_request,
+    what_failed,
+    a_day_at_a_time,
+    nothing_identifying,
+    nothing_secret,
+    costs_nothing,
+    no_repetition,
+    not_committable,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

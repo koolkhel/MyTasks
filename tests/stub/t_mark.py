@@ -769,21 +769,22 @@ def group_hook():
           ["row_index", "base_style"])
 
 
-def main_():
-    asyncio.run(group_3_1())
-    asyncio.run(group_3_2())
-    asyncio.run(group_3_3())
-    asyncio.run(group_3_4())
-    asyncio.run(group_3_5())
-    asyncio.run(group_bar())
-    asyncio.run(group_readable())
-    asyncio.run(group_cursor())
-    asyncio.run(group_advance())
-    asyncio.run(group_themes())
-    group_hook()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
-
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    group_3_1,
+    group_3_2,
+    group_3_3,
+    group_3_4,
+    group_3_5,
+    group_bar,
+    group_readable,
+    group_cursor,
+    group_advance,
+    group_themes,
+    group_hook,
+)
 
 if __name__ == "__main__":
-    raise SystemExit(main_())
+    raise SystemExit(run_parts(PARTS, ok))

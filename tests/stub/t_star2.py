@@ -9,6 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
+from parts import run_parts
 from harness import StubClient, mk, TZ
 from datetime import datetime as dt
 import main as M, tracker
@@ -41,68 +42,83 @@ async def prompt_roundtrip(text):
         for _ in range(40): await pilot.pause()
     return got
 
-print("2.3 a title longer than the prompt is kept whole")
-r = asyncio.run(prompt_roundtrip(LONG))
-chk("the prompt holds the entire title", r["held"] == LONG, f"{len(r['held'])} of {len(LONG)}")
-chk("it returns the entire title", r["value"] == LONG, f"{len(r['value'] or '')} chars")
-chk("only the view of it is limited", r["shown"] < len(LONG), f"{r['shown']} cells shown")
-chk("and the view is the widened one", r["shown"] == 78, str(r["shown"]))
 
-print("\n3.2 adding and renaming still work through the widened prompt")
-async def add_and_rename():
-    stub = StubClient([mk("T-a", "aaa", start=TODAY)], reference=NOW)
-    app = TaskApp(TODAY)
-    async with app.run_test(size=(120, 40)) as pilot:
-        app.client = stub; app.projects = {}; app.tracker_config = None
-        app.green_tag = None; app.green_checked = True
-        app.load(); await settle(pilot, app)
-        await pilot.press("a")
-        for _ in range(40): await pilot.pause()
-        chk("the add prompt opened", bool(app.screen.query("Input")))
-        await pilot.press(*"новая задача"); await pilot.press("enter")
-        await settle(pilot, app)
-        titles = [t.title for t in app.tasks]
-        chk("a Russian title was added", "новая задача" in titles, str(titles))
-        app._selected_id = "T-a"; app.repaint(); await pilot.pause()
-        await pilot.press("e")
-        for _ in range(40): await pilot.pause()
-        chk("the rename prompt opened with the old title",
-            app.screen.query_one(Input).value == "aaa", app.screen.query_one(Input).value)
-        chk("and it is the widened one too",
-            app.screen.query_one(Input).content_size.width == 78,
-            str(app.screen.query_one(Input).content_size.width))
-        await pilot.press("escape")
-        for _ in range(20): await pilot.pause()
-        await pilot.press("ф")           # the Russian twin of "a"
-        for _ in range(40): await pilot.pause()
-        chk("the twin key opens it too", bool(app.screen.query("Input")))
-        await pilot.press("escape")
-        for _ in range(20): await pilot.pause()
-asyncio.run(add_and_rename())
+def the_other_screens():
+    """Everything this suite checks, as the one part it is made of.
 
-print("\n3.3 the other dialogues still open, answer and dismiss")
-async def others():
-    app = TaskApp(TODAY)
-    async with app.run_test(size=(120, 40)) as pilot:
-        for name, screen, key, want in [
-            ("Confirm", lambda: Confirm("Sure?"), "y", True),
-            ("DatePicker", lambda: DatePicker("When?", TODAY), "escape", None),
-            ("ProjectPicker", lambda: ProjectPicker("Project", {"P-1": "One"}, None), "escape", None),
-            ("TaskFocus", lambda: TaskFocus(mk("T-1", "a task", start=TODAY), "all-day", "", TZ), "escape", None),
-            ("Help", lambda: Help(), "escape", None),
-        ]:
-            out = {}
-            async def drive(s=screen):
-                out["v"] = await app.push_screen_wait(s())
-            app.run_worker(drive())
-            for _ in range(30): await pilot.pause()
-            opened = app.screen is not app.screen_stack[0]
-            await pilot.press(key)
-            for _ in range(30): await pilot.pause()
-            chk(f"{name} opened and dismissed", opened and app.screen is app.screen_stack[0],
-                f"opened={opened}")
-            if want is not None:
-                chk(f"{name} returned its answer", out.get("v") == want, repr(out.get("v")))
-asyncio.run(others())
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+    It ran at import before, which meant that reading the file ran
+    it -- and in a process that had already read another suite, ran
+    it against loaders that suite had blanked.
+    """
+    print("2.3 a title longer than the prompt is kept whole")
+    r = asyncio.run(prompt_roundtrip(LONG))
+    chk("the prompt holds the entire title", r["held"] == LONG, f"{len(r['held'])} of {len(LONG)}")
+    chk("it returns the entire title", r["value"] == LONG, f"{len(r['value'] or '')} chars")
+    chk("only the view of it is limited", r["shown"] < len(LONG), f"{r['shown']} cells shown")
+    chk("and the view is the widened one", r["shown"] == 78, str(r["shown"]))
+
+    print("\n3.2 adding and renaming still work through the widened prompt")
+    async def add_and_rename():
+        stub = StubClient([mk("T-a", "aaa", start=TODAY)], reference=NOW)
+        app = TaskApp(TODAY)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.client = stub; app.projects = {}; app.tracker_config = None
+            app.green_tag = None; app.green_checked = True
+            app.load(); await settle(pilot, app)
+            await pilot.press("a")
+            for _ in range(40): await pilot.pause()
+            chk("the add prompt opened", bool(app.screen.query("Input")))
+            await pilot.press(*"новая задача"); await pilot.press("enter")
+            await settle(pilot, app)
+            titles = [t.title for t in app.tasks]
+            chk("a Russian title was added", "новая задача" in titles, str(titles))
+            app._selected_id = "T-a"; app.repaint(); await pilot.pause()
+            await pilot.press("e")
+            for _ in range(40): await pilot.pause()
+            chk("the rename prompt opened with the old title",
+                app.screen.query_one(Input).value == "aaa", app.screen.query_one(Input).value)
+            chk("and it is the widened one too",
+                app.screen.query_one(Input).content_size.width == 78,
+                str(app.screen.query_one(Input).content_size.width))
+            await pilot.press("escape")
+            for _ in range(20): await pilot.pause()
+            await pilot.press("ф")           # the Russian twin of "a"
+            for _ in range(40): await pilot.pause()
+            chk("the twin key opens it too", bool(app.screen.query("Input")))
+            await pilot.press("escape")
+            for _ in range(20): await pilot.pause()
+    asyncio.run(add_and_rename())
+
+    print("\n3.3 the other dialogues still open, answer and dismiss")
+    async def others():
+        app = TaskApp(TODAY)
+        async with app.run_test(size=(120, 40)) as pilot:
+            for name, screen, key, want in [
+                ("Confirm", lambda: Confirm("Sure?"), "y", True),
+                ("DatePicker", lambda: DatePicker("When?", TODAY), "escape", None),
+                ("ProjectPicker", lambda: ProjectPicker("Project", {"P-1": "One"}, None), "escape", None),
+                ("TaskFocus", lambda: TaskFocus(mk("T-1", "a task", start=TODAY), "all-day", "", TZ), "escape", None),
+                ("Help", lambda: Help(), "escape", None),
+            ]:
+                out = {}
+                async def drive(s=screen):
+                    out["v"] = await app.push_screen_wait(s())
+                app.run_worker(drive())
+                for _ in range(30): await pilot.pause()
+                opened = app.screen is not app.screen_stack[0]
+                await pilot.press(key)
+                for _ in range(30): await pilot.pause()
+                chk(f"{name} opened and dismissed", opened and app.screen is app.screen_stack[0],
+                    f"opened={opened}")
+                if want is not None:
+                    chk(f"{name} returned its answer", out.get("v") == want, repr(out.get("v")))
+    asyncio.run(others())
+
+
+#: The parts this suite is made of, in the order they run.  One list,
+#: read by the runner to report and select them one at a time, and by
+#: the file itself when it is run directly.
+PARTS = (the_other_screens,)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

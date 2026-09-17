@@ -818,13 +818,22 @@ async def undo_restores_the_flag():
               sorted(i.is_read for i in imap.held["Feed"]), [False, False])
 
 
-async def main_():
-    for part in (folding, ordering, opens, reviewing, confirming,
-                 stays_gone, nothing_written, dropped_line, configuration,
-                 saying_so, undo_restores_the_flag):
-        await part()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    folding,
+    ordering,
+    opens,
+    reviewing,
+    confirming,
+    stays_gone,
+    nothing_written,
+    dropped_line,
+    configuration,
+    saying_so,
+    undo_restores_the_flag,
+)
 
-
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

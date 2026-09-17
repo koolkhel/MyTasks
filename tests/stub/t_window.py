@@ -18,7 +18,7 @@ sys.path.insert(0, _REPO)
 # exactly what this one cannot test through.
 import singularity
 _read_window = singularity.load_working_window
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date, datetime, time
 import main as M
 from main import TaskApp
@@ -568,13 +568,27 @@ async def t_window_without_a_project():
             "No work project is set" in drawn(app), drawn(app))
 
 
-for fn in (t_hours, t_days, t_default_days, t_day_words, t_unreadable,
-           t_midnight, t_reader):
-    fn()
-for fn in (t_opens, t_moment, t_key_still_flips, t_tick, t_lapse,
-           t_crossing_is_the_key, t_says_why, t_unreadable_window,
-           t_window_without_a_project):
-    asyncio.run(fn())
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_hours,
+    t_days,
+    t_default_days,
+    t_day_words,
+    t_unreadable,
+    t_midnight,
+    t_reader,
+    t_opens,
+    t_moment,
+    t_key_still_flips,
+    t_tick,
+    t_lapse,
+    t_crossing_is_the_key,
+    t_says_why,
+    t_unreadable_window,
+    t_window_without_a_project,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

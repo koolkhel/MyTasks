@@ -105,7 +105,7 @@ def big_mailbox():
     return F.build({"Bulk": messages}), folded, deep
 
 
-async def main_():
+async def a_mailbox_that_size():
     print(f"a mailbox of {MESSAGES} messages")
     started = monotonic()
     path, folded, deep = big_mailbox()
@@ -183,8 +183,11 @@ async def main_():
         print(f"  reading {read:.2f}s vs drawing {drew:.2f}s: "
               f"{'reading' if read > drew else 'drawing'} dominates")
 
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
 
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (a_mailbox_that_size,)
 
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

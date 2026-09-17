@@ -8,7 +8,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date, datetime, timedelta
 import main as M
 from main import TaskApp
@@ -289,7 +289,23 @@ async def t_rename_keeps():
         check("selection stayed on the renamed task", app.tasks[table.cursor_row].id == "T-a", f"on={app.tasks[table.cursor_row].id}")
         stub.gate.set(); await settle(pilot, app)
 
-for fn in (t_tick, t_cursor_cases, t_rename_keeps, t_burst, t_order, t_membership, t_delete_and_empty, t_dft, t_fail, t_one_of_three, t_refresh):
-    asyncio.run(fn())
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_tick,
+    t_cursor_cases,
+    t_rename_keeps,
+    t_burst,
+    t_order,
+    t_membership,
+    t_delete_and_empty,
+    t_dft,
+    t_fail,
+    t_one_of_three,
+    t_refresh,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

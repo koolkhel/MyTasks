@@ -194,16 +194,18 @@ async def insertion():
         check("nothing was added or lost", len(out), len(before) + len(events))
 
 
-async def main_():
-    await insertion()
-    await the_key()
-    await reported()
-    await finished()
-    await bands()
-    await same_minute()
-    await guarantee()
-    print()
-    print(f"{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    insertion,
+    the_key,
+    reported,
+    finished,
+    bands,
+    same_minute,
+    guarantee,
+)
 
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

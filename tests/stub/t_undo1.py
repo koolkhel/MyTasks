@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date
 import main as M
 from main import TaskApp, Undoable
@@ -317,10 +317,27 @@ async def t_single_refusal_drops():
         await pilot.press("space"); await settle(pilot, app)
         chk("nothing recorded", app._undo==[], str(len(app._undo)))
 
-for fn in (t_record, t_refused, t_partial_group, t_single_refusal_drops, t_unreversible, t_group, t_reverse,
-           t_only_its_fields, t_refused_undo, t_gone, t_off_view, t_not_self,
-           t_forced_orderings, t_all_on_one_queue):
-    asyncio.run(fn())
-t_not_persisted()
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_record,
+    t_refused,
+    t_partial_group,
+    t_single_refusal_drops,
+    t_unreversible,
+    t_group,
+    t_reverse,
+    t_only_its_fields,
+    t_refused_undo,
+    t_gone,
+    t_off_view,
+    t_not_self,
+    t_forced_orderings,
+    t_all_on_one_queue,
+    t_not_persisted,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

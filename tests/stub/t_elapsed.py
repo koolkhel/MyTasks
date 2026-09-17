@@ -426,16 +426,18 @@ async def header_reads():
                   app.title, "Singularity tasks")
 
 
-async def main_():
-    await positions()
-    await every_hour()
-    await other_days()
-    await selected()
-    await keeping_up()
-    await clock()
-    await header_reads()
-    print()
-    print(f"{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    positions,
+    every_hour,
+    other_days,
+    selected,
+    keeping_up,
+    clock,
+    header_reads,
+)
 
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

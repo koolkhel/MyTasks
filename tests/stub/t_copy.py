@@ -485,16 +485,17 @@ async def group_4_4():
                   (True, True, True))
 
 
-def main_():
-    asyncio.run(group_2_1())
-    asyncio.run(group_2_2())
-    asyncio.run(group_4())
-    asyncio.run(group_4_1())
-    asyncio.run(group_5())
-    asyncio.run(group_4_4())
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
-
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    group_2_1,
+    group_2_2,
+    group_4,
+    group_4_1,
+    group_5,
+    group_4_4,
+)
 
 if __name__ == "__main__":
-    raise SystemExit(main_())
+    raise SystemExit(run_parts(PARTS, ok))

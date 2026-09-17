@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date
 import main as M
 from main import TaskApp, ProjectPicker, Confirm, KeyBar
@@ -211,9 +211,20 @@ async def t_keybar():
         chk("the bar names the key", entries.get("p")=="Project", str(entries.get("p")))
         chk("the help describes it", "put the task in a project" in M.Help.TEXT)
 
-for fn in (t_picker, t_confirm_first, t_move_no_confirm, t_optimistic,
-           t_inbox_leaves, t_filed_hidden, t_keybar):
-    asyncio.run(fn())
-t_no_unfile()
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_picker,
+    t_confirm_first,
+    t_move_no_confirm,
+    t_optimistic,
+    t_inbox_leaves,
+    t_filed_hidden,
+    t_keybar,
+    t_no_unfile,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

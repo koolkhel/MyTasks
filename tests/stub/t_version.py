@@ -13,6 +13,7 @@ _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
 import tracker
+from harness import run_parts
 from tracker import Config, ISSUE_FIELDS, _custom_fields, _first, _names
 
 ok = []
@@ -179,9 +180,16 @@ def t_costs_nothing():
         VERSION_FIELD not in str(with_field.calls[0][1]))
 
 
-for fn in (t_shapes, t_readers, t_issue_versions, t_reader_absent,
-           t_costs_nothing):
-    fn()
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_shapes,
+    t_readers,
+    t_issue_versions,
+    t_reader_absent,
+    t_costs_nothing,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

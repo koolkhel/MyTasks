@@ -299,15 +299,27 @@ def nothing_here_touched_a_screen():
           False)
 
 
-for part in (one_view_of_every_source, the_inbox_holds_mail,
-             the_filters_take_rows_away, the_cells_are_text,
-             a_finished_task_is_struck, a_marked_row_keeps_its_own_mark,
-             a_long_title_says_it_was_cut, the_line_counts_what_is_drawn,
-             the_line_says_what_was_withheld, the_line_counts_the_marks,
-             a_notice_outranks_the_counts, the_cursor_follows_the_row,
-             a_gone_row_keeps_the_line, another_view_begins_at_its_beginning,
-             no_rows_means_no_cursor, nothing_here_touched_a_screen):
-    part()
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    one_view_of_every_source,
+    the_inbox_holds_mail,
+    the_filters_take_rows_away,
+    the_cells_are_text,
+    a_finished_task_is_struck,
+    a_marked_row_keeps_its_own_mark,
+    a_long_title_says_it_was_cut,
+    the_line_counts_what_is_drawn,
+    the_line_says_what_was_withheld,
+    the_line_counts_the_marks,
+    a_notice_outranks_the_counts,
+    the_cursor_follows_the_row,
+    a_gone_row_keeps_the_line,
+    another_view_begins_at_its_beginning,
+    no_rows_means_no_cursor,
+    nothing_here_touched_a_screen,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

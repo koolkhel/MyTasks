@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import datetime, timedelta
 import main as M, tracker
 from main import TaskApp, MARKS, _state_label
@@ -174,8 +174,20 @@ async def t_count():
         await pilot.press("w"); await pilot.pause()
         st=status(app)
         chk("hidden work is reported too", "work hidden" in st, st)
-for fn in (t_on_top, t_filter_and_order, t_day_untouched, t_cursor, t_row, t_count):
-    asyncio.run(fn())
-t_label()
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_on_top,
+    t_filter_and_order,
+    t_day_untouched,
+    t_cursor,
+    t_row,
+    t_count,
+    t_label,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

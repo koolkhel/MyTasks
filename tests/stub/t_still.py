@@ -328,12 +328,17 @@ async def cost():
         check("a redraw stays under a second", each < 1.0, True)
 
 
-async def main_():
-    for part in (a_redraw_holds, ticking_holds, found_when_lost,
-                 a_new_view_begins, the_key_bar, cost):
-        await part()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    a_redraw_holds,
+    ticking_holds,
+    found_when_lost,
+    a_new_view_begins,
+    the_key_bar,
+    cost,
+)
 
-
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

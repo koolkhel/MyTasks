@@ -641,20 +641,22 @@ async def issue_done_rows():
     check("which is the finished one", none_marked, ["all done"])
 
 
-async def main_():
-    await beside_the_other_sources()
-    await never_delays()
-    await the_view()
-    await the_row()
-    await the_body()
-    await opening()
-    await refusals()
-    await counting_as_work()
-    await still_in_the_inbox()
-    await legible_together()
-    await issue_done_rows()
-    print()
-    print(f"{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    beside_the_other_sources,
+    never_delays,
+    the_view,
+    the_row,
+    the_body,
+    opening,
+    refusals,
+    counting_as_work,
+    still_in_the_inbox,
+    legible_together,
+    issue_done_rows,
+)
 
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

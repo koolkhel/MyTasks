@@ -14,6 +14,7 @@ _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
 import main
+from harness import run_parts
 from main import as_markdown, from_markdown
 from singularity import CANCELLED, CHECKED, EMPTY
 
@@ -151,13 +152,14 @@ def group_2_4():
           all(r[0].strip() for r in read if r), True)
 
 
-def main_():
-    group_2_2()
-    group_2_3()
-    group_2_4()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
-
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    group_2_2,
+    group_2_3,
+    group_2_4,
+)
 
 if __name__ == "__main__":
-    raise SystemExit(main_())
+    raise SystemExit(run_parts(PARTS, ok))

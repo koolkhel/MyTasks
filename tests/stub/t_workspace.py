@@ -19,7 +19,7 @@ sys.path.insert(0, _REPO)
 # be asked of the real reader.
 import singularity
 _read_command = singularity.load_workspace_command
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import datetime, timedelta, time as time_of_day
 import main as M, tracker, ical, mail
 from main import TaskApp, TaskInput, KeyBar
@@ -618,13 +618,25 @@ async def t_nothing_is_added_up():
             repr([k for k in held if k.startswith("working")]))
 
 
-t_reader_absent()
-t_no_shell()
-for fn in (t_row_carries, t_refusals, t_command_line, t_leaving,
-           t_shell_characters, t_cannot_start, t_writes_nothing, t_named,
-           t_counts_on_any_row, t_coming_back_starts_again,
-           t_workspace_counts_like_the_rest, t_nothing_is_added_up):
-    asyncio.run(fn())
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_reader_absent,
+    t_no_shell,
+    t_row_carries,
+    t_refusals,
+    t_command_line,
+    t_leaving,
+    t_shell_characters,
+    t_cannot_start,
+    t_writes_nothing,
+    t_named,
+    t_counts_on_any_row,
+    t_coming_back_starts_again,
+    t_workspace_counts_like_the_rest,
+    t_nothing_is_added_up,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

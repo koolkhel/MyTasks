@@ -542,13 +542,20 @@ async def drawing():
               pane(app).scroll_offset.y > 0)
 
 
-async def main_():
-    for part in (the_text_still_lands, focus_stays_on_the_list, one_height,
-                 scrolling, rewinding, rows_from_elsewhere, the_card,
-                 saying_so, drawing):
-        await part()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    the_text_still_lands,
+    focus_stays_on_the_list,
+    one_height,
+    scrolling,
+    rewinding,
+    rows_from_elsewhere,
+    the_card,
+    saying_so,
+    drawing,
+)
 
-
-sys.exit(asyncio.run(main_()))
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

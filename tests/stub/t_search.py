@@ -596,38 +596,39 @@ async def t_keybar():
 
 # ------------------------------------------------------------------- runner
 
-async def main_():
-    await t_reads_as()
-    await t_reads_as_every_kind()
-    await t_none_by_default()
-    await t_narrows()
-    await t_every_source_inbox()
-    await t_every_source_today()
-    await t_case_and_part()
-    await t_title_alone()
-    await t_order_kept()
-    await t_both_filters()
-    await t_writes_nothing()
-    await t_prompt_opens()
-    await t_every_key()
-    await t_escape_clears()
-    await t_cancel_and_empty()
-    t_no_collision()
-    await t_daybar_names_term()
-    await t_status_counts()
-    await t_says_when_it_hides_nothing_and_everything()
-    await t_silent_with_no_search()
-    await t_both_reported()
-    await t_selection()
-    await t_follows_between_views()
-    await t_rows_arriving()
-    await t_redraw_keeps_it()
-    t_help()
-    await t_keybar()
 
-asyncio.run(main_())
-# The runner reads this line to report how many checks a suite ran; a suite
-# that summarises itself any other way is listed with a dash where its count
-# should be, and the tier summary then says nothing about its size.
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_reads_as,
+    t_reads_as_every_kind,
+    t_none_by_default,
+    t_narrows,
+    t_every_source_inbox,
+    t_every_source_today,
+    t_case_and_part,
+    t_title_alone,
+    t_order_kept,
+    t_both_filters,
+    t_writes_nothing,
+    t_prompt_opens,
+    t_every_key,
+    t_escape_clears,
+    t_cancel_and_empty,
+    t_no_collision,
+    t_daybar_names_term,
+    t_status_counts,
+    t_says_when_it_hides_nothing_and_everything,
+    t_silent_with_no_search,
+    t_both_reported,
+    t_selection,
+    t_follows_between_views,
+    t_rows_arriving,
+    t_redraw_keeps_it,
+    t_help,
+    t_keybar,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

@@ -340,10 +340,15 @@ def not_committable():
                          cwd=_REPO, capture_output=True).returncode, 0)
 
 
-the_writer()
-the_hook()
-asyncio.run(a_crashing_review())
-not_committable()
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    the_writer,
+    the_hook,
+    a_crashing_review,
+    not_committable,
+)
 
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

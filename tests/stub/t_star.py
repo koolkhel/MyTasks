@@ -9,6 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
+from parts import run_parts
 from harness import StubClient, mk, TZ
 from datetime import datetime as dt, timedelta
 import main as M, tracker, singularity
@@ -106,46 +107,63 @@ async def run():
         all(r[0] == "" for _, r in rows_off), str([r[0] for _, r in rows_off]))
     chk("and no count is reported", "green" not in st_off, st_off)
 
-asyncio.run(run())
 
-print("\n2.1/2.2 the prompt is wider; the other five are not")
-async def widths(term=(120, 40), dialog_w=None):
-    app = TaskApp(TODAY)
-    out = {}
-    async with app.run_test(size=term) as pilot:
-        for name, screen in [
-            ("TaskInput", TaskInput("Add task", "")),
-            ("Confirm", Confirm("Sure?")),
-            ("DatePicker", DatePicker("When?", TODAY)),
-            ("ProjectPicker", ProjectPicker("Project", {"P-1": "One"}, None)),
-            ("TaskFocus", TaskFocus(mk("T-1", "a task", start=TODAY), "all-day", "", TZ)),
-            ("Help", Help()),
-        ]:
-            try:
-                app.push_screen(screen)
-                for _ in range(25): await pilot.pause()
-                out[name] = app.screen.query_one("#dialog").size.width
-                if name == "TaskInput":
-                    out["TaskInput text"] = app.screen.query_one(Input).content_size.width
-                app.pop_screen()
-                for _ in range(10): await pilot.pause()
-            except Exception as exc:
-                out[name] = f"?({type(exc).__name__})"
-    return out
 
-now = asyncio.run(widths())
-for k, v in now.items(): print(f"    {k:16} {v}")
-chk("the prompt's box is wider than the shared one", now["TaskInput"] > now["Confirm"],
-    f"{now['TaskInput']} vs {now['Confirm']}")
-chk("its text area grew from 50 to 78", now["TaskInput text"] == 78, str(now["TaskInput text"]))
-for other in ("Confirm", "DatePicker", "ProjectPicker", "TaskFocus", "Help"):
-    if isinstance(now[other], int):
-        chk(f"{other} is unchanged at 56", now[other] == 56, str(now[other]))
+def the_widths():
+    """Everything this suite checks, as the one part it is made of.
 
-print("\n2.4 a narrow terminal narrows it rather than overflowing")
-for term_w in (50, 60, 70, 80, 100):
-    got = asyncio.run(widths(term=(term_w, 40)))
-    w = got["TaskInput"]
-    chk(f"terminal {term_w}: the box fits inside it", w <= term_w, f"box {w}")
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+    It ran at import before, which meant that reading the file ran
+    it -- and in a process that had already read another suite, ran
+    it against loaders that suite had blanked.
+    """
+    print("\n2.1/2.2 the prompt is wider; the other five are not")
+    async def widths(term=(120, 40), dialog_w=None):
+        app = TaskApp(TODAY)
+        out = {}
+        async with app.run_test(size=term) as pilot:
+            for name, screen in [
+                ("TaskInput", TaskInput("Add task", "")),
+                ("Confirm", Confirm("Sure?")),
+                ("DatePicker", DatePicker("When?", TODAY)),
+                ("ProjectPicker", ProjectPicker("Project", {"P-1": "One"}, None)),
+                ("TaskFocus", TaskFocus(mk("T-1", "a task", start=TODAY), "all-day", "", TZ)),
+                ("Help", Help()),
+            ]:
+                try:
+                    app.push_screen(screen)
+                    for _ in range(25): await pilot.pause()
+                    out[name] = app.screen.query_one("#dialog").size.width
+                    if name == "TaskInput":
+                        out["TaskInput text"] = app.screen.query_one(Input).content_size.width
+                    app.pop_screen()
+                    for _ in range(10): await pilot.pause()
+                except Exception as exc:
+                    out[name] = f"?({type(exc).__name__})"
+        return out
+
+    now = asyncio.run(widths())
+    for k, v in now.items(): print(f"    {k:16} {v}")
+    chk("the prompt's box is wider than the shared one", now["TaskInput"] > now["Confirm"],
+        f"{now['TaskInput']} vs {now['Confirm']}")
+    chk("its text area grew from 50 to 78", now["TaskInput text"] == 78, str(now["TaskInput text"]))
+    for other in ("Confirm", "DatePicker", "ProjectPicker", "TaskFocus", "Help"):
+        if isinstance(now[other], int):
+            chk(f"{other} is unchanged at 56", now[other] == 56, str(now[other]))
+
+    print("\n2.4 a narrow terminal narrows it rather than overflowing")
+    for term_w in (50, 60, 70, 80, 100):
+        got = asyncio.run(widths(term=(term_w, 40)))
+        w = got["TaskInput"]
+        chk(f"terminal {term_w}: the box fits inside it", w <= term_w, f"box {w}")
+
+
+#: The parts this suite is made of, in the order they run.  One list,
+#: read by the runner to report and select them one at a time, and by
+#: the file itself when it is run directly.
+PARTS = (
+    run,
+    the_widths,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

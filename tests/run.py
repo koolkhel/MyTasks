@@ -139,10 +139,39 @@ def leftovers():
         return [("?", f"could not be checked: {type(exc).__name__}")]
 
 
+def command_for(tier, name):
+    """How a suite is started, which depends only on which tier it is in.
+
+    The self-contained suites declare their parts and are collected: pytest
+    runs each part on its own and reports it by name, so a failure names the
+    situation rather than the file.  One process per suite even so -- these
+    suites rewrite module state on the way up, run threads and build
+    applications, and sharing an interpreter between fifty-four of them would
+    trade a property this runner has for free against a faster start.
+
+    `-s` because the suites report themselves, line by line, and this reads
+    those lines: capturing them would leave nothing to read.
+
+    The other tiers are started exactly as they always were.  They talk to
+    real services, and moving them is a separate change with its own way of
+    being checked.
+    """
+    path = os.path.join(TESTS, tier, f"{name}.py")
+    if tier == "stub":
+        return [PYX, "-m", "pytest", "-s", path]
+    return [PYX, path]
+
+
+def has_pytest():
+    """Whether the interpreter running the suites can collect them."""
+    return subprocess.run([PYX, "-c", "import pytest"],
+                          capture_output=True).returncode == 0
+
+
 def run_one(tier, name):
     started = time.time()
     try:
-        p = subprocess.run([PYX, os.path.join(TESTS, tier, f"{name}.py")],
+        p = subprocess.run(command_for(tier, name),
                            capture_output=True, text=True, timeout=600,
                            env=child_env(REPO))
         out, code = p.stdout + p.stderr, p.returncode
@@ -238,6 +267,17 @@ def main():
         print(f"  {'probes':<8} {len(suites('probes')):>2}  "
               f"(assert nothing; never run)")
         return 0
+
+    # Refuse rather than start, the same way and for the same reason as a
+    # missing credential below: an import error from fifty-four subprocesses
+    # reads, to somebody who has just cloned this, exactly like a broken
+    # suite.
+    if any(t == "stub" for t, _ in plan) and not has_pytest():
+        print("the self-contained suites are collected by pytest, which is not"
+              " installed.\n"
+              f"      {os.path.relpath(PYX, os.getcwd())} -m pip install -r"
+              " requirements.txt\nNothing was run.")
+        return 2
 
     # Refuse rather than start: a tier without its credentials produces a
     # wall of failures that say nothing about the code.

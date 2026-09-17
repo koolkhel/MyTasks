@@ -27,3 +27,8 @@ crash*.txt
 # An editor's swap file holds the content of what is open in it, so a swap of
 # one of the above is one of the above.
 *.swp
+
+# What pytest remembers between runs -- which parts failed last time, so
+# that re-running only those is possible.  It describes one run on one
+# machine and belongs to nobody else.
+.pytest_cache/

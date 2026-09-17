@@ -16,7 +16,7 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 import main as M
 from main import TaskApp
 from singularity import SingularityError
@@ -162,11 +162,14 @@ async def t_refused():
               "doomed" in status(app), status(app))
 
 
-async def main_():
-    for part in (t_optimistic, t_queued_behind, t_refused):
-        await part()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    sys.exit(0 if all(ok) else 1)
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_optimistic,
+    t_queued_behind,
+    t_refused,
+)
 
-
-asyncio.run(main_())
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import datetime, timedelta
 import main as M, tracker
 from main import TaskApp
@@ -109,6 +109,13 @@ async def run():
         yt == ["yt:TASKR-3", "yt:TASKR-4", "yt:TASKR-7", "yt:TASKR-8"], str(yt))
     chk("all four are still shown", len(yt) == 4 and f"4 tracked" in st_, st_)
 
-asyncio.run(run())
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    run,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

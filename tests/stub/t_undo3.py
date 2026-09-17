@@ -9,7 +9,7 @@ _TESTS = _os.path.dirname(_TESTS)
 _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0,_TESTS)
 sys.path.insert(0,_REPO)
-from harness import StubClient, mk, TZ
+from harness import StubClient, mk, TZ, run_parts
 from datetime import date, datetime, timedelta
 import main as M
 from main import TaskApp, KeyBar, ProjectPicker, Confirm
@@ -215,9 +215,21 @@ async def t_across_views():
             str(stub.store["T-a"].checked))
         chk("and the message names it", "aaa" in status(app), status(app))
 
-for fn in (t_delete, t_first_filing, t_add, t_never_destroys, t_move_projects,
-           t_dft, t_key, t_across_views):
-    asyncio.run(fn())
-t_symmetry()
-print(f"\n{sum(ok)}/{len(ok)} checks passed")
-sys.exit(0 if all(ok) else 1)
+
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    t_delete,
+    t_first_filing,
+    t_add,
+    t_never_destroys,
+    t_move_projects,
+    t_dft,
+    t_key,
+    t_across_views,
+    t_symmetry,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

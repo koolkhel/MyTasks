@@ -182,12 +182,15 @@ async def unchanged():
         await pilot.press("o"); await pilot.pause()
         check("and o still opens the issue", opened, ["https://tr.example/issue/AB-1"])
 
-async def main_():
-    await placement()
-    await edges()
-    await unchanged()
-    print()
-    print(f"{sum(ok)}/{len(ok)} checks passed")
-    return 0 if all(ok) else 1
 
-sys.exit(asyncio.run(main_()))
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    placement,
+    edges,
+    unchanged,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))

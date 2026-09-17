@@ -572,12 +572,19 @@ async def the_mark_stays_behind():
                   for sp in app.row_for(made_task[0])[3].spans), False)
 
 
-async def main_():
-    for part in (becomes_a_task, shown_at_once, what_it_carries,
-                 filed_as_work, undoing, refusals, saying_so,
-                 the_mark_stays_behind):
-        await part()
-    print(f"\n{sum(ok)}/{len(ok)} checks passed")
-    sys.exit(0 if all(ok) else 1)
+#: The parts this suite is made of, in the order they run.  One list, read
+#: by the runner to report and select them one at a time, and by the file
+#: itself when it is run directly -- so both ways run the same parts.
+PARTS = (
+    becomes_a_task,
+    shown_at_once,
+    what_it_carries,
+    filed_as_work,
+    undoing,
+    refusals,
+    saying_so,
+    the_mark_stays_behind,
+)
 
-asyncio.run(main_())
+if __name__ == "__main__":
+    raise SystemExit(run_parts(PARTS, ok))
