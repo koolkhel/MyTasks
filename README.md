@@ -8,7 +8,7 @@ It is a personal tool, published because the shape of it might be useful to
 somebody else. Everything below is real behaviour; the data in the pictures is
 invented.
 
-![The day's board](docs/today.svg)
+![The day's board](docs/today.png)
 
 ## Four sources, one list
 
@@ -29,7 +29,7 @@ row points at, and `f` turns a message into a task on today.
 Everything else treats them alike. They are counted, hidden by the search, hidden
 by the work filter, marked and copied exactly as a task is.
 
-![The inbox, with mail below the undated tasks](docs/inbox.svg)
+![The inbox, with mail below the undated tasks](docs/inbox.png)
 
 ## The day, the inbox, and someday
 
