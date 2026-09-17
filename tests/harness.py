@@ -103,6 +103,10 @@ class StubClient:
             self.lock = threading.Lock()
             self.green = None              # the tag that orders a task first
             self.tag_titles = {}           # tag id -> title, for tag_title()
+            # How many archived rows one page of the archive answers with.
+            # Small in a suite that wants to see the view fill a page at a
+            # time; the real store answers a thousand.
+            self.archive_page = 1000
 
     # -- bookkeeping -------------------------------------------------------
     READS = {"project_names", "tasks_at", "tasks_for_day"}
@@ -144,6 +148,20 @@ class StubClient:
                            past_due=sum(1 for t in rows if t.past_due_since(self.reference, self.tz)),
                            reference=self.reference)
         return Listing(sort_for_display(rows, self.tz))
+
+    def iter_archived(self, page_size=None, **filters):
+        """The archived, finished rows, a page at a time.
+
+        Recorded when the pages are first drawn on rather than when the
+        generator is made, which is when the real client reaches the store:
+        a suite counting fetches is counting requests, not intentions.
+        """
+        self._record("iter_archived")
+        rows = [t for t in self.store.values()
+                if t.archived and (t.done or t.cancelled)]
+        size = page_size or self.archive_page
+        for i in range(0, len(rows) or 1, size):
+            yield rows[i:i + size]
 
     def tasks_for_day(self, day=None, include_done=True, **filters):
         """A day's tasks, as the real client answers.

@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import email.utils
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from rich.text import Text
 from textual.markup import escape
 
 import singularity
-from singularity import CANCELLED, CHECKED, EMPTY, Bucket, Task
+from singularity import ARCHIVE, CANCELLED, CHECKED, EMPTY, Bucket, Task
 
 MARKS = {EMPTY: "☐", CHECKED: "☑", CANCELLED: "☒"}
 #: Raw keys marking a row as the tracker's rather than the board's.  A row
@@ -135,6 +135,13 @@ GREEN_MARK = "*"
 #: longest a task puts there is shorter.  Named once so the width the label
 #: is trimmed to and the width the column is drawn at cannot drift apart.
 _WHEN_WIDTH = 11
+#: How many of the archive's rows are drawn at once.  The archive is held
+#: whole -- thousands of rows -- and a search reaches every one of them, but
+#: the table is refilled from scratch on every repaint and a repaint happens
+#: on every mark: measured, 500 rows cost 9ms against 158ms for 9,100, and
+#: marking a run of rows pays that cost once per press.  What is withheld is
+#: reported rather than silently dropped.
+ARCHIVE_ROWS = 500
 #: How wide the column naming a task's project is.  Eleven cells hold the
 #: names in use with room to spare; it was twenty-two, and the eleven given
 #: back go to the title, which is the column that runs out of room.
@@ -257,6 +264,12 @@ class Painting:
     #: the position the view is held at afterwards.
     cursor: int | None
     scroll: int
+    #: How many rows the archive holds and how many of them were drawn.  Both
+    #: zero in every other view.  Two numbers rather than one because the
+    #: difference is what the bound withheld, and a view showing part of the
+    #: archive must not read as an archive that small.
+    archive_held: int = 0
+    archive_drawn: int = 0
 
 
 class Board:
@@ -280,7 +293,10 @@ class Board:
                  green_tag: str | None, tracker_issues: list,
                  tracker_config, events: list, events_day, calendar_config,
                  mail_threads: list, notice: tuple[str, bool] | None,
-                 fetched: bool, title_width: int, late_colour: str):
+                 fetched: bool, title_width: int, late_colour: str,
+                 archive: list[Task] | None = None,
+                 archive_loading: bool = False,
+                 archive_error: str | None = None):
         #: The ids of the rows a person has marked, in the order they marked
         #: them.  A list rather than a set: that order is what a copy comes
         #: out in.
@@ -337,6 +353,17 @@ class Board:
         #: The colour a past-due title is drawn in, resolved from the theme
         #: for the same reason.
         self.late_colour = late_colour
+        #: Every archived task the application has fetched, in whatever order
+        #: the store answered in.  Given rather than fetched, as every other
+        #: source is: ordering, narrowing and bounding it is this module's
+        #: work, reaching the store is not.  None until the view has been
+        #: asked for, which is not the same as an archive that is empty.
+        self.archive = archive
+        #: Whether pages of it are still arriving, and what went wrong if the
+        #: fetch failed.  Both are said in the line under the rows, so that a
+        #: partial archive is never mistaken for the whole of it.
+        self.archive_loading = archive_loading
+        self.archive_error = archive_error
 
     def paint(self, *, keep: str | None = None, previous: int = 0,
               scroll: int = 0, drawn_for=None) -> "Painting":
@@ -351,11 +378,18 @@ class Board:
         assigns it, so that what it holds and what was drawn are the same
         thing rather than two computations of it.
         """
-        shown = [t for t in self.patched() if self.belongs(t)]
-        tasks = singularity.sort_for_display(
-            shown, self.tz, self.reference, manual=self.orders_manually,
-            green=self.green_tag,
-        )
+        if self.position is ARCHIVE:
+            # The archive is not a day's fetch with a membership rule applied
+            # to it; it is its own body of rows, held whole and ordered by
+            # when the store archived them.  No pending write is applied,
+            # because nothing in this view writes.
+            tasks = self.archive_rows()
+        else:
+            shown = [t for t in self.patched() if self.belongs(t)]
+            tasks = singularity.sort_for_display(
+                shown, self.tz, self.reference, manual=self.orders_manually,
+                green=self.green_tag,
+            )
         # The tracker's rows join outside the ordering, never during it: an
         # issue has no date, so the day's own membership rule would reject
         # it anyway, and joining afterwards is the same fact as "not part of
@@ -427,19 +461,29 @@ class Board:
             if self.reference
             else 0
         )
+        # The bound goes here: after both filters, so that what is drawn is
+        # the newest of what survived them, and before the cells, so that the
+        # rows withheld cost nothing to draw.  Held and drawn are both
+        # reported; the search above has already reached every held row.
+        archive_held = len(tasks) if self.position is ARCHIVE else 0
+        if self.position is ARCHIVE and len(tasks) > ARCHIVE_ROWS:
+            tasks = tasks[:ARCHIVE_ROWS]
+        archive_drawn = len(tasks) if self.position is ARCHIVE else 0
         cells = [self.row_for(task) for task in tasks]
         cursor, scroll = self.cursor_after(
             tasks, keep=keep, previous=previous, scroll=scroll,
             drawn_for=drawn_for)
         status, status_error = self.says(
             tasks, shown_issues, shown_events, shown_mail, shown_messages,
-            hidden_work, hidden_by_search, past_due)
+            hidden_work, hidden_by_search, past_due,
+            archive_held=archive_held, archive_drawn=archive_drawn)
         return Painting(
             rows=tasks, cells=cells, shown_issues=shown_issues, shown_events=shown_events,
             shown_mail=shown_mail, shown_messages=shown_messages,
             hidden_work=hidden_work, hidden_by_search=hidden_by_search,
             past_due=past_due, status=status, status_error=status_error,
             cursor=cursor, scroll=scroll,
+            archive_held=archive_held, archive_drawn=archive_drawn,
         )
 
     def has_ended(self, task: Task) -> bool:
@@ -626,7 +670,13 @@ class Board:
             title = f"≡ {title}"
         late = task.past_due_since(self.reference, self.tz) if self.reference else None
         when = (
-            singularity.overdue_label(late, self.reference)
+            # In the archive the column carries the date the store archived
+            # the row.  Nothing in that view is due, so the time of day it was
+            # once scheduled at is the one thing the column could say that
+            # nobody is looking for.
+            self.archived_label(task)
+            if self.position is ARCHIVE
+            else singularity.overdue_label(late, self.reference)
             if late
             else task.start_label(self.tz)
         )
@@ -924,15 +974,19 @@ class Board:
             }))
         return rows
 
-    def patched(self) -> list[Task]:
+    def patched(self, rows: list[Task] | None = None) -> list[Task]:
         """The fetched tasks with every pending write applied on top.
 
         Rows come only from what the last fetch reported, so a pending
         write is never itself a reason for a row to exist -- an orphan
         patch, for a task the fetch no longer knows about, shows nothing.
+
+        Over the day's base unless told otherwise; the archive hands its
+        own rows in, so that a task brought back from it is drawn as
+        brought back by the same overlay a day's tick is.
         """
         out: list[Task] = []
-        for task in self._base:
+        for task in (self._base if rows is None else rows):
             queue = self._pending.get(task.id)
             if not queue:
                 out.append(task)
@@ -968,6 +1022,50 @@ class Board:
             isinstance(self.position, date)
             and self.position == self.now.date()
         )
+
+    def archive_rows(self) -> list[Task]:
+        """The archive's rows, in the order this view puts them.
+
+        Most recently archived first, ties by title -- so that the order
+        never depends on the order the store answered in, which is its own
+        and is not any order at all.
+
+        What was fetched, with pending writes laid over it, and nothing
+        taken away: a task brought back from here stays on its row, drawn
+        as brought back, until the archive is next read.  The row is what a
+        person is looking at when they decide where to send it, and the one
+        thing this view lets them do after un-ticking is date.  Which rows
+        are the archive's -- finished, and archived by the store -- was
+        decided when they were fetched.  A row whose stamp the board could
+        not read sorts to the end rather than taking the view down with it.
+
+        The tag that marks a task green does not lift a row here.  Every row
+        in this view was finished when it was read, and the tag already
+        ranks below that.
+        """
+        rows = self.patched(self.archive or [])
+        # Two stable sorts rather than one key that negates a timestamp: the
+        # second keeps the first's order within equal dates, and neither has
+        # to express "descending by one thing, ascending by another" as
+        # arithmetic.
+        rows.sort(key=lambda t: t.display_title.casefold())
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        rows.sort(key=lambda t: t.archived_at or oldest, reverse=True)
+        return rows
+
+    def archived_label(self, task: Task) -> str:
+        """When the store archived a row, in the room the column leaves.
+
+        A date and not a time of day.  The column is eleven cells and
+        "17 Sep 2026" is eleven exactly; a row four years old wants its year
+        far more than it wants the minute it was filed.
+
+        Empty where the stamp could not be read, which is the same answer the
+        ordering gives such a row: it is drawn, and it says nothing it does
+        not know.
+        """
+        when = task.archived_at
+        return f"{when.astimezone(self.tz):%d %b %Y}" if when else ""
 
     def tracker_rows(self) -> list[Task]:
         """The tracker's issues, as rows the board can draw.
@@ -1036,6 +1134,12 @@ class Board:
         because today's past-due rule still claims it.
         """
         position = self.position
+        if position is ARCHIVE:
+            # A row belongs because it was fetched, and for as long as what
+            # was fetched is held.  The two writes this view allows change
+            # what a row says, not whether it is here: a task brought back
+            # stays on its row until the archive is next read.
+            return any(t.id == task.id for t in (self.archive or []))
         if isinstance(position, Bucket):
             if task.done or task.cancelled or task.start is not None:
                 return False
@@ -1106,7 +1210,9 @@ class Board:
 
     def says(self, tasks: list[Task], shown_issues: int, shown_events: int,
              shown_mail: int, shown_messages: int, hidden_work: int,
-             hidden_by_search: int, past_due: int) -> tuple[str, bool]:
+             hidden_by_search: int, past_due: int, *,
+             archive_held: int = 0,
+             archive_drawn: int = 0) -> tuple[str, bool]:
         """The line under the rows, and whether it is an error.
 
         Every count is beside the others rather than instead of them: the
@@ -1117,9 +1223,19 @@ class Board:
         own = [t for t in tasks
                if not (self.is_tracker(t) or self.is_event(t) or self.is_mail(t))]
         done = sum(1 for t in own if t.done)
-        # The task count is what the board manages; issues are counted
-        # beside it, never folded into it.
-        bits = [f"{len(own)} task(s)", f"{done} done"]
+        if self.position is ARCHIVE:
+            # How many the archive holds, and -- only when the bound withheld
+            # some -- how many of them were drawn.  A view showing part of
+            # the archive must not read as an archive that small.  "Done" is
+            # not said: every row in this view is finished, so a count of
+            # them would be the same number twice.
+            bits = [f"{archive_held} archived"]
+            if archive_drawn < archive_held:
+                bits.append(f"{archive_drawn} shown")
+        else:
+            # The task count is what the board manages; issues are counted
+            # beside it, never folded into it.
+            bits = [f"{len(own)} task(s)", f"{done} done"]
         if shown_issues:
             # Not named for any one state: more than one may be shown, and
             # which state each issue is in is on its own row.
@@ -1167,6 +1283,17 @@ class Board:
         # view is fetched afresh.
         if self.notice:
             return self.notice
+        if self.position is ARCHIVE:
+            # Both of these outrank the counts and neither is a notice: they
+            # are what this view is doing, not what a person's last press
+            # did, and they must not be painted over by the next repaint.
+            if self.archive_error:
+                return self.archive_error, True
+            if self.archive_loading:
+                # Beside the counts rather than instead of them: the rows
+                # that have arrived are on screen and saying nothing about
+                # them would make a partial archive look like the whole one.
+                return " · ".join(["Reading the archive…"] + bits), False
         if not self.fetched:
             # The events can be on screen before the day's tasks are; saying
             # how many tasks there are before they have arrived would name a
@@ -1234,6 +1361,13 @@ class Board:
         """
         held = {t.id for t in self._base}
         held |= {f"{MAIL_PREFIX}{t.newest.ident}" for t in self.mail_threads}
+        # The archive is what this view has in hand, where `_base` is what a
+        # day's fetch put in hand.  Without this a row marked in the archive
+        # is read as one the view would have drawn and did not -- which is
+        # what "gone" means here -- and the mark is taken off by the next
+        # repaint, which in this view is the next arriving page.
+        if self.position is ARCHIVE:
+            held |= {t.id for t in (self.archive or [])}
 
         def gone(ident: str) -> bool:
             if ident in held:

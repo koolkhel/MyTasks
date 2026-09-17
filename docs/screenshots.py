@@ -35,7 +35,8 @@ import ical                                                # noqa: E402
 import mail                                                # noqa: E402
 import tracker                                             # noqa: E402
 from main import TaskApp                                   # noqa: E402
-from singularity import Bucket, CANCELLED, CHECKED         # noqa: E402
+from singularity import (ARCHIVE, Bucket, CANCELLED,     # noqa: E402
+                         CHECKED)
 from textual.widgets import DataTable                      # noqa: E402
 
 TZ = local_tz()
@@ -116,6 +117,31 @@ INBOX_TASKS = [
     task("i3", "Ask Creed what he actually does here", day=None),
 ]
 
+def finished(tid, title, days_ago, checked=CHECKED, project=None, hour=9):
+    """A task the store archived `days_ago` days back."""
+    t = task(tid, title, checked=checked, project=project,
+             day=TODAY - dt.timedelta(days=days_ago))
+    when = dt.datetime.combine(TODAY - dt.timedelta(days=days_ago),
+                               dt.time(hour, 0), tzinfo=TZ)
+    t.raw["journalDate"] = iso_z(when)
+    return t
+
+
+ARCHIVE_TASKS = [
+    finished("a1", "Dundies venue confirmed — Chili's, again", 1, project=SALES),
+    finished("a2", "Quarterly paper order signed off", 1, project=SALES, hour=16),
+    finished("a3", "Fire drill debrief with Dwight", 2),
+    finished("a4", "Branch closure rumour — ask Corporate", 3, checked=CANCELLED),
+    finished("a5", "Sales call — Vance Refrigeration", 4, project=SALES),
+    finished("a6", "Casino Night: hire the tables", 11),
+    finished("a7", "Replace the second-floor copier", 18, project=SALES),
+    finished("a8", "Health plan choices circulated", 25),
+    finished("a9", "Beet farm invoice, second attempt", 40, checked=CANCELLED),
+    finished("a10", "Scranton branch: annual review", 63),
+    finished("a11", "Print a new Dundie for Best Ping-Pong", 96),
+    finished("a12", "Warehouse safety training booked", 140),
+]
+
 EVENTS = [
     event("Conference room: Dundies planning", 10, 0, minutes=45),
     event("Sales call — Vance Refrigeration", 13, 30, minutes=30),
@@ -140,7 +166,7 @@ THREADS = [
 # ------------------------------------------------------------------ the picture
 
 def stub(position, tasks, *, events=(), issues=()):
-    app = TaskApp(position if not isinstance(position, Bucket) else TODAY)
+    app = TaskApp(position if isinstance(position, dt.date) else TODAY)
     app.client = StubClient(list(tasks), reference=NOW)
     app.client.project_names = lambda **kw: {SALES: "Sales"}
     app.client.green = GREEN
@@ -160,10 +186,10 @@ async def shoot(name, app, *, position=TODAY, events=(), issues=(), threads=(),
         async with app.run_test(size=size) as pilot:
             for _ in range(14):
                 await pilot.pause()
-            if isinstance(position, Bucket):
+            if not isinstance(position, dt.date):
                 app.position = position
                 app.load()
-                for _ in range(20):
+                for _ in range(40):
                     await pilot.pause()
             app.mail_threads = list(threads)
             if events:
@@ -230,6 +256,10 @@ SHOTS = [
          board=lambda: stub(Bucket.INBOX, INBOX_TASKS),
          position=Bucket.INBOX, threads=THREADS,
          cursor="Fire safety training"),
+    dict(name="archive",
+         board=lambda: stub(ARCHIVE, ARCHIVE_TASKS),
+         position=ARCHIVE, marks=["a1", "a2", "a3"],
+         cursor="Casino Night"),
 ]
 
 

@@ -77,8 +77,32 @@ class Bucket(enum.Enum):
         return "Inbox" if self is Bucket.INBOX else "Someday"
 
 
-#: A position the board can show: one calendar day, or one of the buckets.
-Position = "date | Bucket"
+class Archive:
+    """The view of what the store has archived.
+
+    A singleton of its own rather than a third `Bucket`. A bucket is defined
+    by the API's `deferred` flag -- it is which dateless query a task answers
+    -- and the archive has no answer for that: it is not a place a task sits
+    but what the store did with it once it was finished. Anything walking the
+    buckets means the two dateless queues and would not want this.
+    """
+
+    __slots__ = ()
+
+    #: What the board calls this view, as `Bucket.label` answers for those.
+    label = "Archive"
+
+    def __repr__(self) -> str:                      # pragma: no cover - a name
+        return "ARCHIVE"
+
+
+#: The archive, as a position. One object, compared with `is`.
+ARCHIVE = Archive()
+
+
+#: A position the board can show: one calendar day, one of the buckets, or
+#: the archive.
+Position = "date | Bucket | Archive"
 
 
 class SingularityError(Exception):
@@ -226,6 +250,31 @@ class Task:
     @property
     def deadline(self) -> datetime | None:
         return parse_dt(self.raw.get("deadline"))
+
+    @property
+    def archived_at(self) -> datetime | None:
+        """When the store archived this task, or None if it has not.
+
+        The store archives a task when it is ticked, and sweeps whatever is
+        left at the turn of the day -- so this is when the task left the
+        board, which is not always the moment it was finished.  The board
+        says "archived" for that reason.
+
+        Guarded where `start` and `deadline` are not.  Those are read from
+        rows the board fetched for one day; this is read from four years of
+        them, stored by versions of the app older than the field's present
+        shape, and one unparseable stamp among nine thousand rows would
+        otherwise take the whole archive down on its way to the screen.
+        """
+        try:
+            return parse_dt(self.raw.get("journalDate"))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    @property
+    def archived(self) -> bool:
+        """Whether the store has archived this task."""
+        return self.archived_at is not None
 
     @property
     def timed(self) -> bool:
@@ -716,8 +765,14 @@ class SingularityClient:
         payload = self.get("/task", **filters)
         return [Task(row) for row in payload.get("tasks", [])]
 
-    def iter_tasks(self, page_size: int = MAX_PAGE, **filters: Any) -> Iterator[Task]:
-        """Every matching task, paging until the server runs out.
+    def iter_pages(self, page_size: int = MAX_PAGE,
+                   **filters: Any) -> Iterator[list[Task]]:
+        """Every matching task, a page at a time, until the server runs out.
+
+        A page rather than a task, because a caller drawing what arrives
+        wants to draw once per request rather than once per row. `iter_tasks`
+        is this flattened, so there is one paging loop rather than two that
+        could come to disagree about when to stop.
 
         Recurrence instances are forced on: with them off the server
         post-filters each page and offset paging can silently skip rows.
@@ -729,13 +784,47 @@ class SingularityClient:
                 "/task", maxCount=page_size, offset=offset, paginationData=True, **filters
             )
             rows = payload.get("tasks", [])
-            for row in rows:
-                yield Task(row)
+            yield [Task(row) for row in rows]
             page = payload.get("pagination") or {}
             total = page.get("total")
             offset += len(rows)
             if not rows or (total is not None and offset >= total):
                 return
+
+    def iter_tasks(self, page_size: int = MAX_PAGE, **filters: Any) -> Iterator[Task]:
+        """Every matching task, paging until the server runs out."""
+        for page in self.iter_pages(page_size, **filters):
+            yield from page
+
+    def iter_archived(self, page_size: int = MAX_PAGE,
+                      **filters: Any) -> Iterator[list[Task]]:
+        """The archived tasks that were finished, a page at a time.
+
+        Archived and finished are not the same thing: the store carries an
+        archive date on some hundreds of tasks that were never ticked, and
+        the view this feeds is what was finished. They are dropped here
+        rather than by the store because the store's `checked.in` filter is
+        declared as a single number in its own schema, so a comma-separated
+        list would be a guess about an undocumented encoding; one pass over
+        rows already in hand is certain.
+
+        No order is asked for and none is given: the store has no ordering
+        parameter, so what comes back is in its own order and arranging it
+        is the board's work.
+        """
+        for page in self.iter_pages(
+            page_size, includeArchived=True, **{"journalDate.isSet": True}, **filters
+        ):
+            yield [t for t in page if t.done or t.cancelled]
+
+    def archived_tasks(self, **filters: Any) -> Listing:
+        """The whole archive, in one call, for a caller that cannot wait.
+
+        The board does not use this -- it draws each page as it lands -- but
+        the same query answers both, so what "the archive" means is decided
+        in one place.
+        """
+        return Listing([t for page in self.iter_archived(**filters) for t in page])
 
     def tasks_for_day(
         self,
@@ -868,8 +957,10 @@ class SingularityClient:
             tasks = unfiled
         return Listing(sort_for_display(tasks, self.tz, green=self.green), filed_out)
 
-    def tasks_at(self, position: "date | Bucket", **filters: Any) -> Listing:
+    def tasks_at(self, position: "date | Bucket | Archive", **filters: Any) -> Listing:
         """Tasks for whichever position the board is showing."""
+        if position is ARCHIVE:
+            return self.archived_tasks(**filters)
         if isinstance(position, Bucket):
             return self.tasks_in_bucket(position, **filters)
         return self.tasks_for_day(position, **filters)

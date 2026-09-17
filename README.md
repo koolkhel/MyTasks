@@ -33,10 +33,24 @@ by the work filter, marked and copied exactly as a task is.
 
 ![The inbox, with mail below the undated tasks](docs/inbox.png)
 
-## The day, the inbox, and someday
+## The day, the inbox, someday, and the archive
 
 `h` and `l` walk the days, `t` jumps to today. `i` is the inbox — tasks with no
 date, and the mail queue below them. `s` is someday, for what has been put off.
+
+`A` is the archive: everything you have ever finished, newest first, with the
+date the store archived it. It is read whole the first time you ask for it —
+several thousand rows in a few seconds, filling as it arrives — and then held
+until you close the board, so `/` searches all of it at once rather than the
+screenful in front of you. The newest few hundred are drawn and the rest are
+searched, which the line under the list says. Nothing is written to disk. Two keys write back:
+`space` brings a task out of the archive and onto the day it had, and `d`
+dates it, so a task you finished too early is back on today in two presses.
+Every other key that would change a row says so instead — the archive is a
+record. Marking and copying work as everywhere, which makes `v` and `Y` a way
+of answering "what did I get done last week".
+
+![The archive, with three rows marked](docs/archive.png)
 
 Inside a day the order is the board's, not yours to fight: unfinished before
 finished, past due first, then by time of day, then by the order you set with
@@ -157,7 +171,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 54 suites and 2,752 checks, runs against
+it needs. The self-contained tier is 55 suites and 2,898 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured.
 

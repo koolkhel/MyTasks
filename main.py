@@ -58,6 +58,7 @@ import journal
 import mail
 import tracker
 from singularity import (
+    ARCHIVE,
     CANCELLED,
     CHECKED,
     EMPTY,
@@ -1439,6 +1440,10 @@ class TaskApp(App[None]):
         Binding(keys("t"), "today", "Today"),
         Binding(keys("i"), "inbox", "Inbox"),
         Binding(keys("s"), "someday", "Someday"),
+        # Uppercase, beside the lowercase key that adds a task: the archive
+        # is where a task ends up, and both letters are about the same thing
+        # at opposite ends of its life.  `a` was long taken and this was free.
+        Binding(keys("A"), "archive", "Archive"),
         Binding(keys("r"), "refresh", "Reload"),
         Binding(keys("w"), "toggle_work", "Hide work"),
         # Two keys, because one of them cannot be reached in both layouts.
@@ -1619,6 +1624,17 @@ class TaskApp(App[None]):
         # What this session has written, most recent last, so the undo key
         # can walk back through it.  Session-long: nothing is kept on disk.
         self._undo: list[Undoable] = []
+        #: Every archived task the store has answered with, or None until the
+        #: archive has been asked for -- which is not the same as an archive
+        #: that is empty, and is what decides whether asking for the view
+        #: again reaches the store.  Held for as long as the board is open
+        #: and written nowhere.
+        self.archive: list[Task] | None = None
+        #: Whether pages of it are still arriving, and what went wrong if the
+        #: fetch failed.  Both are said in the line under the rows: a partial
+        #: archive that said nothing would read as the whole of it.
+        self.archive_loading = False
+        self.archive_error: str | None = None
         # The issue tracker: read-only, today only, and entirely optional.
         # A board with none configured is an ordinary board.
         self.tracker_config = tracker.load_config()
@@ -1833,6 +1849,14 @@ class TaskApp(App[None]):
                 self.client = SingularityClient()
             if not self.projects:
                 self.projects = self.client.project_names()
+            if self.position is ARCHIVE:
+                # Its own path, and not because it is a different kind of
+                # fetch: it is ten requests rather than one, so it is drawn
+                # a page at a time instead of after the last of them, and it
+                # keeps what it read rather than replacing the base a day's
+                # fetch owns.
+                self.read_archive()
+                return
             listing = self.client.tasks_at(self.position)
         except SingularityError as exc:
             self.call_from_thread(self.set_status, str(exc), True)
@@ -1855,6 +1879,69 @@ class TaskApp(App[None]):
             self.call_from_thread(self.load_tracker)
         else:
             self.call_from_thread(self.clear_tracker)
+
+    def read_archive(self) -> None:
+        """Read the archive, drawing each page as it arrives.
+
+        On the worker the view's own fetch runs on, because it is that
+        view's fetch -- but a page at a time: the whole of it is some ten
+        requests and eleven seconds against one and a second for a day, and
+        an empty table for eleven seconds would be the worst part of this.
+
+        Already held is not a reason to ask again.  The store is reached the
+        first time the view is asked for and when a reload clears what was
+        held, and at no other time -- moving away and back is not a fetch.
+        """
+        if self.archive is not None and self.archive_error is None:
+            self.call_from_thread(self.repaint)
+            return
+        self.call_from_thread(self.archive_starting)
+        held: list[Task] = []
+        try:
+            for page in self.client.iter_archived():
+                # Replaced rather than appended to: the screen reads this
+                # list on its own thread, and a list being extended under it
+                # is a list it can read half of.
+                held = held + page
+                self.call_from_thread(self.archive_arrived, held, True)
+        except SingularityError as exc:
+            self.call_from_thread(self.archive_failed, str(exc))
+            return
+        self.call_from_thread(self.archive_arrived, held, False)
+
+    def archive_starting(self) -> None:
+        """Empty the view and say what it is doing, before the first page."""
+        self.archive = []
+        self.archive_loading = True
+        self.archive_error = None
+        # The archive's rows are its own, not a day's fetch: nothing here is
+        # due, and the instant a day measures overdue against would only
+        # make this view's finished rows look late.
+        self.reference = None
+        # What this view holds has arrived as far as it ever will before the
+        # first page; the line says it is still reading, which is the true
+        # thing to say and is said by `says`.
+        self._fetched = True
+        self.repaint()
+
+    def archive_arrived(self, held: list[Task], more: bool) -> None:
+        """Take a page, and say whether more are coming."""
+        self.archive = held
+        self.archive_loading = more
+        self.repaint()
+
+    def archive_failed(self, why: str) -> None:
+        """Say the archive could not be read, and let asking again retry.
+
+        What was held is dropped rather than kept beside the failure: a
+        half-read archive that no longer says it is half-read would answer a
+        search with part of the truth.  Dropping it is also what makes the
+        next press try again.
+        """
+        self.archive = None
+        self.archive_loading = False
+        self.archive_error = f"The archive could not be read · {why}"
+        self.repaint()
 
     # -- the tracker -------------------------------------------------------
 
@@ -2626,6 +2713,36 @@ class TaskApp(App[None]):
         state = EMPTY if self.is_foreign(task) else task.checked
         return as_markdown(title, state)
 
+    #: What may be written from the archive, by the name each key asks with.
+    #: Two things: un-ticking, which is how a finished task is brought back,
+    #: and dating, which is where it is sent once it is.  Everything else a
+    #: key could do to a task -- rename it, note it, file it, cancel it,
+    #: delete it -- is a change to the record rather than a way out of it.
+    ARCHIVE_WRITES = frozenset({"toggle", "schedule"})
+
+    def refuse_archive(self, action: str) -> bool:
+        """Say a key does not write from the archive, and report having said so.
+
+        By the name of the action rather than by the row: these are the
+        board's own tasks and it could write anything to them, so what
+        decides is what is being asked.  Bringing a task back and dating it
+        are the two things a person opens the archive to do; the rest would
+        be edits to the past.  The same task on its own calendar day is as
+        editable as it ever was.
+
+        Asked where the rows are gathered, before anything is announced --
+        not in the funnel each write passes through, which cannot know the
+        action and would in any case be reached only after a key acting on
+        a marked set had said what it did.  That is how three marked rows
+        came to be refused one at a time while the board announced "brought
+        back 3": nothing was written, and the board said the opposite.
+        """
+        if self.position is not ARCHIVE or action in self.ARCHIVE_WRITES:
+            return False
+        self.notice("The archive is a record · only un-ticking and dating "
+                    "change a row here", True)
+        return True
+
     def refuse_foreign(self, task: Task | None) -> bool:
         """Say a row is not the board's to change, and report having said so.
 
@@ -2893,7 +3010,11 @@ class TaskApp(App[None]):
         if pending.removes:
             self._base = [t for t in self._base if t.id != key]
         else:
-            for task in self._base:
+            # The archive's copy as well as the day's: a task brought back
+            # from the archive is drawn from the row held there, and a
+            # confirmation that reached only the base would let the patch
+            # fall away and the row read as finished again.
+            for task in self._base + (self.archive or []):
                 if task.id == key:
                     task.raw.update(pending.patch)
         self.settled(key)
@@ -3261,7 +3382,9 @@ class TaskApp(App[None]):
             tracker_config=self.tracker_config, events=self.events,
             events_day=self.events_day, calendar_config=self.calendar_config,
             mail_threads=self.mail_threads, title_width=self.title_width,
-            late_colour=self.late_colour,
+            late_colour=self.late_colour, archive=self.archive,
+            archive_loading=self.archive_loading,
+            archive_error=self.archive_error,
         )
 
     def row_for(self, task: Task) -> tuple[str, str, str, str, str]:
@@ -3414,6 +3537,14 @@ class TaskApp(App[None]):
 
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
+        if self.position is ARCHIVE:
+            # No date and no count of its own: how much the archive holds and
+            # how much of it is drawn is the line under the rows, where every
+            # other count about a view already is.
+            parts = [ARCHIVE.label, "what the store has archived"]
+            parts += self.work_note() + self.search_note()
+            bar.update(self.with_mark("  ·  ".join(parts), bar))
+            return
         if isinstance(self.position, Bucket):
             parts = [self.position.label, "no date"]
             if self.filed_out:
@@ -3582,6 +3713,9 @@ class TaskApp(App[None]):
     def action_someday(self) -> None:
         self._go(Bucket.SOMEDAY)
 
+    def action_archive(self) -> None:
+        self._go(ARCHIVE)
+
 
     def action_refresh(self) -> None:
         # Asking for a reload is the gesture that already means "start
@@ -3590,6 +3724,12 @@ class TaskApp(App[None]):
         # painted over before it was seen.
         self.mail_broken = False
         self.projects = {}
+        if self.position is ARCHIVE:
+            # Dropping what is held is what makes the reload a reload: the
+            # view is otherwise drawn from what was already read, which is
+            # the whole point of it everywhere except here.
+            self.archive = None
+            self.archive_error = None
         self.load()
 
     def action_toggle(self) -> None:
@@ -3599,7 +3739,7 @@ class TaskApp(App[None]):
             # away on the server, which is a different thing entirely, and
             # folding it in would make one press do two unlike things to two
             # kinds of row -- one of them over the network.
-            got = self.rows_for_write()
+            got = self.rows_for_write("toggle")
             if got is None:
                 return
             rows, passed, _ = got
@@ -3660,7 +3800,7 @@ class TaskApp(App[None]):
 
         Distinct from ticking on purpose: this leaves the task open.
         """
-        got = self.rows_for_write()
+        got = self.rows_for_write("done_for_today")
         if got is None:
             return
         rows, passed, many = got
@@ -3716,8 +3856,10 @@ class TaskApp(App[None]):
             # A notice, not a plain status: a refusal has to survive the next
             # repaint, and repaints now also come from the tracker answering.
             self.notice(
-                f"{self.position.label} is ordered by title · "
-                "reordering applies to calendar days",
+                f"{self.position.label} is ordered by "
+                + ("when things were archived"
+                   if self.position is ARCHIVE else "title")
+                + " · reordering applies to calendar days",
                 True,
             )
             return
@@ -4130,8 +4272,13 @@ class TaskApp(App[None]):
         else:
             self.notice(f"{did} {wrote}")
 
-    def rows_for_write(self) -> "tuple[list[Task], int, bool] | None":
+    def rows_for_write(self, action: str) -> "tuple[list[Task], int, bool] | None":
         """The rows a write key should act on, or None where there are none.
+
+        `action` is the key's own name for what it does, and is what the
+        archive answers by: it is asked here, before the rows are gathered
+        and before anything is announced, because the funnel below is
+        reached only after a key acting on a set has reported itself.
 
         Answers the rows, how many were set aside as not this board's, and
         whether this is a set -- which decides whether the action reports
@@ -4145,6 +4292,8 @@ class TaskApp(App[None]):
         Answers None where there is nothing to write, having already said so.
         """
         if self.client is None:
+            return None
+        if self.refuse_archive(action):
             return None
         if not self.marked:
             task = self.selected
@@ -4228,7 +4377,7 @@ class TaskApp(App[None]):
         self.marked = keep
 
     def action_cancel_task(self) -> None:
-        got = self.rows_for_write()
+        got = self.rows_for_write("cancel")
         if got is None:
             return
         rows, passed, many = got
@@ -4243,7 +4392,7 @@ class TaskApp(App[None]):
 
     @work
     async def action_schedule(self) -> None:
-        got = self.rows_for_write()
+        got = self.rows_for_write("schedule")
         if got is None:
             return
         rows, passed, many = got
@@ -4304,6 +4453,12 @@ class TaskApp(App[None]):
 
     @work
     async def action_add(self) -> None:
+        if self.position is ARCHIVE:
+            # Refused before the prompt, not after it: asking for a title and
+            # then refusing offers a choice that was never on the table.
+            self.notice("The archive is what is already finished · "
+                        "nothing is added to it", True)
+            return
         where = (
             self.position.label
             if isinstance(self.position, Bucket)
@@ -4381,6 +4536,12 @@ class TaskApp(App[None]):
 
         One group, so one press of the undo key takes the whole paste back.
         """
+        if self.position is ARCHIVE:
+            # A paste is an addition, and lands where what is added lands --
+            # so in the one view that takes no addition it lands nowhere.
+            self.notice("The archive is what is already finished · "
+                        "nothing is added to it", True)
+            return
         items = [read for read in (from_markdown(line)
                                    for line in text.splitlines()) if read]
         if not items or self.client is None:
@@ -4631,7 +4792,7 @@ class TaskApp(App[None]):
         Moving a task that is already filed gives up nothing it still has, so
         it is not asked.
         """
-        got = self.rows_for_write()
+        got = self.rows_for_write("project")
         if got is None:
             return
         rows, passed, many = got
@@ -4697,7 +4858,7 @@ class TaskApp(App[None]):
         the tag comes off again, so pressing the key twice leaves the task
         exactly as it was found.
         """
-        got = self.rows_for_write()
+        got = self.rows_for_write("green")
         if got is None:
             return
         rows, passed, many = got
@@ -4792,7 +4953,7 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
-        if self.refuse_foreign(task):
+        if self.refuse_archive("rename") or self.refuse_foreign(task):
             return
         title = await self.push_screen_wait(TaskInput("Rename task", task.title))
         if not title or title == task.title:
@@ -4817,7 +4978,7 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
-        if self.refuse_foreign(task):
+        if self.refuse_archive("note") or self.refuse_foreign(task):
             return
         if not task.note_is_plain:
             # Saving would keep the words and drop everything else.  Said
@@ -4856,7 +5017,7 @@ class TaskApp(App[None]):
 
     @work
     async def action_delete(self) -> None:
-        got = self.rows_for_write()
+        got = self.rows_for_write("delete")
         if got is None:
             return
         rows, passed, many = got
