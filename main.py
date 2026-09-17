@@ -1064,10 +1064,17 @@ class Help(ModalScreen[None]):
                      Any row can be marked, a message,
                      an event or an issue included
   y                  copy every marked row to the
-                     clipboard as markdown — "- [ ] " for
-                     an unfinished task and "- [x] " for
-                     a finished one. The marks stay, so
-                     you can paste twice; esc clears them
+                     clipboard as plain lines — the title
+                     and nothing else, for an editor that
+                     writes the list markup itself. The
+                     marks stay, so you can paste twice;
+                     esc clears them
+  Y                  copy them as markdown instead —
+                     "- [ ] " for an unfinished task and
+                     "- [x] " for a finished one. This is
+                     the form a paste reads back: a plain
+                     line says nothing about whether a
+                     task was done
   paste              paste lines into the board and each
                      one becomes a task in the shown view.
                      Bullets, numbers and checkboxes are
@@ -1457,6 +1464,7 @@ class TaskApp(App[None]):
         # than any mnemonic spelt out of "mark" or "copy" would be.
         Binding(keys("v"), "mark", "Mark"),
         Binding(keys("y"), "copy_marked", "Copy"),
+        Binding(keys("Y"), "copy_marked_markdown", "Copy md"),
         Binding(keys("u"), "undo", "Undo"),
         # Named for both things it does: on a task it ticks, on a mail row
         # it files the message away where the board cannot show it again,
@@ -2593,18 +2601,28 @@ class TaskApp(App[None]):
         return bool(self.is_mail(task) or self.is_event(task)
                     or self.is_tracker(task))
 
-    def copy_line(self, task: Task) -> str:
-        """One row as the line it is copied out as.
+    def copy_line(self, task: Task, *, markdown: bool) -> str:
+        """One row as the line it is copied out as, in either form.
 
         The title comes off the row rather than out of the drawn cell: the
         cell has been shortened to the column, and a mail row's carries the
         count of messages behind the thread.  Neither belongs in text
-        somebody is about to paste into an editor.
+        somebody is about to paste into an editor.  That holds for both
+        forms, which differ only in what is put around the title.
+
+        Plain is the title and nothing else -- no bullet, no box, no
+        striking.  An editor that puts its own bullet in front of every line
+        would otherwise be given a second one.  It says nothing about
+        whether the row is finished, because there is nothing to say it with
+        that would not itself be markup; the markdown form is the one that
+        carries that, and the one a paste can read back.
 
         A row the board does not own has no state of its own to write, so it
         is written unfinished whatever the source says about it.
         """
         title = task.raw.get("title") or ""
+        if not markdown:
+            return title
         state = EMPTY if self.is_foreign(task) else task.checked
         return as_markdown(title, state)
 
@@ -3967,7 +3985,21 @@ class TaskApp(App[None]):
         self.send_paced()
 
     def action_copy_marked(self) -> None:
-        """Put the marked rows on the clipboard, as markdown.
+        """Put the marked rows on the clipboard as plain lines.
+
+        The ordinary copy, on the ordinary key.  Where the rows are going
+        decides which form is wanted, and an editor that writes the list
+        markup itself is the commoner case: a line arriving as
+        `- - [ ] write it up` has to be cleaned up by hand.
+        """
+        self.copy_marked(markdown=False)
+
+    def action_copy_marked_markdown(self) -> None:
+        """Put the marked rows on the clipboard as markdown."""
+        self.copy_marked(markdown=True)
+
+    def copy_marked(self, markdown: bool) -> None:
+        """Put the marked rows on the clipboard, in one form or the other.
 
         Every marked row, including one this view is not drawing and one a
         filter is hiding: a mark is on a row rather than on a drawn line,
@@ -3977,6 +4009,11 @@ class TaskApp(App[None]):
         The marks are left in place.  Copying is a reading, and a person who
         wanted the same rows in two places would otherwise have to mark them
         twice; escape is how they go.
+
+        Which form was written is said rather than left to be discovered.
+        The two keys are one press apart and what they produce differs only
+        once it is somewhere else, so a board that reported both the same
+        way would let the mistake be found in the other application.
         """
         rows = self.marked_tasks()
         if not rows:
@@ -3986,9 +4023,11 @@ class TaskApp(App[None]):
             self.notice("Nothing is marked · v marks the row under the cursor",
                         True)
             return
-        text = "".join(f"{self.copy_line(task)}\n" for task in rows)
+        text = "".join(f"{self.copy_line(task, markdown=markdown)}\n"
+                       for task in rows)
         self.to_clipboard(text)
-        self.notice(f"Copied {len(rows)} row(s)")
+        self.notice(f"Copied {len(rows)} row(s) as "
+                    f"{'markdown' if markdown else 'plain text'}")
 
     def action_mark(self) -> None:
         """Mark the row under the cursor, or take the mark off it.
