@@ -944,9 +944,17 @@ class TaskFocus(ModalScreen[None]):
             yield Static(escape(task.display_title), id="focus-title")
             # Only the lines the task actually has something for, so a bare
             # task does not render empty labels or stray separators.
-            facts = [self.shown_when]
-            if self.shown_project:
-                facts.append(self.shown_project)
+            if board.Board.is_tracker(task):
+                # An issue has no time of day and its "project" is the work
+                # project that hides it; what a person opening the card on
+                # an issue wants is its state, its tracker project and the
+                # version it is to be fixed in -- the same line the area
+                # under the list shows, decided in the same place.
+                facts = [board.tracker_facts(task)]
+            else:
+                facts = [self.shown_when]
+                if self.shown_project:
+                    facts.append(self.shown_project)
             deadline = task.deadline
             if deadline:
                 facts.append(f"deadline {deadline.astimezone(self.shown_tz):%a %d %b %H:%M}")
@@ -3589,6 +3597,11 @@ class TaskApp(App[None]):
             self.rewound("")
             return
         bits = []
+        if self.is_tracker(task):
+            # An issue's facts where a task's flags go: the state, the
+            # project and the version it is to be fixed in.  Decided beside
+            # the row, so the card cannot come to say something different.
+            bits = [board.tracker_facts(task)]
         if task.recurring:
             bits.append("recurring")
         if task.pinned:

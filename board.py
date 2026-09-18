@@ -160,6 +160,28 @@ def _state_label(state: str) -> str:
     """
     words = state.split()
     return words[-1].lower()[:_WHEN_WIDTH] if words else ""
+def tracker_facts(task: Task) -> str:
+    """The line above a tracker row's description: state, project, versions.
+
+    Where a task's row shows its flags -- recurring, pinned, a deadline -- an
+    issue's row shows what a person picking it up wants first: the state the
+    tracker has it in, its project, and the version it is to be fixed in,
+    labelled as such.  The versions are the ones the board already reads
+    from the configured field, in the tracker's order.  Where there are none
+    the line simply has no such part: nothing is said about an absence that
+    is ordinary.
+
+    Decided from the row alone, so that the area under the list and the
+    focus card cannot come to say different things about the same issue.
+    """
+    facts = [part for part in (task.raw.get(TRACKER_STATE) or "",
+                               task.raw.get(TRACKER_PROJECT) or "") if part]
+    versions = tuple(task.raw.get(TRACKER_VERSIONS) or ())
+    if versions:
+        facts.append("fix: " + ", ".join(versions))
+    return "  ·  ".join(facts)
+
+
 #: The API's name for the least urgent priority a tracker defines.  The board
 #: needs to know which one that is, and only that one, because two of the
 #: tracker's own words begin with the same letter -- the most urgent and the
@@ -1097,6 +1119,12 @@ class Board:
                 TRACKER_PRIORITY: issue.priority,
                 TRACKER_PRIORITY_VALUE: issue.priority_value,
                 TRACKER_VERSIONS: issue.versions,
+                # What the issue is about, where a task keeps its note: the
+                # area under the list, the focus card and the keys that
+                # scroll them show it with no knowledge of the tracker at
+                # all, which is the same path an event's description and a
+                # message's body take.
+                "note": issue.description,
             }))
         return rows
 

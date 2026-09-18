@@ -398,6 +398,39 @@ async def t_priority():
 #: The parts this suite is made of, in the order they run.  One list, read
 #: by the runner to report and select them one at a time, and by the file
 #: itself when it is run directly -- so both ways run the same parts.
+async def t_says():
+    print("2.6 what an issue says: the facts line, and the description as its note")
+    import board as B
+    rich = tracker.Issue(key="TASKR-7", summary="rich", project="TASKR", state="In review",
+                         assignee="me", base_url="https://tracker.example",
+                         versions=("1.6-1", "1.7"),
+                         description="What it is about.\n\nWith [brackets] kept.")
+    bare = issue("TASKR-8", "bare")
+    one = tracker.Issue(key="TASKR-9", summary="one", project="TASKR", state="In progress",
+                        assignee="me", base_url="https://tracker.example", versions=("2.0",))
+    now=datetime.now(TZ)
+    app=prep(TaskApp(TODAY), StubClient(day_tasks(), reference=now), [rich, bare, one])
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint()
+        rows={t.raw[B.TRACKER_KEY]: t for t in app.tasks if app.is_tracker(t)}
+        chk("two versions, in the tracker's order",
+            B.tracker_facts(rows["TASKR-7"]) == "In review  ·  TASKR  ·  fix: 1.6-1, 1.7",
+            B.tracker_facts(rows["TASKR-7"]))
+        chk("one version", B.tracker_facts(rows["TASKR-9"]) == "In progress  ·  TASKR  ·  fix: 2.0",
+            B.tracker_facts(rows["TASKR-9"]))
+        chk("no version: state and project, and nothing about a version",
+            B.tracker_facts(rows["TASKR-8"]) == "In progress  ·  TASKR", B.tracker_facts(rows["TASKR-8"]))
+        chk("the description rides as the row's note",
+            rows["TASKR-7"].note_text == "What it is about.\n\nWith [brackets] kept.")
+        chk("an issue without one has an empty note", rows["TASKR-8"].note_text == "")
+        # The row itself is as it was: key and summary, state, project.
+        r=app.row_for(rows["TASKR-7"])
+        cells=[str(c) for c in r]
+        chk("the row shows the key and the summary", "TASKR-7" in cells[3] and "rich" in cells[3], str(cells))
+        chk("no cell carries the version", not any("1.6-1" in c or "1.7" in c or "fix" in c for c in cells), str(cells))
+        chk("the state is where it was", cells[2] == "review", cells[2])
+
+
 PARTS = (
     t_block,
     t_only_today,
@@ -411,6 +444,7 @@ PARTS = (
     t_down,
     t_unconfigured,
     t_priority,
+    t_says,
 )
 
 if __name__ == "__main__":

@@ -77,11 +77,12 @@ def event(title, hh, mm=0, minutes=60):
                       all_day=False)
 
 
-def issue(key, summary, priority="Major"):
+def issue(key, summary, priority="Major", versions=(), description=""):
     return tracker.Issue(key=key, summary=summary, project="DM",
                          state="In progress", assignee="mscott",
                          base_url="https://tickets.dundermifflin.invalid",
-                         priority=priority, priority_value=priority)
+                         priority=priority, priority_value=priority,
+                         versions=versions, description=description)
 
 
 def thread(subject, sender, *bodies, hours_ago=2):
@@ -148,8 +149,14 @@ EVENTS = [
 ]
 
 ISSUES = [
-    issue("DM-214", "Copier jams on double-sided printing"),
-    issue("DM-198", "Warehouse scanner drops the last digit", priority="Minor"),
+    issue("DM-214", "Copier jams on double-sided printing", versions=("3.2", "3.3"),
+          description="Every duplex job after about forty pages stops with a tray-2 "
+                      "jam that is not there.\n\nReproduced on the second-floor "
+                      "copier only; the annexe one is fine. Kevin says it started "
+                      "after the chili incident, which is not impossible."),
+    issue("DM-198", "Warehouse scanner drops the last digit", priority="Minor",
+          versions=("3.3",),
+          description="Barcodes ending in 0 scan as the code without the 0."),
 ]
 
 THREADS = [
@@ -251,7 +258,7 @@ SHOTS = [
     dict(name="today",
          board=lambda: stub(TODAY, TODAY_TASKS, events=EVENTS, issues=ISSUES),
          position=TODAY, events=EVENTS, issues=ISSUES,
-         marks=["t2", "t3"], cursor="Plan the Dundies"),
+         marks=["t2", "t3"], cursor="Copier jams"),
     dict(name="inbox",
          board=lambda: stub(Bucket.INBOX, INBOX_TASKS),
          position=Bucket.INBOX, threads=THREADS,

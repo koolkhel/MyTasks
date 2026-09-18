@@ -158,10 +158,23 @@ class Recorder:
         return []
 
 
+def t_description():
+    print("1.4 what the issue is about comes with the rest")
+    with_text = dict(issue(), description="What this is about.\n\nWith [brackets] and *stars*.")
+    got = tracker.parse([with_text], cfg())[0]
+    chk("the description is carried as written",
+        got.description == "What this is about.\n\nWith [brackets] and *stars*.", repr(got.description))
+    chk("an issue without one carries the empty string",
+        tracker.parse([issue()], cfg())[0].description == "")
+    chk("a null description is the empty string too",
+        tracker.parse([dict(issue(), description=None)], cfg())[0].description == "")
+    chk("the request names the field", "description" in ISSUE_FIELDS)
+
+
 def t_costs_nothing():
     print("1.3 reading it costs no further request")
-    chk("the request asks for exactly what it always asked for",
-        ISSUE_FIELDS == ("idReadable,summary,project(shortName),updated,"
+    chk("the request asks for exactly what it always asked for, plus the description",
+        ISSUE_FIELDS == ("idReadable,summary,description,project(shortName),updated,"
                          "customFields(name,value(name,localizedName,login))"),
         ISSUE_FIELDS)
     chk("and names no particular field beyond that",
@@ -188,6 +201,7 @@ PARTS = (
     t_readers,
     t_issue_versions,
     t_reader_absent,
+    t_description,
     t_costs_nothing,
 )
 

@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 #: for every custom field, so it costs no call and no page: the priority was
 #: arriving all along and being thrown away for want of the word.
 ISSUE_FIELDS = (
-    "idReadable,summary,project(shortName),updated,"
+    "idReadable,summary,description,project(shortName),updated,"
     "customFields(name,value(name,localizedName,login))"
 )
 TIMEOUT_SECONDS = 15
@@ -142,6 +142,12 @@ class Issue:
     #: configured, where the issue does not carry that field, or where it
     #: carries it empty -- all three being ordinary rather than wrong.
     versions: tuple[str, ...] = ()
+    #: What the issue is about, as whoever filed it wrote it.  Shown where a
+    #: task's note is shown, as the characters it holds: trackers write
+    #: Markdown or a wiki syntax of their own, and the board renders neither.
+    #: Empty where the issue has none, which is ordinary.  One more field on
+    #: the request that already asks for the rest, so it costs no call.
+    description: str = ""
 
     @property
     def url(self) -> str:
@@ -256,6 +262,7 @@ def parse(payload: Any, config: Config) -> list[Issue]:
                 priority_value=priority_value,
                 versions=(_names(fields, config.version_field)
                           if config.version_field else ()),
+                description=raw.get("description") or "",
             )
         )
     return sorted(issues, key=lambda i: (config.rank(i.state), i.key))

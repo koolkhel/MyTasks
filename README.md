@@ -113,7 +113,8 @@ type, and stays on as you move between views.
 
 **Notes.** `enter` shows the selected row in full, with its note; `[` and `]`
 scroll it. A calendar event's description and a message's body arrive in the
-same place.
+same place — and so does a tracker issue's, under a first line that names its
+state, its project and the version it is to be fixed in.
 
 **A workspace.** `W` hands a tracker row's key, project and versions to a
 program of your choosing — for making a branch, a directory, whatever you do at
@@ -179,7 +180,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 57 suites and 3,014 checks, runs against
+it needs. The self-contained tier is 57 suites and 3,036 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured — whatever the machine's default text encoding; nothing in
 the suites depends on the locale.

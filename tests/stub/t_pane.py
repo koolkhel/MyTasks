@@ -75,6 +75,64 @@ async def select(app, pilot, tid):
     return app.tasks[row]
 
 
+# -- an issue from the tracker: its facts, then what it is about ----------
+async def an_issue_from_the_tracker():
+    print("a tracker row's facts line, and its description where a note goes")
+    import tracker
+    rich = tracker.Issue(key="ZZA-1", summary="an issue", project="ZZA", state="In review",
+                         assignee="me", base_url="https://tracker.invalid",
+                         versions=("1.6-1", "1.7"),
+                         description="What it is about.\n\nWith [brackets] and *stars*.")
+    app, size = await board([noted("t1", "a task", "the task's own note")])
+    app.tracker_config = tracker.Config("https://tracker.invalid", "t", "me",
+                                        ("ZZA",), ("In review",))
+    app.work_project = "P-work"
+    app.projects = {"P-work": "Work"}
+    app.tracker_issues = [rich]
+    app.load_tracker = lambda: (setattr(app, "tracker_issues", [rich]), app.repaint())
+    async with app.run_test(size=size) as pilot:
+        await settle(pilot, 14)
+        row = next((t for t in app.tasks if app.is_tracker(t)), None)
+        check("the issue is on the board", row is not None)
+        await select(app, pilot, row.id)
+        shown = text(app)
+        first = shown.splitlines()[0] if shown else ""
+        check("the first line is the state, the project and the fix versions",
+              first, "In review  ·  ZZA  ·  fix: 1.6-1, 1.7")
+        check("the description is beneath it", "What it is about." in shown)
+        check("brackets and stars are characters", "[brackets] and *stars*" in shown)
+        check("the work project's name is not what the line says", "Work" not in first)
+        # The card agrees with the area.
+        await pilot.press("enter")
+        await settle(pilot, 10)
+        facts = str(app.screen.query_one("#focus-facts", Static).render())
+        check("the card's facts are the same line", facts, "In review  ·  ZZA  ·  fix: 1.6-1, 1.7")
+        card = "\n".join(str(w.render()) for w in app.screen.query(Static))
+        check("and the card shows the description", "What it is about." in card)
+        await pilot.press("escape")
+        await settle(pilot, 8)
+        # Off the issue, onto a task: the task's own note, none of the issue's.
+        await select(app, pilot, "t1")
+        shown = text(app)
+        check("a task's note is its own again", "the task's own note" in shown)
+        check("and nothing of the issue remains", "fix:" not in shown and "What it is about" not in shown)
+
+    print("an issue with no description shows its facts and nothing beneath")
+    bare = tracker.Issue(key="ZZA-2", summary="bare", project="ZZA", state="In review",
+                         assignee="me", base_url="https://tracker.invalid")
+    app, size = await board([])
+    app.tracker_config = tracker.Config("https://tracker.invalid", "t", "me", ("ZZA",), ("In review",))
+    app.work_project = "P-work"; app.projects = {"P-work": "Work"}
+    app.tracker_issues = [bare]
+    app.load_tracker = lambda: (setattr(app, "tracker_issues", [bare]), app.repaint())
+    async with app.run_test(size=size) as pilot:
+        await settle(pilot, 14)
+        row = next((t for t in app.tasks if app.is_tracker(t)), None)
+        await select(app, pilot, row.id)
+        shown = text(app)
+        check("only the facts line", shown.strip(), "In review  ·  ZZA")
+
+
 # -- the note still arrives where it always did ---------------------------
 async def the_text_still_lands():
     print("the note is still written to the widget four suites read")
@@ -552,6 +610,7 @@ PARTS = (
     scrolling,
     rewinding,
     rows_from_elsewhere,
+    an_issue_from_the_tracker,
     the_card,
     saying_so,
     drawing,
