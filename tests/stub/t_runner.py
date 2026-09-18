@@ -240,6 +240,141 @@ def the_signature_tells_them_apart():
           KF.signature(parsed("crashed after")) == 0, False)
 
 
+# ------------------------------------------ 3.1 what the children are told
+
+def the_children_print_utf8():
+    import testtoken
+    print("\n3.1 every child is told to read, write and print UTF-8")
+    env = testtoken.child_env(_REPO, base={"PATH": "/bin"})
+    check("a child without the setting gets it", env.get("PYTHONUTF8"), "1")
+    env = testtoken.child_env(_REPO, base={"PATH": "/bin", "PYTHONUTF8": "0"})
+    check("one already set outside is left as it was", env.get("PYTHONUTF8"), "0")
+    check("nothing else about the base is lost", env.get("PATH"), "/bin")
+
+
+# ------------------------------------------ 4.1 nothing is read without saying how
+
+def _call_span(src, open_at):
+    """Index of the ')' closing the call whose '(' is at `open_at`."""
+    depth, i, quote = 0, open_at, None
+    while i < len(src):
+        c = src[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(src)
+
+
+def _enclosing_call(src, at):
+    """Index of the '(' of the innermost call still open at `at`."""
+    depth = 0
+    for i in range(at - 1, -1, -1):
+        c = src[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                return i
+            depth -= 1
+    return -1
+
+
+import io as _io
+import re as _re
+import tokenize as _tokenize
+_TEXT_CALL = _re.compile(r"(?<![\w.])open\(|\.(?:read_text|write_text)\(")
+_BINARY = _re.compile(r"""['"][rwax+]*b[rwax+]*['"]""")
+
+
+def _quoted(src):
+    """Offset ranges of every string and comment token in `src`.
+
+    A call mentioned in a docstring, a comment or a check's own text is not a
+    call, and this scanner lives in a file full of such mentions.
+    """
+    starts = [0]
+    for line in src.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    at = lambda row, col: starts[row - 1] + col
+    spans = []
+    try:
+        for tok in _tokenize.generate_tokens(_io.StringIO(src).readline):
+            if tok.type in (_tokenize.STRING, _tokenize.COMMENT):
+                spans.append((at(*tok.start), at(*tok.end)))
+    except (_tokenize.TokenError, SyntaxError, IndexError):
+        pass
+    return spans
+
+
+def unencoded(src):
+    """Line numbers of text reads, writes and decodes that name no encoding."""
+    quoted = _quoted(src)
+    inside = lambda pos: any(a <= pos < b for a, b in quoted)
+    found = []
+    for m in _TEXT_CALL.finditer(src):
+        if inside(m.start()):
+            continue
+        close = _call_span(src, m.end() - 1)
+        args = src[m.end():close]
+        if "encoding" in args or _BINARY.search(args):
+            continue
+        if args.strip().startswith(("sys.", "fd", "os.dup")):
+            continue
+        found.append(src.count("\n", 0, m.start()) + 1)
+    for m in _re.finditer(r"text=True", src):
+        if inside(m.start()):
+            continue
+        o = _enclosing_call(src, m.start())
+        if o >= 0 and "encoding" in src[o:_call_span(src, o)]:
+            continue
+        found.append(src.count("\n", 0, m.start()) + 1)
+    return sorted(set(found))
+
+
+def offenders_under(root):
+    out = []
+    for here, _dirs, names in _os.walk(root):
+        if "__pycache__" in here or "fixtures" in here:
+            continue
+        for name in sorted(names):
+            if name.endswith(".py"):
+                path = _os.path.join(here, name)
+                for line in unencoded(open(path, encoding="utf-8").read()):
+                    out.append(f"{_os.path.relpath(path, _REPO)}:{line}")
+    return out
+
+
+def nothing_is_read_without_saying_how():
+    print("\n4.1 every text read, write and decode under tests/ names its encoding")
+    check("the scanner sees an unencoded open",
+          unencoded('src = open(path).read()\n'), [1])
+    check("and an unencoded read_text", unencoded('x = pathlib.Path(p).read_text()\n'), [1])
+    check("and a decoded child without an encoding",
+          unencoded('r = subprocess.run(cmd, capture_output=True,\n    text=True)\n'), [2])
+    check("but not a binary open", unencoded('open(p, "rb").read()\n'), [])
+    check("nor one that names its encoding",
+          unencoded('open(p, encoding="utf-8").read()\nrun(x, text=True, encoding="utf-8")\n'), [])
+    check("nor a call mentioned inside a string or a comment",
+          unencoded('s = "open(path).read()"  # open(other)\n"""text=True"""\n'), [])
+    check("nor a decode whose call names one, with a nested call before it",
+          unencoded('subprocess.run(command_for(tier, name), capture_output=True, text=True, timeout=600, encoding="utf-8")\n'), [])
+    check("nor a mention in a comment", unencoded('# open(x) is not called here\n'), [])
+    found = offenders_under(_TESTS)
+    check("no file under tests/ reads, writes or decodes text without an encoding",
+          found, [])
+
+
 #: The parts this suite is made of, in the order they run.  One list, read
 #: by the runner to report and select them one at a time, and by the file
 #: itself when it is run directly -- so both ways run the same parts.
@@ -248,6 +383,8 @@ PARTS = (
     the_cause_is_on_the_line,
     known_and_fixed_for_a_crash,
     the_signature_tells_them_apart,
+    the_children_print_utf8,
+    nothing_is_read_without_saying_how,
 )
 
 if __name__ == "__main__":

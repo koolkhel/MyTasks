@@ -25,7 +25,7 @@ def load(tz=None):
     LOCAL.mkdir(exist_ok=True)
     if not PATH.exists():
         sys.exit(f"no baseline at {PATH}\nTake one before your change:\n{REFRESH}")
-    base = json.load(open(PATH))
+    base = json.load(open(PATH, encoding="utf-8"))
     day = str((datetime.now(tz) if tz else datetime.now()).date())
     was = base.get("captured_day")
     if was != day:

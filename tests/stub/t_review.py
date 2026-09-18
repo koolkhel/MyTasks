@@ -627,7 +627,7 @@ async def saying_so():
     check("the key bar names both things the key does",
           [b.description for b in main.TaskApp.BINDINGS
            if getattr(b, "key", "") == "space"], ["Tick / review"])
-    board_src = open(_REPO + "/main.py").read()
+    board_src = open(_REPO + "/main.py", encoding="utf-8").read()
     check("the board's own comments no longer say it marks a thread read",
           "marks the thread read" in board_src, False)
     check("and nothing in the board writes a mail flag",

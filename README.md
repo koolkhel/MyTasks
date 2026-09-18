@@ -171,9 +171,10 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 56 suites and 2,938 checks, runs against
+it needs. The self-contained tier is 56 suites and 2,950 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
-nothing configured.
+nothing configured — whatever the machine's default text encoding; nothing in
+the suites depends on the locale.
 
 Each suite names the parts it is made of, so a part can be selected, reported
 and re-run on its own:

@@ -212,7 +212,7 @@ def t_reader():
     kept = os.environ.pop("WORK_HOURS", None)
     empty = _os.path.join(tempfile.mkdtemp(prefix="window."), ".env")
     try:
-        open(empty, "w").close()
+        open(empty, "w", encoding="utf-8").close()
         window = _read_window(empty)
         chk("no WORK_HOURS means no window", window is None, repr(window))
     finally:
@@ -296,7 +296,7 @@ async def t_key_still_flips():
 
 async def t_tick():
     print("3.1 one timer, looking at two things")
-    src = open(_os.path.join(_REPO, "main.py")).read()
+    src = open(_os.path.join(_REPO, "main.py"), encoding="utf-8").read()
     chk("the slow tick is set up once", src.count("set_interval(ELAPSED_CHECK_SECONDS") == 1)
     chk("and it runs the pair, not the elapsed check alone",
         "set_interval(ELAPSED_CHECK_SECONDS, self.each_minute)" in src)

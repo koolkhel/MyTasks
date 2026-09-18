@@ -195,7 +195,7 @@ for _folder in sorted(os.listdir(FOLDERS_BUILD)):
         _d = os.path.join(FOLDERS_BUILD, _folder, _sub)
         os.makedirs(_d, exist_ok=True)
         if not os.listdir(_d):
-            open(os.path.join(_d, ".gitkeep"), "w").write(KEEP)
+            open(os.path.join(_d, ".gitkeep"), "w", encoding="utf-8").write(KEEP)
 
 _counts = {f: len(mailbox.Maildir(os.path.join(FOLDERS_BUILD, f),
                                   create=False).keys())

@@ -83,7 +83,7 @@ async def run():
     where = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else (
         pathlib.Path(__file__).parent / "local" / "baseline.json")
     where.parent.mkdir(parents=True, exist_ok=True)
-    json.dump(out, open(where, "w"), indent=1)
+    json.dump(out, open(where, "w", encoding="utf-8"), indent=1)
     print(f"captured: today {len(out['today_ids'])} own + "
           f"{len(out['today_all_ids']) - len(out['today_ids'])} tracked, "
           f"inbox {len(out['INBOX_ids'])}, someday {len(out['SOMEDAY_ids'])}")

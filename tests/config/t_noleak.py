@@ -54,7 +54,7 @@ def settings():
     out = {}
     env = os.path.join(_REPO, ".env")
     if os.path.exists(env):
-        for line in open(env):
+        for line in open(env, encoding="utf-8"):
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -78,7 +78,7 @@ def tracked_matches(needle):
     for extra in ((), ("--cached",)):
         done = subprocess.run(
             ["git", "-C", _REPO, "grep", "-lIF", *extra, "--", needle],
-            capture_output=True, text=True)
+            capture_output=True, text=True, encoding="utf-8")
         found |= {line for line in done.stdout.split("\n") if line.strip()}
     return sorted(found)
 
@@ -132,7 +132,7 @@ for name in ("SINGULARITY_TOKEN", "SINGULARITY_TEST_TOKEN", "YOUTRACK_TOKEN"):
     check(f"{name} is not in the committed history",
           subprocess.run(["git", "-C", _REPO, "log", "--all", "-S", value,
                           "--oneline"], capture_output=True,
-                         text=True).stdout.strip(), "")
+                         text=True, encoding="utf-8").stdout.strip(), "")
 
 print(f"\n{sum(ok)}/{len(ok)} checks passed")
 sys.exit(0 if all(ok) else 1)

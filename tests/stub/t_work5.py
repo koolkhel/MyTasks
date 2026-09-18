@@ -192,7 +192,7 @@ async def t_filed_hidden():
 
 def t_no_unfile():
     print("5.8 the board offers no way to un-file")
-    src=open(_REPO + "/main.py").read()
+    src=open(_REPO + "/main.py", encoding="utf-8").read()
     chk("no action clears a project",
         'projectId": None' not in src and "projectId=None" not in src
         and '"projectId": ""' not in src)

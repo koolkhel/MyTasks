@@ -409,11 +409,11 @@ def not_committable():
                         "logs")
     candidate = os.path.join(real, "imap-2026-09-10.log")
     done = subprocess.run(["git", "check-ignore", "-v", candidate],
-                          cwd=_REPO, capture_output=True, text=True)
+                          cwd=_REPO, capture_output=True, text=True, encoding="utf-8")
     check("git reports it ignored", done.returncode, 0)
     check("and names the rule", ".gitignore" in done.stdout)
     listed = subprocess.run(["git", "status", "--porcelain"],
-                            cwd=_REPO, capture_output=True, text=True)
+                            cwd=_REPO, capture_output=True, text=True, encoding="utf-8")
     check("and no trace is ever listed",
           [l for l in listed.stdout.splitlines() if "imap-" in l], [])
 

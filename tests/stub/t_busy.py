@@ -147,10 +147,10 @@ async def the_log():
     print("the log is not committable")
     ignored = subprocess.run(["git", "-C", _REPO, "check-ignore",
                               "logs/mytasks.log"],
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, encoding="utf-8")
     check("git ignores it", ignored.stdout.strip(), "logs/mytasks.log")
     listed = subprocess.run(["git", "-C", _REPO, "status", "--porcelain"],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, encoding="utf-8")
     check("and never lists it",
           [l for l in listed.stdout.splitlines() if "logs/" in l], [])
 
@@ -571,7 +571,7 @@ async def saying_so():
           [ch for ch in text if "\u0400" <= ch <= "\u04ff"], [])
 
     print("and nothing shipped claims the board writes nothing to disk")
-    board_src = open(_REPO + "/main.py").read()
+    board_src = open(_REPO + "/main.py", encoding="utf-8").read()
     for claim in ("writes nothing to disk", "no state of its own on disk",
                   "nothing is written to disk"):
         check(f"the board does not claim {claim!r}",

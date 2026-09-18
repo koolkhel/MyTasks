@@ -11,6 +11,35 @@ Nothing in here touches a module, a loader or the clock.
 """
 import asyncio
 import inspect
+import sys
+
+
+def print_utf8():
+    """Make what a suite prints UTF-8, whatever the machine's locale says.
+
+    Every suite imports this module before it prints a check, and eighteen
+    of them print names that are not ASCII.  Under a cp1251 locale the first
+    such print raised and the suite died -- when run on its own, that is:
+    the runner already tells its children to print UTF-8, and a guarantee
+    that holds only through the runner fails at exactly the moment somebody
+    runs one suite by hand to narrow a failure down.
+
+    Reconfigured rather than replaced, so a stream that has been captured or
+    substituted -- pytest's, a suite's own StringIO -- is left alone: only a
+    real text stream that offers `reconfigure` is touched, and one already
+    writing UTF-8 is not touched at all.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        fix = getattr(stream, "reconfigure", None)
+        encoding = (getattr(stream, "encoding", "") or "").replace("-", "").lower()
+        if fix is not None and encoding != "utf8":
+            try:
+                fix(encoding="utf-8")
+            except (ValueError, OSError):      # closed, or not a real stream
+                pass
+
+
+print_utf8()
 
 
 def run_parts(parts, *checks):

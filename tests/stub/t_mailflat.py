@@ -209,7 +209,7 @@ def the_flat_view():
            if n in ("mark_read", "mark_unread", "_reflag", "MailboxUnwritable")],
           [])
     check("and holds no rename of its own",
-          "os.rename" in open(mail.__file__).read(), False)
+          "os.rename" in open(mail.__file__, encoding="utf-8").read(), False)
 
     # -- the committed mailbox is never the one read --------------------------
     print("the committed mailbox is left alone")

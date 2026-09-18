@@ -54,7 +54,7 @@ chk("'improvement' is intact", lab("Requires improvement") == "improvement")
 chk("it needs every cell", len("improvement") == M._WHEN_WIDTH)
 
 print("\n2.2 the width is written down once")
-src = pathlib.Path(_REPO + "/main.py").read_text()
+src = pathlib.Path(_REPO + "/main.py").read_text(encoding="utf-8")
 chk("the column takes the constant, not a literal",
     'add_column("When", key="when", width=_WHEN_WIDTH)' in src)
 chk("the number 11 appears once, in the constant",

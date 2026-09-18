@@ -326,7 +326,7 @@ def not_committable():
                         "logs")
     candidate = os.path.join(real, "crash-20260909T173924Z.txt")
     done = subprocess.run(["git", "check-ignore", "-v", candidate],
-                          cwd=_REPO, capture_output=True, text=True)
+                          cwd=_REPO, capture_output=True, text=True, encoding="utf-8")
     check("git reports it ignored", done.returncode, 0)
     check("and names the rule that does it", ".gitignore" in done.stdout)
     check("the log beside it too",

@@ -70,8 +70,17 @@ def keep_out_of_mail(repo_root=None):
 
 
 def child_env(repo_root, base=None):
-    """The environment to launch a store-tier suite with."""
+    """The environment to launch a suite with.
+
+    Every child is told to read, write and print UTF-8, because the runner
+    decodes what they print as UTF-8 and cannot rely on the machine to have
+    been told the same: on a Windows box with a cp1251 locale the suites
+    failed on the first non-ASCII byte -- fourteen of them read the board's
+    own source -- and the runner failed decoding the first one that printed a
+    mark.  A setting already made outside is left as it was.
+    """
     env = dict(os.environ if base is None else base)
+    env.setdefault("PYTHONUTF8", "1")
     configured = dotenv_values(os.path.join(repo_root, ".env")) or {}
     test_token = (configured.get("SINGULARITY_TEST_TOKEN") or "").strip()
     if test_token:

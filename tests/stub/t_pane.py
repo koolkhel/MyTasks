@@ -479,7 +479,7 @@ async def saying_so():
           [True, True])
 
     print("and no longer describes the area as sized to its note")
-    src = open(_REPO + "/main.py").read()
+    src = open(_REPO + "/main.py", encoding="utf-8").read()
     check("the stylesheet no longer sizes the pane to its content",
           "#detail {\n        height: auto;\n        max-height: 40%;" in src,
           False)

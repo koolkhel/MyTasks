@@ -35,6 +35,16 @@ A suite SHALL NOT depend on the path it happens to be stored at, nor on the
 path of the code it checks. Both were absolute in every suite before this, and
 that alone made them unrunnable anywhere but the machine that wrote them.
 
+A suite SHALL NOT depend on the machine's default text encoding either. Every
+file it reads or writes as text SHALL name its encoding, every child process
+whose output it decodes SHALL be decoded with a named encoding, and what a
+suite prints SHALL be written as UTF-8 whether it is started on its own, under
+the test tool, or through the runner. Fourteen suites read the board's own
+source, which is not ASCII; on a machine whose locale is not UTF-8 they failed
+on the first byte, and the runner failed decoding the first suite that printed
+a mark. A suite that passes only where an environment variable happens to be
+set is a suite that passes by accident.
+
 #### Scenario: A suite runs by itself
 
 - **WHEN** one suite is run directly
@@ -64,6 +74,16 @@ that alone made them unrunnable anywhere but the machine that wrote them.
 
 - **WHEN** one suite is run directly and the same suite is run through the runner
 - **THEN** both run the same parts and report the same number of checks
+
+#### Scenario: A suite does not need a UTF-8 locale
+
+- **WHEN** a suite is run on its own on a machine whose default text encoding is not UTF-8, with no encoding-related environment variable set
+- **THEN** it reads the files it reads, prints every check it makes, and reports the same result as on a UTF-8 machine
+
+#### Scenario: No text is read without saying how
+
+- **WHEN** the suites and the helpers beside them are inspected
+- **THEN** every text open, text read, text write and decoded child process names its encoding, and a part exists that fails when one does not
 
 ### Requirement: A suite declares what it needs to run
 
@@ -126,8 +146,14 @@ SHALL say which permission was missing.
 
 A run that is not asked for anything in particular SHALL execute only the
 suites that need nothing beyond the repository, and SHALL pass on a checkout
-that has no credentials configured at all. The default has to be the run a
-person can actually perform; a default that cannot complete is not a default.
+that has no credentials configured at all -- and no particular locale: the
+machine's default text encoding SHALL NOT decide whether the run passes. The
+default has to be the run a person can actually perform; a default that
+cannot complete is not a default, and nobody configures a locale to run tests.
+
+The runner SHALL decode what its suites print as UTF-8 and SHALL start each
+of them so that they print UTF-8, rather than relying on the machine to have
+been told to.
 
 This SHALL hold for every way a run can be started, not only the runner's own
 command. Where the tool the runner uses underneath can also be invoked
@@ -171,6 +197,11 @@ reads, to the person who just cloned this, exactly like a broken suite.
 
 - **WHEN** a run is started on a checkout where the test tool is not installed
 - **THEN** the runner names what to install and runs nothing, rather than failing on an import
+
+#### Scenario: The default run on a machine that is not UTF-8
+
+- **WHEN** a run is started with nothing asked for, on a checkout whose machine default encoding is not UTF-8 and with no encoding-related environment variable set
+- **THEN** the runner reads every suite's output, every self-contained suite runs and prints its checks, and the run passes exactly as it does on a UTF-8 machine
 
 ### Requirement: A run against a real service is paced and tells throttling apart from failure
 

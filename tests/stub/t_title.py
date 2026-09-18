@@ -46,7 +46,7 @@ def the_tab_title():
     chk("set is OSC 0", M._TITLE_SET.format("X") == "\x1b]0;X\x07", repr(M._TITLE_SET))
     chk("push is CSI 22;2t", M._TITLE_PUSH == "\x1b[22;2t", repr(M._TITLE_PUSH))
     chk("pop is CSI 23;2t", M._TITLE_POP == "\x1b[23;2t", repr(M._TITLE_POP))
-    src = pathlib.Path(_REPO + "/main.py").read_text()
+    src = pathlib.Path(_REPO + "/main.py").read_text(encoding="utf-8")
     chk("the source names no terminal",
         not any(t in src.lower() for t in ("kitty", "iterm", "alacritty", "wezterm", "xterm", "konsole")))
 
@@ -87,10 +87,10 @@ def the_tab_title():
     chk("nothing written, no error raised", out == "", repr(out))
 
     print("\n2.2 the command-line listing is a different entry point")
-    cli = pathlib.Path(_REPO + "/singularity.py").read_text()
+    cli = pathlib.Path(_REPO + "/singularity.py").read_text(encoding="utf-8")
     chk("singularity.py sets no title", "TITLE" not in cli and "]0;" not in cli)
     chk("run.sh sends --cli to singularity.py",
-        "singularity.py" in pathlib.Path(_REPO + "/run.sh").read_text())
+        "singularity.py" in pathlib.Path(_REPO + "/run.sh").read_text(encoding="utf-8"))
 
     print("\n3.1 the board is otherwise untouched")
     chk("the entry point still returns 0 on a clean run",
@@ -104,7 +104,7 @@ def the_tab_title():
         "import main;\n"
         "with main.terminal_tab_named('MyTasks'):\n"
         "    print('hello')"],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, encoding="utf-8", timeout=30)
     chk("a piped run prints only its own output", r.stdout == "hello\n", repr(r.stdout))
     chk("and exits cleanly", r.returncode == 0, r.stderr[-200:])
 

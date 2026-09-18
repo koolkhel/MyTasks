@@ -109,7 +109,7 @@ def missing_for(tier):
     configured = {}
     env_file = os.path.join(REPO, ".env")
     if os.path.exists(env_file):
-        for line in open(env_file):
+        for line in open(env_file, encoding="utf-8"):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
@@ -179,7 +179,7 @@ def run_one(tier, name):
     started = time.time()
     try:
         p = subprocess.run(command_for(tier, name),
-                           capture_output=True, text=True, timeout=600,
+                           capture_output=True, text=True, encoding="utf-8", timeout=600,
                            env=child_env(REPO))
         out, code = p.stdout + p.stderr, p.returncode
     except subprocess.TimeoutExpired:

@@ -517,8 +517,8 @@ async def saying_so():
               [(b.description, b.show) for b in bound], [("To task", True)])
 
     print("the shipped wording no longer claims nothing is written")
-    board_src = open(_REPO + "/main.py").read()
-    mail_src = open(_REPO + "/mail.py").read()
+    board_src = open(_REPO + "/main.py", encoding="utf-8").read()
+    mail_src = open(_REPO + "/mail.py", encoding="utf-8").read()
     check("main.py does not say mail is read-only in the inbox",
           "Mail is read-only here" in board_src, False)
     # These two read the other way round when promoting wrote a read flag

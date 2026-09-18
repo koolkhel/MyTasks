@@ -511,7 +511,7 @@ def the_account():
     # check could not yet see the file.  Run it again after committing.
     tracked = subprocess.run(["git", "-C", _REPO, "grep", "-lIE",
                               r"zzsecret|MAIL_IMAP_PASSWORD=|password_command *= *\("],
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, encoding="utf-8")
     found = [line for line in tracked.stdout.split() if line]
     #: The files allowed to name a credential command, each because it must build
     #: a configuration to exercise one: this suite, the gateway itself, the account
@@ -531,7 +531,7 @@ def the_account():
     check("the module holds no password itself",
           subprocess.run(["git", "-C", _REPO, "grep", "-cIE",
                           r"[\"'][A-Za-z0-9+/]{16,}[\"']", "--", "gateway.py"],
-                         capture_output=True, text=True).stdout.strip(), "")
+                         capture_output=True, text=True, encoding="utf-8").stdout.strip(), "")
 
     # -- filing a row away ----------------------------------------------------
     print("archiving confirms both sides")

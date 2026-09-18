@@ -127,7 +127,7 @@ def t_reader_absent():
     kept = _os.environ.pop("YOUTRACK_VERSION_FIELD", None)
     empty = _os.path.join(tempfile.mkdtemp(prefix="version."), ".env")
     try:
-        open(empty, "w").close()
+        open(empty, "w", encoding="utf-8").close()
         for key, value in (("YOUTRACK_BASE_URL", "https://tracker.invalid"),
                            ("YOUTRACK_TOKEN", "t"),
                            ("YOUTRACK_ASSIGNEE", "somebody")):

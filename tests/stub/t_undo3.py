@@ -122,7 +122,7 @@ async def t_move_projects():
 
 def t_symmetry():
     print("3.6 undo and confirmation cover the same set")
-    src=open(_REPO + "/main.py").read()
+    src=open(_REPO + "/main.py", encoding="utf-8").read()
     import re
     unrev=set(re.findall(r'undo_reason=\(?\s*\n?\s*"([^"]{0,40})', src))
     chk("three actions declare themselves unreversible",

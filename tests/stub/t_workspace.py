@@ -132,7 +132,7 @@ def t_reader_absent():
     kept = _os.environ.pop("WORKSPACE_COMMAND", None)
     empty = _os.path.join(tempfile.mkdtemp(prefix="workspace."), ".env")
     try:
-        open(empty, "w").close()
+        open(empty, "w", encoding="utf-8").close()
         chk("no WORKSPACE_COMMAND means no program",
             _read_command(empty) is None, repr(_read_command(empty)))
     finally:
@@ -144,7 +144,7 @@ def t_reader_absent():
 
 def t_no_shell():
     print("4.4 the board has no way to reach a shell")
-    src = open(_os.path.join(_REPO, "main.py")).read()
+    src = open(_os.path.join(_REPO, "main.py"), encoding="utf-8").read()
     chk("shell=True appears nowhere", "shell=True" not in src)
     chk("os.system appears nowhere", "os.system" not in src)
     # Counted by what starts a process, not by the module's name: the name
