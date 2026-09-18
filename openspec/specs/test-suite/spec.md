@@ -282,6 +282,12 @@ is that it has not been diagnosed.
 Removing an entry SHALL leave a record of what it said and why it went, so that
 a list which is pruned does not become a list which forgets.
 
+How a suite failed SHALL be recorded in a way that tells a failed check from a
+crash. A suite whose process failed while every check passed SHALL be
+described by the exception that ended it, never as a count of failed checks:
+a count of zero describes nothing, and an entry carrying it would match any
+later crash of any kind.
+
 A suite SHALL NOT be listed here for checks the machine refuses to let it run.
 An entry excusing those checks would excuse a genuine break of them exactly as
 readily, which is the thing this list exists not to do.
@@ -315,6 +321,11 @@ readily, which is the thing this list exists not to do.
 
 - **WHEN** a suite cannot run some of its checks because the system refuses a permission they need
 - **THEN** it is not listed as known to fail, and the run reports no failure for it
+
+#### Scenario: A crash after the checks is described by its exception
+
+- **WHEN** a suite listed as known to fail crashed after every check it made passed
+- **THEN** its recorded signature names the exception, and a later run that fails a check instead is reported as failing differently
 
 ### Requirement: Nothing about a real account or a real person enters the repository
 
@@ -401,6 +412,22 @@ Where a suite fails, the run SHALL make it possible to re-run that suite
 alone. Where a part of a suite fails, the run SHALL name that part, so that it
 too can be re-run alone.
 
+A run SHALL tell a suite whose checks failed from a suite whose process ended
+in failure while every check it made passed. The second is marked as a crash,
+not as a failure: a part that raised after its last check, or a part that made
+none, is a different kind of fault -- more often the harness, a timing or a
+shutdown than the board -- and a reader shown a full count of passing checks
+beside a plain failure mark is shown a contradiction and left to resolve it.
+
+For a crash the run SHALL say what raised: the part, and the exception's own
+last line, taken from what the test process printed. It SHALL say so on the
+suite's line and again where the run lists what failed, so that a crash is
+never reported as a bare mark over a count that says nothing went wrong.
+
+The verdict SHALL still come from the process. A suite that crashed after its
+checks has failed, whatever its checks say, and a run that called it a pass
+would be a run hiding the one fault its checks could not have caught.
+
 #### Scenario: The summary covers the run
 
 - **WHEN** a run finishes
@@ -420,6 +447,21 @@ too can be re-run alone.
 
 - **WHEN** a part of a suite fails in a run
 - **THEN** the run names the part, and not only the suite it is in
+
+#### Scenario: A part that fell over after its checks
+
+- **WHEN** a suite's process exits in failure and every check the suite made passed
+- **THEN** the run marks the suite as crashed rather than failed, and does not report it as passing
+
+#### Scenario: The cause is named
+
+- **WHEN** a suite is marked as crashed
+- **THEN** the suite's line and the run's list of failures both name the part that raised and the exception's last line
+
+#### Scenario: A failed check is still a failure
+
+- **WHEN** a suite's process exits in failure and at least one check it made failed
+- **THEN** the run marks it as failed, as before, and names the failing checks
 
 ### Requirement: A suite's result does not depend on when it runs
 

@@ -75,6 +75,13 @@ THROTTLE = re.compile(r"ThrottlerException|HTTP 429")
 CHECKS = re.compile(r"^\s*(?:\[(?:PASS|FAIL)\]|(?:ok|FAIL|PASS)\s"
                     r"|\d+/\d+\s+(?:ok|FAIL))")
 SUMMARY = re.compile(r"^(\d+/\d+ checks passed|all passed|\d+ failed)", re.M)
+#: What pytest prints, one line per failure, in its short summary: the file,
+#: the part after `::` where collection got that far, and the exception's own
+#: last line.  This is the line that says *why* a suite's process failed, and
+#: it is the one the check pattern above does not match -- so for a part that
+#: raised after its checks had all passed, the runner used to print a failure
+#: mark over a full count and then nothing at all.
+RAISED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+?)(?:::(\S+))?\s+-\s+(.+)$", re.M)
 
 
 def suites(tier):
@@ -177,15 +184,82 @@ def run_one(tier, name):
         out, code = p.stdout + p.stderr, p.returncode
     except subprocess.TimeoutExpired:
         out, code = "<timed out after 600s>", -9
+    return parse(out, code, time.time() - started)
+
+
+def parse(out, code, seconds=0.0):
+    """What a suite's output says, read once so every reader agrees.
+
+    Apart from the subprocess so that the reading can be checked on text:
+    the runner's own suite feeds this the three shapes a run can take and
+    reads back what would be printed, which a live subprocess could not be
+    made to produce on demand.
+    """
     m = SUMMARY.search(out)
+    checks = [l.rstrip() for l in out.splitlines() if CHECKS.match(l)]
     return {
         "exit": code,
         "output": out,
         "summary": m.group(0) if m else None,
         "throttled": len(THROTTLE.findall(out)),
-        "checks": [l.rstrip() for l in out.splitlines() if CHECKS.match(l)],
-        "seconds": time.time() - started,
+        "checks": checks,
+        # (part, "Exception: what it said") for each failure pytest named.
+        # The part is None where collection never reached one.
+        "raised": [(part or None, what) for _, part, what in RAISED.findall(out)],
+        "seconds": seconds,
     }
+
+
+def kind(got):
+    """Which of three things happened: "ok", "FAIL" or "CRASH".
+
+    A crash is a process that failed while every check it made passed.  It
+    is told from a failure because it is a different fault -- a part that
+    raised after its last check, or one that made none -- more often the
+    harness, a timing or a shutdown than the board, and a reader shown a
+    plain failure over a full count of passing checks is shown a
+    contradiction and left to resolve it.  A process that printed no summary
+    at all is a failure, not a crash: nothing was counted, so there is no
+    full count to contradict.
+    """
+    if got["exit"] == 0:
+        return "ok"
+    if got["summary"] is not None and not any("FAIL" in l for l in got["checks"]):
+        return "CRASH"
+    return "FAIL"
+
+
+def cause(got):
+    """What raised, in the words a crash is reported with, or "".
+
+    The first failure pytest named, and how many more there were.  Where
+    pytest named none -- the process died some other way -- the exit code
+    is all there is to say.
+    """
+    if not got["raised"]:
+        return f"exited {got['exit']}, no check failed"
+    part, what = got["raised"][0]
+    said = f"{part or 'collection'} raised {what}"
+    more = len(got["raised"]) - 1
+    return said + (f" (and {more} more)" if more else "")
+
+
+def explain(got):
+    """The lines a failed suite has to say for itself, for the block at the end.
+
+    The failing checks, where checks failed; what raised, where a part
+    crashed -- those are pytest's own lines, which the check pattern does
+    not match and which this block therefore used to drop, leaving a crash
+    reported as a bare mark and nothing under it.
+    """
+    failed = [line.strip() for line in got["checks"] if "FAIL" in line]
+    if kind(got) == "CRASH" or not failed:
+        # A crash, or a failure with no failing check to show -- a suite that
+        # died before it could print a summary: either way the checks have
+        # nothing to say and pytest's lines are what there is.
+        return [f"{part or 'collection'} raised {what}"
+                for part, what in got["raised"]] or [cause(got)]
+    return failed
 
 
 def worse_than_known(name, got):
@@ -203,8 +277,10 @@ def worse_than_known(name, got):
 
 
 def report(name, got, known):
-    mark = "ok  " if got["exit"] == 0 else "FAIL"
-    note = ""
+    mark = {"ok": "ok  ", "FAIL": "FAIL", "CRASH": "CRASH"}[kind(got)]
+    # A crash names its cause on the line: the count beside it says nothing
+    # went wrong, and a mark alone over that count is a contradiction.
+    note = f"  · {cause(got)}" if mark == "CRASH" else ""
     differs = worse_than_known(name, got)
     if known and differs:
         was, now = differs
@@ -335,11 +411,11 @@ def main():
               f" spent. Wait, then run the tier again.")
         return 3
     for n in failed:
-        print(f"\n--- {n} failed; run it alone with:"
+        print(f"\n--- {n} {'crashed' if kind(results[n]) == 'CRASH' else 'failed'};"
+              f" run it alone with:"
               f"\n      {os.path.relpath(PYX, os.getcwd())} tests/run.py {n}")
-        for line in results[n]["checks"]:
-            if "FAIL" in line:
-                print(f"      {line.strip()}")
+        for line in explain(results[n]):
+            print(f"      {line}")
     if fixed:
         print(f"\n{', '.join(fixed)} passed while listed as known to fail."
               f"\nRemove the entry from tests/known_failures.py.")

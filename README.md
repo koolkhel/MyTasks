@@ -171,7 +171,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 55 suites and 2,898 checks, runs against
+it needs. The self-contained tier is 56 suites and 2,938 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured.
 

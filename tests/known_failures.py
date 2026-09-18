@@ -16,7 +16,9 @@ nobody has diagnosed it, that is what it says.
 #: suite -> (signature, why). The signature is HOW it fails, so a suite
 #: failing differently is reported instead of being absorbed into its entry.
 #: An integer is the number of checks expected to fail. "crash:Name" is an
-#: exception of that type before any summary was printed.
+#: exception of that type ending the process with no check failed -- either
+#: before any summary was printed, or after every check had passed, which is
+#: what a part that raises on its way out looks like.
 #:
 #: The exception type is part of it deliberately. A bare "crash" matched any
 #: crash at all, and during this change it absorbed a broken import in a
@@ -65,15 +67,29 @@ FLAKY = {
 
 
 def signature(result):
-    """How a run of a suite failed, in the terms an entry records."""
-    if result["summary"] is None:
-        # The exception's own name, from the last traceback line that has one.
-        for line in reversed(result["output"].splitlines()):
-            head = line.split(":")[0].strip()
-            if head.endswith(("Error", "Exception", "Iteration", "Interrupt")):
-                return f"crash:{head.rsplit('.', 1)[-1]}"
-        return "crash:unknown"
-    return sum(1 for line in result["checks"] if "FAIL" in line)
+    """How a run of a suite failed, in the terms an entry records.
+
+    An integer where checks failed: how many.  "crash:Name" where the
+    process failed and no check did -- whether it died before printing a
+    summary or raised after every check had passed.  The second case used to
+    sign as 0, a count of nothing, and an entry carrying it would have
+    matched any later crash of any kind.
+    """
+    failed = sum(1 for line in result["checks"] if "FAIL" in line)
+    if result["summary"] is not None and failed:
+        return failed
+    # pytest's own line first: `FAILED file::part - Name: what it said`.
+    for _part, what in result.get("raised", ()):
+        head = what.split(":")[0].strip()
+        if head:
+            return f"crash:{head.rsplit('.', 1)[-1]}"
+    # Otherwise the exception's own name, from the last traceback line that
+    # has one.
+    for line in reversed(result["output"].splitlines()):
+        head = line.split(":")[0].strip()
+        if head.endswith(("Error", "Exception", "Iteration", "Interrupt")):
+            return f"crash:{head.rsplit('.', 1)[-1]}"
+    return "crash:unknown"
 
 
 #: Suites that were lost from the scratchpad before they could be imported,
