@@ -159,6 +159,14 @@ on a feature and is ignored when absent.
 | `MAIL_MAILDIR`, `MAIL_FOLDERS` | a locally mirrored mailbox to read |
 | `MAIL_EWS_URL`, `MAIL_ARCHIVE_FOLDER` | the account, for filing a message away |
 
+The calendar is granted to the **terminal**, not to the board — macOS
+attributes the request to the application that owns the process — and a
+terminal whose `Info.plist` declares no reason to want the calendar is refused
+without ever showing a prompt. `run.sh` checks for that before the board
+starts and says what to do; `calendar_access.py --fix`, run inside that
+terminal, adds the declaration to an unsigned terminal and re-signs it ad hoc.
+Nothing grants the permission but the system's own prompt.
+
 `?` shows every key, in the board itself.
 
 ## Tests
@@ -171,7 +179,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 56 suites and 2,950 checks, runs against
+it needs. The self-contained tier is 57 suites and 3,014 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured — whatever the machine's default text encoding; nothing in
 the suites depends on the locale.
@@ -196,6 +204,8 @@ refusal apart from a failure.
 | `board.py` | what is drawn — decided from state alone, with no terminal |
 | `singularity.py` | the task store's API, and the ordering |
 | `ical.py`, `tracker.py`, `mail.py`, `gateway.py` | the other three sources |
+| `terminal.py` | which application owns this process, and what it declares |
+| `calendar_access.py` | gets the terminal allowed to read the calendar; `run.sh` runs its check |
 | `openspec/` | what the board must do, as requirements and scenarios |
 | `docs/screenshots.py` | the pictures above, taken from the board on invented data |
 

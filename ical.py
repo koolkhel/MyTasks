@@ -188,10 +188,38 @@ def _store():
             loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
         status = _status()
 
+    if status == _NOT_DETERMINED:
+        # Asked, and the system recorded nothing: it refuses to ask on behalf
+        # of an application that declares no reason to want the calendar,
+        # and the terminal this runs in is such an application.  The one
+        # case Privacy & Security cannot help with, since the application
+        # never appears there -- so the message names the terminal and the
+        # helper that puts it right, rather than the generic line that
+        # names nothing.
+        raise CalendarUnreadable(_could_not_ask())
     if status != _FULL_ACCESS:
         raise CalendarUnreadable(_ACCESS_TROUBLE.get(status, _ACCESS_TROUBLE[None]))
     _STORE = EKEventStore.alloc().init()
     return _STORE
+
+
+def _could_not_ask() -> str:
+    """Why the system never asked, in words that name the remedy.
+
+    Reached only on the failure path, so the two process lookups it costs
+    are paid once, when there is already something to explain.
+    """
+    import terminal
+    app = terminal.host_app()
+    try:
+        declares = app is not None and terminal.declares_calendar_reason(app)
+    except OSError:
+        declares = True
+    if app is not None and not declares:
+        return (f"{os.path.basename(app)} declares no reason to want the calendar,"
+                " so the system never asked -- run calendar_access.py --fix from"
+                " inside it, then start it afresh")
+    return _ACCESS_TROUBLE[None]
 
 
 def _status() -> int:

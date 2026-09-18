@@ -154,6 +154,50 @@ async def refusals():
     finally:
         ical.fetch = saved
 
+# ------------------------------------------- the terminal cannot be asked
+async def the_terminal_cannot_be_asked():
+    print("the system never asked: the board names the terminal and the helper")
+    import terminal
+    saved = (terminal.host_app, terminal.declares_calendar_reason)
+    try:
+        # A keyless terminal owns the process.  Nothing real is looked at:
+        # both answers are replaced, and `ical` reaches them through the
+        # module so the replacement is what it sees.
+        terminal.host_app = lambda *a, **k: "/Applications/Fake Term.app"
+        terminal.declares_calendar_reason = lambda app: False
+        said = ical._could_not_ask()
+        check("the message names the terminal", "Fake Term.app" in said, True)
+        check("and the helper", "calendar_access.py --fix" in said, True)
+        check("and says to run it inside that terminal", "from inside it" in said, True)
+
+        # The same terminal, declaring a key: the generic line, as before,
+        # because the reason is then something this module cannot name.
+        terminal.declares_calendar_reason = lambda app: True
+        check("a declaring terminal gets the generic message",
+              ical._could_not_ask(), ical._ACCESS_TROUBLE[None])
+        terminal.host_app = lambda *a, **k: None
+        check("no terminal found: the generic message too",
+              ical._could_not_ask(), ical._ACCESS_TROUBLE[None])
+
+        # And on the board: the day is drawn, the message is what is said.
+        terminal.host_app = lambda *a, **k: "/Applications/Fake Term.app"
+        terminal.declares_calendar_reason = lambda app: False
+        tasks = [mk("t1", "a real task", TODAY)]
+        app, calls, saved_fetch = await board(
+            tasks, [], fail=ical.CalendarUnreadable(ical._could_not_ask()))
+        try:
+            async with app.run_test(size=(120, 40)) as pilot:
+                for _ in range(20):
+                    await pilot.pause()
+                check("the day's tasks are on the board", titles(app), ["a real task"])
+                status = str(app.query_one("#status").render())
+                check("and the status names the terminal", "Fake Term.app" in status, True)
+                check("and the helper", "calendar_access.py" in status, True)
+        finally:
+            ical.fetch = saved_fetch
+    finally:
+        terminal.host_app, terminal.declares_calendar_reason = saved
+
 # ------------------------------------------------------------ work filter
 async def work_filter():
     print("work events are hidden with the rest of the work")
@@ -354,6 +398,7 @@ PARTS = (
     ordering,
     row_shape,
     refusals,
+    the_terminal_cannot_be_asked,
     work_filter,
     configuration,
     day_change,

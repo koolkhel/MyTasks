@@ -41,4 +41,18 @@ if [[ "${1:-}" == "--cli" ]]; then
     exec "${PYTHON}" singularity.py "$@"
 fi
 
+# The calendar is granted to the terminal, not to the board, and a terminal
+# that declares no reason to want it is refused without a prompt.  Say so
+# before the board starts -- only where a calendar is configured, only when
+# something stands in the way, and never refusing to start: the board works
+# without the calendar, and a launcher that would not start over it would
+# break that from the other side.
+calendar_configured() {
+    [[ -n "${CALENDAR_WORK:-}${CALENDAR_PERSONAL:-}" ]] && return 0
+    [[ -f .env ]] && grep -qE '^(CALENDAR_WORK|CALENDAR_PERSONAL)=.+' .env
+}
+if calendar_configured; then
+    "${PYTHON}" calendar_access.py --quiet || true
+fi
+
 exec "${PYTHON}" main.py "$@"
