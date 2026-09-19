@@ -266,12 +266,12 @@ PRIORITIES = (
 )
 
 
-def prio_issue(k, word="", value="", proj="TASKR"):
+def prio_issue(k, word="", value="", proj="TASKR", rank=None):
     i = issue(k, proj=proj)
     return tracker.Issue(key=i.key, summary=i.summary, project=i.project,
                          state=i.state, assignee=i.assignee,
                          base_url=i.base_url, priority=word,
-                         priority_value=value)
+                         priority_value=value, priority_rank=rank)
 
 
 def cell(app, key, i):
@@ -311,6 +311,23 @@ async def t_priority():
         chk("every letter is a single character",
             all(len(cell(app, f"TASKR-{n}", 0)) == 1
                 for n in range(1, len(PRIORITIES) + 1)))
+    print("     and the block is drawn most urgent first, whatever the keys say")
+    # A minor issue with the smaller key, a major one with the larger: the
+    # tracker's positions decide, so the major one is drawn above.  The rows
+    # arrive already ordered -- `parse` sorts them -- so here the order is
+    # given as the tracker would give it and the board is checked to keep it.
+    minor = prio_issue("TASKR-1", "Незначительный", "Minor", rank=4)
+    major = prio_issue("TASKR-2", "Серьезная", "Major", rank=2)
+    app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)),
+               sorted([minor, major], key=lambda i: (i.priority_rank is None, i.priority_rank or 0, i.key)))
+    async with app.run_test() as pilot:
+        await pilot.pause(); app.repaint(); await pilot.pause()
+        yt = [t.id for t in app.tasks if app.is_tracker(t)]
+        chk("the major issue is drawn above the minor one despite its larger key",
+            yt == ["yt:TASKR-2", "yt:TASKR-1"], str(yt))
+        chk("and each row's letter is still its own",
+            (cell(app, "TASKR-2", 0), cell(app, "TASKR-1", 0)) == ("С", "н"),
+            f"{cell(app, 'TASKR-2', 0)!r} {cell(app, 'TASKR-1', 0)!r}")
 
     print("2.10 an issue with no priority shows nothing there")
     app = prep(TaskApp(TODAY), StubClient(day_tasks(), reference=datetime.now(TZ)), [prio_issue("TASKR-9")])

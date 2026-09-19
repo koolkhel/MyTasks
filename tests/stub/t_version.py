@@ -171,11 +171,50 @@ def t_description():
     chk("the request names the field", "description" in ISSUE_FIELDS)
 
 
+def prio(key, ordinal, state="In progress", name="Whatever"):
+    """An issue whose Priority sits at `ordinal` in the tracker's own list."""
+    value = {"name": name} if ordinal is None else {"name": name, "ordinal": ordinal}
+    raw = issue(key, fields=({"name": "Priority", "value": value},))
+    raw["customFields"][1] = {"name": "State", "value": {"name": state}}
+    return raw
+
+
+def t_urgency():
+    print("1.5 the priority's position is read, and the block is ordered by it")
+    c = cfg(states=("In progress", "In review"))
+    got = tracker.parse([prio("AAA-1", 2)], c)[0]
+    chk("a position of 2 is read as 2", got.priority_rank == 2, repr(got.priority_rank))
+    chk("a position of -1 is read as -1",
+        tracker.parse([prio("AAA-1", -1)], c)[0].priority_rank == -1)
+    chk("an issue with no Priority field has no position",
+        tracker.parse([issue()], c)[0].priority_rank is None)
+    chk("a value without an ordinal has no position",
+        tracker.parse([prio("AAA-1", None)], c)[0].priority_rank is None)
+
+    print("\n     the order")
+    keys = lambda raws: [i.key for i in tracker.parse(raws, c)]
+    chk("most urgent first, whatever the keys say",
+        keys([prio("AAA-1", 4), prio("AAA-2", 0), prio("AAA-3", 2)]) == ["AAA-2", "AAA-3", "AAA-1"],
+        str(keys([prio("AAA-1", 4), prio("AAA-2", 0), prio("AAA-3", 2)])))
+    chk("priority before state: a review issue at 0 leads a progress issue at 4",
+        keys([prio("AAA-1", 4, "In progress"), prio("AAA-2", 0, "In review")]) == ["AAA-2", "AAA-1"])
+    chk("like urgency: the configured order of states",
+        keys([prio("AAA-1", 2, "In review"), prio("AAA-2", 2, "In progress")]) == ["AAA-2", "AAA-1"])
+    chk("like urgency and state: by key",
+        keys([prio("AAA-9", 2), prio("AAA-10", 2), prio("AAA-2", 2)]) == ["AAA-10", "AAA-2", "AAA-9"])
+    chk("no priority goes after every issue that has one",
+        keys([prio("AAA-1", None), prio("AAA-2", 4)]) == ["AAA-2", "AAA-1"])
+    chk("two at the same position in two states: state order, not key",
+        keys([prio("AAA-1", 0, "In review"), prio("AAA-2", 0, "In progress")]) == ["AAA-2", "AAA-1"])
+    chk("the letter still comes from the word, not the position",
+        tracker.parse([prio("AAA-1", 0, name="Blocker")], c)[0].priority_value == "Blocker")
+
+
 def t_costs_nothing():
     print("1.3 reading it costs no further request")
     chk("the request asks for exactly what it always asked for, plus the description",
         ISSUE_FIELDS == ("idReadable,summary,description,project(shortName),updated,"
-                         "customFields(name,value(name,localizedName,login))"),
+                         "customFields(name,value(name,localizedName,login,ordinal))"),
         ISSUE_FIELDS)
     chk("and names no particular field beyond that",
         VERSION_FIELD not in ISSUE_FIELDS and "version" not in ISSUE_FIELDS)
@@ -202,6 +241,7 @@ PARTS = (
     t_issue_versions,
     t_reader_absent,
     t_description,
+    t_urgency,
     t_costs_nothing,
 )
 

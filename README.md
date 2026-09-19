@@ -21,7 +21,7 @@ in separate windows:
 |---|---|---|---|
 | tasks | `☐ ☑ ☒` | every view | yours, the only rows the board writes to |
 | calendar | `◇` | today and any day | placed among the tasks by the hour they happen |
-| issue tracker | `▸` | today only | what is assigned to you and in progress |
+| issue tracker | `▸` | today only | what is assigned to you and in progress, most urgent first in the tracker's own order |
 | mail | `@` | the inbox | messages you have not decided about, folded into threads |
 
 A row from one of the other three refuses the writes that would change it, and
@@ -180,7 +180,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 57 suites and 3,036 checks, runs against
+it needs. The self-contained tier is 57 suites and 3,049 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured — whatever the machine's default text encoding; nothing in
 the suites depends on the locale.

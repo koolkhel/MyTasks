@@ -2076,9 +2076,13 @@ The block SHALL NOT take part in the day's ordering. Its rows SHALL NOT be
 interleaved with tasks, SHALL NOT be reordered by anything the day does, and
 SHALL keep a stable sequence among themselves.
 
-Within the block, issues SHALL be ordered by their state in the order the
-states are configured, and by issue key within a state. Configuring the
-states therefore decides which of them leads the block.
+Within the block, issues SHALL be ordered by how urgent the tracker calls
+them, most urgent first; within one priority by their state in the order the
+states are configured; and within one state by issue key. An issue the
+tracker holds no priority for SHALL follow every issue that has one.
+Configuring the states therefore decides which of them leads among issues of
+like urgency, and the tracker's own ordering of its priorities decides the
+rest.
 
 No key that reorders SHALL move a tracker row, and the board SHALL say why
 rather than doing nothing.
@@ -2105,8 +2109,18 @@ rather than doing nothing.
 
 #### Scenario: The configured order of states is the order of the block
 
-- **WHEN** issues are shown in more than one state
+- **WHEN** issues of one priority are shown in more than one state
 - **THEN** they appear grouped in the order the states are configured, and by key within each state
+
+#### Scenario: The most urgent leads
+
+- **WHEN** issues of different priorities are shown, whatever their states
+- **THEN** the block lists them most urgent first, in the order the tracker itself lists its priorities
+
+#### Scenario: An issue without a priority goes last
+
+- **WHEN** an issue the tracker holds no priority for is shown among issues that have one
+- **THEN** it is listed after all of them
 
 #### Scenario: Ticking a task moves it past the block
 
@@ -4320,9 +4334,11 @@ reason applies more strongly here: the tracker gives the same priority
 different colours in different definitions, so a colour would say two things
 and settle neither.
 
-The priority SHALL NOT change the order of the block, which stays grouped by
-state as it is. Where the tracker words one priority in more than one way, the
-board SHALL show the same letter for all of them.
+The priority SHALL order the block, most urgent first, as the block's own
+requirement states; the letter on the row and the position in the block are
+two readings of the same value the tracker holds. Where the tracker words one
+priority in more than one way, the board SHALL show the same letter for all
+of them.
 
 Where the tracker holds no priority for an issue, the row SHALL show nothing
 in that place rather than standing in for the absence.
@@ -4365,8 +4381,8 @@ Nothing a task shows there is displaced.
 
 #### Scenario: The block is ordered as before
 
-- **WHEN** issues of several priorities are shown
-- **THEN** they appear in the order they would have without priorities being shown, grouped by state
+- **WHEN** issues of one priority are shown
+- **THEN** they keep the order they always had -- the configured order of states, then key -- and only issues of differing priority are placed by it
 
 #### Scenario: Nothing else about the row changes
 
@@ -6323,3 +6339,51 @@ already carries are what it carries, and no column gains the version.
 
 - **WHEN** issues with versions are drawn on today's board
 - **THEN** each row shows its key, summary, state and project as before, and no version appears in any column
+
+### Requirement: An issue's urgency is read as the tracker's own order
+
+The board SHALL read, for each tracker issue, the position the tracker lists
+its priority at -- the tracker's own ordering of the values it defines --
+alongside the priority's name, on the request the board already makes for its
+issues. Reading it SHALL cost no further request.
+
+The board SHALL hold no list of priorities and no order of its own for them.
+Which priority is more urgent than which is the tracker's to say, in the
+order it lists them; a priority the tracker renames, adds or moves SHALL sort
+correctly here with no change to the board. This is the same rule by which
+the letter on the row is the first letter of the tracker's own word rather
+than one the board chose.
+
+Where the tracker holds no priority for an issue, that issue SHALL have no
+position, and SHALL be placed after every issue that has one.
+
+Where issues come from projects whose priorities the tracker defines in
+different sets, each issue's position SHALL be read from its own set, and the
+board SHALL NOT attempt to reconcile the sets. Within one set the order is
+exact; across sets it is whatever the tracker gave, and the order of states
+and then of keys is what keeps issues of like urgency in a stable place.
+
+#### Scenario: The position comes with the name
+
+- **WHEN** the tracker's issues are fetched
+- **THEN** each issue's priority position arrives with its name on the same request, and no further request is made
+
+#### Scenario: A renamed priority still sorts
+
+- **WHEN** the tracker renames a priority without moving it
+- **THEN** issues carrying it sort exactly as before, with no change to the board
+
+#### Scenario: A reordered priority sorts where the tracker put it
+
+- **WHEN** the tracker moves a priority to a different position in its list
+- **THEN** issues carrying it sort at the new position on the next fetch
+
+#### Scenario: No priority, no position
+
+- **WHEN** an issue carries no priority
+- **THEN** it has no position and is placed after every issue that has one
+
+#### Scenario: Positions from different sets are not reconciled
+
+- **WHEN** two issues from different projects carry priorities at the same position in their own sets
+- **THEN** they are treated as equally urgent, and the configured order of states and then the key decide their order

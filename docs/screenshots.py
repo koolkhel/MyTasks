@@ -77,11 +77,18 @@ def event(title, hh, mm=0, minutes=60):
                       all_day=False)
 
 
+#: Where the tracker lists each priority, most urgent first -- the position
+#: the board orders the block by.  The stub hands the issues over already in
+#: that order, as `tracker.parse` would.
+RANK = {"Show-stopper": 0, "Critical": 1, "Major": 2, "Normal": 3, "Minor": 4}
+
+
 def issue(key, summary, priority="Major", versions=(), description=""):
     return tracker.Issue(key=key, summary=summary, project="DM",
                          state="In progress", assignee="mscott",
                          base_url="https://tickets.dundermifflin.invalid",
                          priority=priority, priority_value=priority,
+                         priority_rank=RANK[priority],
                          versions=versions, description=description)
 
 
@@ -148,8 +155,11 @@ EVENTS = [
     event("Sales call — Vance Refrigeration", 13, 30, minutes=30),
 ]
 
+# Most urgent first, as the board orders the block: the critical issue has the
+# larger key and still leads.
 ISSUES = [
-    issue("DM-214", "Copier jams on double-sided printing", versions=("3.2", "3.3"),
+    issue("DM-214", "Copier jams on double-sided printing", priority="Critical",
+          versions=("3.2", "3.3"),
           description="Every duplex job after about forty pages stops with a tray-2 "
                       "jam that is not there.\n\nReproduced on the second-floor "
                       "copier only; the annexe one is fine. Kevin says it started "

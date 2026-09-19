@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 #: arriving all along and being thrown away for want of the word.
 ISSUE_FIELDS = (
     "idReadable,summary,description,project(shortName),updated,"
-    "customFields(name,value(name,localizedName,login))"
+    "customFields(name,value(name,localizedName,login,ordinal))"
 )
 TIMEOUT_SECONDS = 15
 #: Issues are read one page at a time; far more than a person has in progress.
@@ -137,6 +137,13 @@ class Issue:
     #: recognises the least urgent priority, whose word begins with the same
     #: letter as the most urgent one's.
     priority_value: str = ""
+    #: Where the tracker lists this issue's priority among the ones it
+    #: defines: its ordinal, ascending from the most urgent.  The block is
+    #: ordered by it, so what "more urgent" means is the tracker's to say and
+    #: the board keeps no list of priorities of its own -- a priority the
+    #: tracker renames, adds or moves sorts itself.  None where the issue has
+    #: no priority, which sorts after every issue that has one.
+    priority_rank: int | None = None
     #: The versions the issue is against, in the tracker's own order, from
     #: whichever field the configuration names.  Empty where none is
     #: configured, where the issue does not carry that field, or where it
@@ -225,9 +232,10 @@ def parse(payload: Any, config: Config) -> list[Issue]:
 
     The selection is re-checked here rather than trusted to the query, so a
     change to how the query is built can never quietly widen what the board
-    shows.  Ordered by the configured position of an issue's state and then by
-    key: the block is not sorted with the day, so it should neither shuffle
-    between fetches nor mix the states together.
+    shows.  Ordered most urgent first, by where the tracker lists each
+    priority; then by the configured position of an issue's state; then by
+    key.  The block is not sorted with the day, so it should neither shuffle
+    between fetches nor mix like-urgency issues across their states.
     """
     if not isinstance(payload, list):
         raise TrackerUnreachable("the tracker returned an unexpected response")
@@ -244,6 +252,8 @@ def parse(payload: Any, config: Config) -> list[Issue]:
         # either way the word is the tracker's rather than the board's.
         priority_value = priority_field.get("name") or ""
         priority = priority_field.get("localizedName") or priority_value
+        rank = priority_field.get("ordinal")
+        priority_rank = rank if isinstance(rank, int) and not isinstance(rank, bool) else None
         if assignee != config.assignee:
             continue
         if state not in config.states:
@@ -260,12 +270,18 @@ def parse(payload: Any, config: Config) -> list[Issue]:
                 base_url=config.base_url,
                 priority=priority,
                 priority_value=priority_value,
+                priority_rank=priority_rank,
                 versions=(_names(fields, config.version_field)
                           if config.version_field else ()),
                 description=raw.get("description") or "",
             )
         )
-    return sorted(issues, key=lambda i: (config.rank(i.state), i.key))
+    # Most urgent first, by the position the tracker lists the priority at;
+    # then the configured order of states; then key.  An issue with no
+    # priority has no position and goes after every issue that has one.
+    return sorted(issues, key=lambda i: (i.priority_rank is None,
+                                         i.priority_rank if i.priority_rank is not None else 0,
+                                         config.rank(i.state), i.key))
 
 
 def fetch(config: Config, session=None) -> list[Issue]:
