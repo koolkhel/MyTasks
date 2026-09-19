@@ -2,6 +2,10 @@ requests>=2.32
 python-dotenv>=1.0
 textual>=0.80
 pyobjc-framework-EventKit>=10.0; sys_platform == "darwin"
+# For docs/screenshots.py --crt alone: the list of on-screen windows, which
+# is how the picture of the board in cool-retro-term finds the window it
+# opened.  The board never imports it.
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
 exchangelib>=5.6
 # The suites' runner collects and runs them; the board itself imports
 # nothing from it.  Kept here rather than in a file of its own so that

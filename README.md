@@ -1,5 +1,7 @@
 # MyTasks
 
+![The board where it lives: cool-retro-term, IBM 3278](docs/crt-today.png)
+
 A terminal task board for [SingularityApp](https://singularity-app.com/), with
 the day's calendar, the issues you are working on and the mail you have not
 decided about on the same list as your tasks.
@@ -8,7 +10,10 @@ It is a personal tool, published because the shape of it might be useful to
 somebody else. Everything below is real behaviour; the data in the pictures is
 invented — they are taken from the board itself by `docs/screenshots.py`,
 against a stubbed store, so a new feature can be shown by adding a board to
-that file and running it.
+that file and running it. The first picture is the board in cool-retro-term
+with its IBM 3278 profile, captured by the same script from the same invented
+data (`--crt today`); the crisp ones below are the board drawn straight to an
+image, where thin glyphs survive.
 
 ![The day's board](docs/today.png)
 
@@ -180,7 +185,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 57 suites and 3,049 checks, runs against
+it needs. The self-contained tier is 58 suites and 3,088 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured — whatever the machine's default text encoding; nothing in
 the suites depends on the locale.
