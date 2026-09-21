@@ -100,9 +100,37 @@ class Archive:
 ARCHIVE = Archive()
 
 
-#: A position the board can show: one calendar day, one of the buckets, or
-#: the archive.
-Position = "date | Bucket | Archive"
+class Series:
+    """The view of every recurring series the account has.
+
+    A singleton like `Archive`, and for the same reason: it is not a place a
+    task sits but a way of selecting tasks, so it has no answer for the
+    `deferred` flag a bucket is defined by. Anything walking the buckets
+    means the two dateless queues and would not want this either.
+
+    It differs from every other position in what fills it. A day and a bucket
+    are one query each; the archive is its own query; this one has no query at
+    all, because the store's task listing has twenty filters and not one of
+    them is about a repeat. So the view is the account's tasks, swept and
+    sorted out here.
+    """
+
+    __slots__ = ()
+
+    #: What the board calls this view, as `Bucket.label` answers for those.
+    label = "Recurring"
+
+    def __repr__(self) -> str:                      # pragma: no cover - a name
+        return "SERIES"
+
+
+#: The recurring view, as a position. One object, compared with `is`.
+SERIES = Series()
+
+
+#: A position the board can show: one calendar day, one of the buckets, the
+#: archive, or the recurring series.
+Position = "date | Bucket | Archive | Series"
 
 
 class SingularityError(Exception):
@@ -141,6 +169,132 @@ def iso_z(moment: datetime) -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
+
+
+#: How the store numbers the days of the week, as Python numbers them.
+#:
+#: The store documents none of this.  It was read off a real account: every
+#: weekly series carrying exactly one day agreed that 0 fell on a Sunday, 1 on
+#: a Monday, 2 on a Tuesday and 3 on a Wednesday.  So the store counts from
+#: Sunday, as JavaScript does, where Python counts from Monday.
+#:
+#: Written once, here, rather than inlined wherever a day is rendered.  Under
+#: the other convention a series repeating on days 1 to 5 reads as Tuesday to
+#: Saturday instead of the working week -- a phrase a person would believe,
+#: and act on, and have no reason to check.
+STORE_WEEKDAYS = {0: "Sunday", 1: "Monday", 2: "Tuesday", 3: "Wednesday",
+                  4: "Thursday", 5: "Friday", 6: "Saturday"}
+#: The `ending.limit` value that means a series never ends.
+#:
+#: The only value the account had, on all eighteen of its series -- and in
+#: that mode the object's other two fields are inert: `date` was an exact copy
+#: of the series' `startTime` every time, and `iterations` held a number that
+#: looks counted rather than chosen.  So a `limit` that is not this one is an
+#: ending this cannot read, and saying so is the whole point: reporting
+#: `ending.date` would report the day the series *began* as the day it stops.
+ENDS_NEVER = 5
+
+
+@dataclass(frozen=True)
+class Repeat:
+    """A series' rule, as much of it as could be read.
+
+    `kind` is the store's own tag -- "everyday", "everyweek", "everymonth" --
+    or None where the rule could not be read at all.  A caller renders this;
+    nothing here phrases anything, because the phrasing belongs with the rest
+    of what the board says and this belongs with the store.
+
+    `readable` is the question every caller actually asks, and it is False
+    for a rule of a kind nobody has seen as well as for one that is
+    malformed.  The store's API documents this object as having no fields, so
+    an unfamiliar rule is a matter of when rather than if.
+    """
+
+    kind: str | None = None
+    #: How many of `kind`'s periods between occurrences; 1 is every one.
+    interval: int = 1
+    #: Weekdays, as Python numbers them, for a weekly rule.
+    weekdays: tuple[int, ...] = ()
+    #: Days of the month, as the store gives them, for a monthly rule.
+    month_days: tuple[int, ...] = ()
+
+    @property
+    def readable(self) -> bool:
+        return self.kind is not None
+
+
+#: A rule that could not be read.  One object, compared by value like any
+#: other `Repeat`, so a caller can return it without building one.
+UNREADABLE = Repeat()
+
+
+def parse_repeat(recurrence: Any) -> Repeat:
+    """A series' rule, read defensively, never guessed.
+
+    The rule arrives as a one-key object whose key is the kind and whose
+    value holds that kind's parameters.  Anything else -- no key, several
+    keys, a key nobody has seen, a payload of the wrong shape, an interval
+    that is not a positive number -- is unreadable.  It is never approximated:
+    a row claiming a rule the board inferred would give a person no reason to
+    check it against the app, which is the one place the truth is.
+
+    A `type` number sits beside the parameters and duplicates the kind.  It
+    is deliberately not read.  Two fields saying the same thing can disagree,
+    and the key is the one the value hangs off.
+    """
+    if not isinstance(recurrence, dict):
+        return UNREADABLE
+    repeat = recurrence.get("repeat")
+    if not isinstance(repeat, dict) or len(repeat) != 1:
+        return UNREADABLE
+    (kind, payload), = repeat.items()
+    if not isinstance(payload, dict):
+        return UNREADABLE
+    interval = payload.get("interval", 1)
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
+        return UNREADABLE
+    if kind == "everyday":
+        return Repeat(kind=kind, interval=interval)
+    days = payload.get("days")
+    if not isinstance(days, list) or not days:
+        return UNREADABLE
+    if kind == "everyweek":
+        if not all(isinstance(d, int) and not isinstance(d, bool)
+                   and d in STORE_WEEKDAYS for d in days):
+            return UNREADABLE
+        # Into Python's numbering here, once, so that nothing downstream has
+        # to remember which convention it is holding.
+        python = tuple(sorted((d - 1) % 7 for d in days))
+        return Repeat(kind=kind, interval=interval, weekdays=python)
+    if kind == "everymonth":
+        numbers = []
+        for d in days:
+            if not isinstance(d, dict):
+                return UNREADABLE
+            n = d.get("dayNumber")
+            if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 31:
+                return UNREADABLE
+            numbers.append(n)
+        return Repeat(kind=kind, interval=interval, month_days=tuple(sorted(numbers)))
+    return UNREADABLE
+
+
+def parse_ending(recurrence: Any) -> tuple[bool, datetime | None]:
+    """Whether a series' ending could be read, and when it ends.
+
+    `(True, None)` is a series that never ends, which is the one mode the
+    store has been seen to use.  `(False, None)` is an ending in some other
+    mode, which this declines to interpret -- see `ENDS_NEVER` for why
+    reading it would be worse than admitting it was not read.
+    """
+    if not isinstance(recurrence, dict):
+        return False, None
+    ending = recurrence.get("ending")
+    if not isinstance(ending, dict):
+        return False, None
+    if ending.get("limit") == ENDS_NEVER:
+        return True, None
+    return False, None
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -242,6 +396,90 @@ class Task:
     @property
     def recurring(self) -> bool:
         return bool(self.raw.get("recurrence"))
+
+    # -- a series, and the occurrences it makes ----------------------------
+    #
+    # A repeating task is two kinds of row, and the store keeps them apart by
+    # which key they carry.  The *series* carries `recurrence`, the object
+    # holding the rule; an *occurrence* the store generated from it carries
+    # `recurrenceGeneratorId` naming its series and no rule of its own.  The
+    # two sets do not overlap, so `recurring` above -- which is the series
+    # test and has always been -- answers False for every occurrence.
+    #
+    # None of this is documented.  The store's own API types `recurrence` as
+    # an object with no fields at all, so every name below was read off a
+    # real account and every reader here is written to answer "I cannot read
+    # that" rather than to assume the shape held.
+
+    @property
+    def series_id(self) -> str | None:
+        """The series this row was generated from, or None if it is not one.
+
+        The mirror of `recurring`: a row has a rule or it has a parent, never
+        both and often neither.
+        """
+        return self.raw.get("recurrenceGeneratorId") or None
+
+    @property
+    def _recurrence(self) -> dict[str, Any]:
+        """The rule object, or an empty one -- so no reader below needs a guard."""
+        got = self.raw.get("recurrence")
+        return got if isinstance(got, dict) else {}
+
+    @property
+    def waits_for_completion(self) -> bool:
+        """Whether the next occurrence exists only once this one is finished.
+
+        The store's `onlyOnComplete`, which is absent rather than false when
+        it does not hold -- so this is the one place that difference is
+        flattened, and every caller can ask a yes-or-no question.
+
+        What it means was settled by observation, not by documentation: on
+        the account this was written against, every series carrying it had
+        exactly one live occurrence, several of them overdue and waiting,
+        while every series without it had between four and sixty-seven
+        materialised as far as two years ahead.
+        """
+        return bool(self._recurrence.get("onlyOnComplete"))
+
+    @property
+    def next_occurrence(self) -> datetime | None:
+        """When this series next comes round, or None where it says nothing."""
+        return parse_dt(self._recurrence.get("nextTime"))
+
+    @property
+    def series_time(self) -> str | None:
+        """The time of day the series carries, where it carries one.
+
+        Kept as the store's own string rather than parsed: it arrives as
+        "18:00", it is shown as "18:00", and nothing here does arithmetic on
+        it.  Parsing it would be inventing a timezone for a value that has
+        none.
+        """
+        got = self._recurrence.get("time")
+        return got if isinstance(got, str) and got else None
+
+    @property
+    def repeat(self) -> "Repeat":
+        """This series' rule, or an unreadable one -- never a guess."""
+        return parse_repeat(self._recurrence)
+
+    @property
+    def ends_never(self) -> bool:
+        """Whether this series is known to run forever.
+
+        False both for a series that ends and for one whose ending could not
+        be read, so a caller must not take it for "it ends".  `ending_read`
+        is which of the two.
+        """
+        never, _ = parse_ending(self._recurrence)
+        return never
+
+    @property
+    def ending_read(self) -> bool:
+        """Whether the ending was read at all, in either direction."""
+        never, when = parse_ending(self._recurrence)
+        return never or when is not None
 
     @property
     def start(self) -> datetime | None:

@@ -62,6 +62,7 @@ from singularity import (
     CANCELLED,
     CHECKED,
     EMPTY,
+    SERIES,
     Bucket,
     SingularityClient,
     SingularityError,
@@ -1389,7 +1390,9 @@ class TaskApp(App[None]):
            an area sized to its content moves the list under the hand that
            is moving through it.  Capped against the window as well, because
            eight rows of note on a twelve-row terminal would leave a list of
-           four; the cap bites below about 22 rows and never above. */
+           four; the cap bites below about 22 rows and never above.
+
+*/
         height: 9;
         max-height: 40%;
         border-top: solid $panel;
@@ -1460,6 +1463,14 @@ class TaskApp(App[None]):
         # is where a task ends up, and both letters are about the same thing
         # at opposite ends of its life.  `a` was long taken and this was free.
         Binding(keys("A"), "archive", "Archive"),
+        # "Recur" rather than "Repeats", and the length is the reason.  The
+        # key bar wraps to fit the window, and at eighty columns it sat on
+        # five lines with eight cells to spare.  A label of six characters or
+        # more takes a sixth line, that line comes out of the notes area, and
+        # in a twelve-row window the area reaches nothing -- a note
+        # unreadable with no sign that it had been cut.  Five characters fit;
+        # this is five, and it is the word the day bar already uses.
+        Binding(keys("R"), "recurring", "Recur"),
         Binding(keys("r"), "refresh", "Reload"),
         Binding(keys("w"), "toggle_work", "Hide work"),
         # Two keys, because one of them cannot be reached in both layouts.
@@ -1651,6 +1662,22 @@ class TaskApp(App[None]):
         #: archive that said nothing would read as the whole of it.
         self.archive_loading = False
         self.archive_error: str | None = None
+        #: Every recurring series the account has, and every occurrence its
+        #: series made, or None until the recurring view has been asked for.
+        #: Two lists from one sweep: the store has no filter for a repeat, so
+        #: the view is found by reading the account's tasks and sorting them
+        #: out here.  The occurrences are never drawn -- each is a row of its
+        #: own day -- and are kept only to be counted against the series that
+        #: made them, because a count taken from the rule would describe what
+        #: the store ought to have made rather than what it made.
+        self.series: list[Task] | None = None
+        self.occurrences: list[Task] | None = None
+        #: Whether pages are still arriving, and what went wrong if the sweep
+        #: failed.  Both said in the line under the rows, for the reason the
+        #: archive's are: a partial sweep that said nothing would read as the
+        #: whole of it, and a queued count from a partial sweep is wrong.
+        self.series_loading = False
+        self.series_error: str | None = None
         # The issue tracker: read-only, today only, and entirely optional.
         # A board with none configured is an ordinary board.
         self.tracker_config = tracker.load_config()
@@ -1873,6 +1900,12 @@ class TaskApp(App[None]):
                 # fetch owns.
                 self.read_archive()
                 return
+            if self.position is SERIES:
+                # The same arrangement, for the same reason: several requests
+                # rather than one, so drawn a page at a time and held rather
+                # than replacing the base.
+                self.read_series()
+                return
             listing = self.client.tasks_at(self.position)
         except SingularityError as exc:
             self.call_from_thread(self.set_status, str(exc), True)
@@ -1924,6 +1957,83 @@ class TaskApp(App[None]):
             self.call_from_thread(self.archive_failed, str(exc))
             return
         self.call_from_thread(self.archive_arrived, held, False)
+
+    def read_series(self) -> None:
+        """Sweep the account for repeating tasks, drawing each page as it arrives.
+
+        A sweep rather than a query, because there is nothing to query: the
+        store's task listing has twenty filters and not one of them is about a
+        repeat.  So every task is read and sorted here into the series, which
+        carry a rule, and the occurrences those series made, which carry a
+        parent instead.
+
+        Every occurrence is asked for explicitly.  Asked the other way the
+        store post-filters after paging, so rows repeat and rows are missed --
+        on the account this was written against it answered sixty-one series
+        where eighteen exist.  The board's paging helper forces the flag on;
+        this depends on it, and the queued counts depend on seeing them all.
+
+        Already held is not a reason to ask again.  The store is reached the
+        first time the view is asked for and when a reload clears what was
+        held, and at no other time -- a repeat changes in the other
+        application, and moving away and back is not a fetch.
+        """
+        if self.series is not None and self.series_error is None:
+            self.call_from_thread(self.repaint)
+            return
+        self.call_from_thread(self.series_starting)
+        series: list[Task] = []
+        kids: list[Task] = []
+        try:
+            for page in self.client.iter_pages(includeArchived=False):
+                # Replaced rather than appended to, as the archive's are: the
+                # screen reads these lists on its own thread, and a list being
+                # extended under it is a list it can read half of.
+                series = series + [t for t in page if t.recurring]
+                kids = kids + [t for t in page if t.series_id]
+                self.call_from_thread(self.series_arrived, series, kids, True)
+        except SingularityError as exc:
+            self.call_from_thread(self.series_failed, str(exc))
+            return
+        self.call_from_thread(self.series_arrived, series, kids, False)
+
+    def series_starting(self) -> None:
+        """Empty the view and say what it is doing, before the first page."""
+        self.series = []
+        self.occurrences = []
+        self.series_loading = True
+        self.series_error = None
+        # A series is a rule, not a thing that is due, so there is no instant
+        # for a row here to be overdue against.  The occurrence that may be
+        # overdue is a row of its own on its own day.
+        self.reference = None
+        # What this view holds has arrived as far as it ever will before the
+        # first page; that it is still reading is said by the line under the
+        # rows, which is the true thing to say.
+        self._fetched = True
+        self.repaint()
+
+    def series_arrived(self, series: list[Task], kids: list[Task],
+                       more: bool) -> None:
+        """Take a page, and say whether more are coming."""
+        self.series = series
+        self.occurrences = kids
+        self.series_loading = more
+        self.repaint()
+
+    def series_failed(self, why: str) -> None:
+        """Say the sweep failed, and let asking again retry.
+
+        What was held is dropped rather than kept beside the failure: a
+        partial sweep gives wrong queued counts, and a count that is wrong
+        without saying so is worse than no view.  Dropping it is also what
+        makes the next press try again.
+        """
+        self.series = None
+        self.occurrences = None
+        self.series_loading = False
+        self.series_error = f"The repeating tasks could not be read · {why}"
+        self.repaint()
 
     def archive_starting(self) -> None:
         """Empty the view and say what it is doing, before the first page."""
@@ -2734,6 +2844,39 @@ class TaskApp(App[None]):
     #: and dating, which is where it is sent once it is.  Everything else a
     #: key could do to a task -- rename it, note it, file it, cancel it,
     #: delete it -- is a change to the record rather than a way out of it.
+    def refuse_series(self) -> bool:
+        """Say nothing writes from the recurring view, and report having said so.
+
+        Every write, with no exceptions -- so by the position alone, and no
+        action is taken: `refuse_archive` needs one because the archive lets
+        two writes through, and a reader given one here would reasonably
+        wonder which ones this lets through.  None.
+
+        Asked in three places, which between them are every road to a write:
+        `rows_for_write`, where a key acting on a marked set gathers its rows;
+        `submit_write`, which every single-row write passes through; and at
+        the two keys that open a dialog before either, so that a person is
+        told no rather than shown a form whose save is refused.  A write added
+        later reaches one of the first two without anybody remembering this.
+
+        Not a read-only row like a tracker issue, which the board could not
+        write to if it tried.  A series is the board's own task and the board
+        could write anything to it.  What is unknown is what such a write
+        would reach: the store makes occurrences from a series ahead of time,
+        up to sixty-seven of them on the account this was written against, and
+        nothing establishes whether renaming, rescheduling or ticking the
+        series reaches the ones it has already made.  A board that guessed
+        would be editing rows a person cannot see.
+
+        The same task on its own day is as editable as it ever was.  This is a
+        property of the view, not of the task.
+        """
+        if self.position is not SERIES:
+            return False
+        self.notice("Repeats are read here · a repeat is changed in the app "
+                    "that owns it", True)
+        return True
+
     ARCHIVE_WRITES = frozenset({"toggle", "schedule"})
 
     def refuse_archive(self, action: str) -> bool:
@@ -2824,7 +2967,7 @@ class TaskApp(App[None]):
         Textual's own binding dispatcher, and shadowing it silently breaks
         every key in the app.
         """
-        if self.refuse_foreign(task):
+        if self.refuse_series() or self.refuse_foreign(task):
             return
         patch = patch or {}
         # Acting again supersedes whatever was last said, so it stops
@@ -3401,6 +3544,9 @@ class TaskApp(App[None]):
             late_colour=self.late_colour, archive=self.archive,
             archive_loading=self.archive_loading,
             archive_error=self.archive_error,
+            series=self.series, occurrences=self.occurrences,
+            series_loading=self.series_loading,
+            series_error=self.series_error,
         )
 
     def row_for(self, task: Task) -> tuple[str, str, str, str, str]:
@@ -3553,6 +3699,15 @@ class TaskApp(App[None]):
 
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
+        if self.position is SERIES:
+            # No date, and the count is the line under the rows where every
+            # other count about a view already is.  Named for what the rows
+            # are rather than what they do: they are rules, and a person
+            # reading "tasks" here would expect to tick them.
+            parts = [SERIES.label, "every repeating task, read only"]
+            parts += self.work_note() + self.search_note()
+            bar.update(self.with_mark("  ·  ".join(parts), bar))
+            return
         if self.position is ARCHIVE:
             # No date and no count of its own: how much the archive holds and
             # how much of it is drawn is the line under the rows, where every
@@ -3605,12 +3760,22 @@ class TaskApp(App[None]):
             self.rewound("")
             return
         bits = []
-        if self.is_tracker(task):
+        # In the recurring view the series' own facts replace a task's flags
+        # rather than joining them: every row here recurs, so a "recurring"
+        # flag beside the rule would be the view's name said a third time.
+        in_series = self.position is SERIES and task.recurring
+        if in_series:
+            # A series' facts where a task's flags go: what the repeat says,
+            # whether it waits or piles up, what is queued and whether it
+            # ends.  Only in this view -- the same task on its own day is a
+            # task, and its row there wants the flags every task's row shows.
+            bits = [self.board().series_facts_for(task)]
+        elif self.is_tracker(task):
             # An issue's facts where a task's flags go: the state, the
             # project and the version it is to be fixed in.  Decided beside
             # the row, so the card cannot come to say something different.
             bits = [board.tracker_facts(task)]
-        if task.recurring:
+        if task.recurring and not in_series:
             bits.append("recurring")
         if task.pinned:
             bits.append("pinned")
@@ -3737,6 +3902,9 @@ class TaskApp(App[None]):
     def action_archive(self) -> None:
         self._go(ARCHIVE)
 
+    def action_recurring(self) -> None:
+        self._go(SERIES)
+
 
     def action_refresh(self) -> None:
         # Asking for a reload is the gesture that already means "start
@@ -3751,6 +3919,13 @@ class TaskApp(App[None]):
             # the whole point of it everywhere except here.
             self.archive = None
             self.archive_error = None
+        if self.position is SERIES:
+            # The same, and for the same reason.  A repeat is edited in the
+            # other application, so this is the only way a change to one
+            # reaches the board.
+            self.series = None
+            self.occurrences = None
+            self.series_error = None
         self.load()
 
     def action_toggle(self) -> None:
@@ -3878,8 +4053,9 @@ class TaskApp(App[None]):
             # repaint, and repaints now also come from the tracker answering.
             self.notice(
                 f"{self.position.label} is ordered by "
-                + ("when things were archived"
-                   if self.position is ARCHIVE else "title")
+                + ("when things were archived" if self.position is ARCHIVE
+                   else "when each next comes round" if self.position is SERIES
+                   else "title")
                 + " · reordering applies to calendar days",
                 True,
             )
@@ -4314,7 +4490,7 @@ class TaskApp(App[None]):
         """
         if self.client is None:
             return None
-        if self.refuse_archive(action):
+        if self.refuse_series() or self.refuse_archive(action):
             return None
         if not self.marked:
             task = self.selected
@@ -4474,6 +4650,12 @@ class TaskApp(App[None]):
 
     @work
     async def action_add(self) -> None:
+        # Both refusals come before the prompt, not after it: asking for a
+        # title and then refusing offers a choice that was never on the
+        # table.  This one also comes before the label below, which formats
+        # the position as a date and cannot format a view that is not one.
+        if self.refuse_series():
+            return
         if self.position is ARCHIVE:
             # Refused before the prompt, not after it: asking for a title and
             # then refusing offers a choice that was never on the table.
@@ -4974,7 +5156,8 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
-        if self.refuse_archive("rename") or self.refuse_foreign(task):
+        if (self.refuse_series() or self.refuse_archive("rename")
+                or self.refuse_foreign(task)):
             return
         title = await self.push_screen_wait(TaskInput("Rename task", task.title))
         if not title or title == task.title:
@@ -4999,7 +5182,8 @@ class TaskApp(App[None]):
         task = self.selected
         if task is None or self.client is None:
             return
-        if self.refuse_archive("note") or self.refuse_foreign(task):
+        if (self.refuse_series() or self.refuse_archive("note")
+                or self.refuse_foreign(task)):
             return
         if not task.note_is_plain:
             # Saving would keep the words and drop everything else.  Said

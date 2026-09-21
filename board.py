@@ -32,7 +32,8 @@ from rich.text import Text
 from textual.markup import escape
 
 import singularity
-from singularity import ARCHIVE, CANCELLED, CHECKED, EMPTY, Bucket, Task
+from singularity import (ARCHIVE, CANCELLED, CHECKED, EMPTY, SERIES,
+                         Bucket, Task)
 
 #: What a task's row draws in its mark column, one mark for each state.
 #:
@@ -186,6 +187,96 @@ def _state_label(state: str) -> str:
     """
     words = state.split()
     return words[-1].lower()[:_WHEN_WIDTH] if words else ""
+#: The weekdays, abbreviated, as Python numbers them.  Named here rather than
+#: taken from the locale: the rest of the board's chrome is English and a
+#: half-translated line reads worse than an untranslated one.
+_WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+#: Monday to Friday, which gets a phrase of its own because "every week on
+#: Mon, Tue, Wed, Thu, Fri" is a list a person has to read to recognise
+#: something they already have a word for.
+_WORKING_WEEK = (0, 1, 2, 3, 4)
+
+
+def _ordinal(n: int) -> str:
+    """1st, 2nd, 3rd, 11th -- the day of a month, written as one says it."""
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
+def _every(interval: int, one: str, many: str) -> str:
+    """"every week" or "every 3 weeks" -- an interval of one said naturally."""
+    return f"every {one}" if interval == 1 else f"every {interval} {many}"
+
+
+def repeat_phrase(repeat: singularity.Repeat) -> str:
+    """A series' rule in words, for a person to check against their intention.
+
+    The point of this line is that it can be disbelieved.  A person reads it,
+    recognises their own intention or fails to, and goes to the app that owns
+    the rule.  So an unreadable rule says exactly that and phrases nothing:
+    the board has no business offering a guess that would stop somebody
+    looking.
+    """
+    if not repeat.readable:
+        return "repeat cannot be read"
+    if repeat.kind == "everyday":
+        return _every(repeat.interval, "day", "days")
+    if repeat.kind == "everyweek":
+        days = repeat.weekdays
+        if repeat.interval == 1 and days == _WORKING_WEEK:
+            return "every weekday"
+        if repeat.interval == 1 and len(days) == 7:
+            return "every day of the week"
+        named = ", ".join(_WEEKDAY_NAMES[d] for d in days)
+        return f"{_every(repeat.interval, 'week', 'weeks')} on {named}"
+    if repeat.kind == "everymonth":
+        days = " and ".join(_ordinal(d) for d in repeat.month_days)
+        return f"{_every(repeat.interval, 'month', 'months')} on the {days}"
+    # A kind the parser admitted and this does not phrase.  Reachable only by
+    # the two being edited apart, and it answers the way the unreadable case
+    # does rather than falling through to None.
+    return "repeat cannot be read"
+
+
+def series_facts(task: Task, queued: int = 0,
+                 furthest: date | None = None) -> str:
+    """The line above a series' note: its rule, its stacking, what is queued.
+
+    Where a task's row shows its flags and a tracker issue's shows its state,
+    a series shows the four things that cannot be found anywhere but the
+    official app: what the repeat says, whether it waits for the current
+    occurrence to be finished before the next exists, how many are already
+    made, and whether it ever stops.
+
+    The waiting and the stacking are both named.  Saying nothing in the
+    commoner case would leave a person unable to tell a series that stacks
+    from a line that failed to read the flag, which is the distinction this
+    exists to draw.
+
+    `queued` and `furthest` are handed in rather than computed: they are
+    counted from the occurrences the board actually holds, never worked out
+    from the rule.  A number derived from the rule would describe what the
+    store ought to have made instead of what it made.
+    """
+    facts = [repeat_phrase(task.repeat)]
+    if task.series_time:
+        facts.append(f"at {task.series_time}")
+    facts.append("waits for completion" if task.waits_for_completion
+                 else "piles up")
+    if queued:
+        ahead = f" to {furthest:%d %b %Y}" if furthest else ""
+        facts.append(f"{queued} queued{ahead}")
+    else:
+        facts.append("none queued")
+    # Three states, not two: it ends, it never ends, or the store said
+    # something about ending that this declines to interpret.  The third is
+    # said aloud for the same reason an unreadable repeat is.
+    facts.append("no end" if task.ends_never
+                 else "end read" if task.ending_read else "end cannot be read")
+    return "  ·  ".join(facts)
+
+
 def tracker_facts(task: Task) -> str:
     """The line above a tracker row's description: state, project, versions.
 
@@ -344,7 +435,11 @@ class Board:
                  fetched: bool, title_width: int, late_colour: str,
                  archive: list[Task] | None = None,
                  archive_loading: bool = False,
-                 archive_error: str | None = None):
+                 archive_error: str | None = None,
+                 series: list[Task] | None = None,
+                 occurrences: list[Task] | None = None,
+                 series_loading: bool = False,
+                 series_error: str | None = None):
         #: The ids of the rows a person has marked, in the order they marked
         #: them.  A list rather than a set: that order is what a copy comes
         #: out in.
@@ -412,6 +507,17 @@ class Board:
         #: partial archive is never mistaken for the whole of it.
         self.archive_loading = archive_loading
         self.archive_error = archive_error
+        #: Every series the sweep found, or None while it has not run.  The
+        #: recurring view's rows come from here rather than from `_base`, for
+        #: the reason the archive's do: this view holds what it read rather
+        #: than what a day's fetch owns.
+        self.series = series
+        #: Every occurrence the same sweep found, kept only to be counted
+        #: against the series that made them.  Never drawn: an occurrence is
+        #: a row of its own day.
+        self.occurrences = occurrences
+        self.series_loading = series_loading
+        self.series_error = series_error
 
     def paint(self, *, keep: str | None = None, previous: int = 0,
               scroll: int = 0, drawn_for=None) -> "Painting":
@@ -432,6 +538,12 @@ class Board:
             # when the store archived them.  No pending write is applied,
             # because nothing in this view writes.
             tasks = self.archive_rows()
+        elif self.position is SERIES:
+            # The same arrangement for the same reason: its own body of rows,
+            # swept rather than queried, ordered by when each next comes
+            # round.  No pending write either, and here that is not a
+            # coincidence -- this view refuses every write there is.
+            tasks = self.series_rows()
         else:
             shown = [t for t in self.patched() if self.belongs(t)]
             tasks = singularity.sort_for_display(
@@ -724,6 +836,13 @@ class Board:
             # nobody is looking for.
             self.archived_label(task)
             if self.position is ARCHIVE
+            # In the recurring view the column carries when the series next
+            # comes round, which is the one thing a person scanning it wants
+            # and is not the series task's own start date.  Nothing here is
+            # past due: a series is a rule, and the occurrence that may be
+            # overdue is a row of its own on its own day.
+            else self.series_label(task)
+            if self.position is SERIES
             else singularity.overdue_label(late, self.reference)
             if late
             else task.start_label(self.tz)
@@ -1071,6 +1190,67 @@ class Board:
             and self.position == self.now.date()
         )
 
+    def series_label(self, task: Task) -> str:
+        """When a series next comes round, for the column a start time uses.
+
+        The date alone.  The time of day a series carries lives on the rule
+        rather than on the task, and it is reported in the facts line beside
+        the rule it belongs to -- which is also the only place it fits: this
+        column is eleven cells, shared with the tracker's state labels, and
+        "22 Sep 09:15" is twelve.  Putting it here cut it to "22 Sep 09:1",
+        which a picture of the view showed plainly.
+
+        A series the store says nothing about says so, rather than showing an
+        empty cell that reads as a column the board failed to fill.
+        """
+        when = task.next_occurrence
+        if when is None:
+            return "no next"
+        return f"{when.astimezone(self.tz):%d %b}"
+
+    def series_rows(self) -> list[Task]:
+        """The recurring view's rows: every series, soonest first.
+
+        Only series.  An occurrence the store generated is not one -- it
+        carries a parent and no rule -- and it appears on its own day already,
+        so a list mixing the two would be a list of neither.
+
+        Ordered by when each next comes round because the view's first
+        question is what is about to happen, not what exists.  A series the
+        store gives no next time for sorts to the end rather than taking the
+        order down with it, and ties go by title so that the order never
+        depends on the order the store answered in, which is its own and is
+        not any order at all.
+        """
+        held = [t for t in (self.series or []) if t.recurring]
+        far = datetime.max.replace(tzinfo=timezone.utc)
+        return sorted(
+            held,
+            key=lambda t: (t.next_occurrence or far, t.display_title.lower()),
+        )
+
+    def queued_for(self, task: Task) -> tuple[int, date | None]:
+        """How many occurrences the board holds for a series, and how far ahead.
+
+        Counted from what was swept, never worked out from the rule.  A number
+        derived from the rule would describe what the store ought to have made
+        rather than what it made, and the two do disagree: a series that waits
+        for completion has exactly one occurrence however often its rule says
+        it repeats.
+
+        The furthest date is the latest occurrence held, or None where none of
+        them carries a date.
+        """
+        mine = [t for t in (self.occurrences or []) if t.series_id == task.id]
+        dates = sorted(t.start.astimezone(self.tz).date()
+                       for t in mine if t.start is not None)
+        return len(mine), (dates[-1] if dates else None)
+
+    def series_facts_for(self, task: Task) -> str:
+        """A series' facts line, with its queued count filled in from what is held."""
+        queued, furthest = self.queued_for(task)
+        return series_facts(task, queued, furthest)
+
     def archive_rows(self) -> list[Task]:
         """The archive's rows, in the order this view puts them.
 
@@ -1188,6 +1368,11 @@ class Board:
         because today's past-due rule still claims it.
         """
         position = self.position
+        if position is SERIES:
+            # A row belongs because the sweep found a rule on it, for as long
+            # as what was swept is held.  Nothing in this view writes, so
+            # nothing can change whether a row is here.
+            return any(t.id == task.id for t in (self.series or []))
         if position is ARCHIVE:
             # A row belongs because it was fetched, and for as long as what
             # was fetched is held.  The two writes this view allows change
@@ -1277,7 +1462,14 @@ class Board:
         own = [t for t in tasks
                if not (self.is_tracker(t) or self.is_event(t) or self.is_mail(t))]
         done = sum(1 for t in own if t.done)
-        if self.position is ARCHIVE:
+        if self.position is SERIES:
+            # Series, not tasks: every row here is a rule rather than a thing
+            # to do, and calling them tasks would invite ticking them.  Said
+            # even when there are none, because a view that says nothing
+            # cannot be told from one that failed to load.
+            bits = [f"{len(tasks)} series"
+                    if tasks else "no recurring tasks"]
+        elif self.position is ARCHIVE:
             # How many the archive holds, and -- only when the bound withheld
             # some -- how many of them were drawn.  A view showing part of
             # the archive must not read as an archive that small.  "Done" is
@@ -1337,6 +1529,14 @@ class Board:
         # view is fetched afresh.
         if self.notice:
             return self.notice
+        if self.position is SERIES:
+            # What this view is doing outranks its counts, for the reason the
+            # archive's does: it is not what a person's last press did and
+            # must survive the next repaint, which here is the next page.
+            if self.series_error:
+                return self.series_error, True
+            if self.series_loading:
+                return "Reading every task to find the repeating ones…", False
         if self.position is ARCHIVE:
             # Both of these outrank the counts and neither is a notice: they
             # are what this view is doing, not what a person's last press
@@ -1422,6 +1622,12 @@ class Board:
         # repaint, which in this view is the next arriving page.
         if self.position is ARCHIVE:
             held |= {t.id for t in (self.archive or [])}
+        # The same for this view, and for the same reason the archive needed
+        # it: its rows come from what was swept rather than from `_base`, so
+        # without this a mark made here is read as a row the view would have
+        # drawn and did not, and the next arriving page takes it off.
+        if self.position is SERIES:
+            held |= {t.id for t in (self.series or [])}
 
         def gone(ident: str) -> bool:
             if ident in held:

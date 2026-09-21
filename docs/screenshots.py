@@ -54,7 +54,7 @@ import mail                                                # noqa: E402
 import tracker                                             # noqa: E402
 from main import TaskApp                                   # noqa: E402
 import singularity                                         # noqa: E402
-from singularity import (ARCHIVE, Bucket, CANCELLED,     # noqa: E402
+from singularity import (ARCHIVE, SERIES, Bucket, CANCELLED,     # noqa: E402
                          CHECKED)
 from textual.widgets import DataTable                      # noqa: E402
 
@@ -154,6 +154,73 @@ def finished(tid, title, days_ago, checked=CHECKED, project=None, hour=9):
     return t
 
 
+def repeating(tid, title, repeat, *, in_days, waits=False, time=None,
+              project=None, note=None):
+    """A series: a task carrying a rule the store would generate from."""
+    t = task(tid, title, project=project, note=note)
+    when = dt.datetime.combine(TODAY + dt.timedelta(days=in_days),
+                               dt.time(9, 0), tzinfo=TZ)
+    rec = {"repeat": repeat, "nextTime": iso_z(when),
+           "startTime": iso_z(dt.datetime.combine(
+               TODAY - dt.timedelta(days=400), dt.time(9, 0), tzinfo=TZ)),
+           "lastGeneratedTaskId": f"{tid}-far",
+           "ending": {"limit": 5, "date": "2024-08-17T21:00:00.000Z",
+                      "iterations": 61}}
+    if waits:
+        rec["onlyOnComplete"] = True
+    if time is not None:
+        rec["time"] = time
+    t.raw["recurrence"] = rec
+    return t
+
+
+def made_by(tid, of, in_days):
+    """An occurrence: a series' child, counted but never drawn."""
+    t = task(tid, f"occurrence of {of}",
+             day=TODAY + dt.timedelta(days=in_days))
+    t.raw["recurrenceGeneratorId"] = of
+    return t
+
+
+#: A week of repeats, and the occurrences the store would have made from
+#: them -- which is where the queued counts in the picture come from.  A
+#: waiting series has exactly one however often its rule repeats, which is
+#: the distinction the view exists to show.
+WEEKLY = {"everyweek": {"days": [2], "interval": 1, "type": 1}}
+WORKWEEK = {"everyweek": {"days": [1, 2, 3, 4, 5], "interval": 1, "type": 1}}
+MONTHLY = {"everymonth": {"days": [{"dayNumber": 1}], "interval": 1, "type": 2}}
+QUARTERLY = {"everymonth": {"days": [{"dayNumber": 15}], "interval": 3, "type": 2}}
+EVERY_DAY = {"everyday": {"interval": 1}}
+
+SERIES_TASKS = [
+    repeating("r1", "Stand-up with the warehouse", WORKWEEK, in_days=1,
+              time="09:15", project=SALES,
+              note="Five minutes. Dwight will make it fifteen."),
+    repeating("r2", "Water Kevin's desk plant", EVERY_DAY, in_days=1,
+              waits=True,
+              note="It is plastic. Nobody has told him."),
+    repeating("r3", "Paper order for the second floor", WEEKLY, in_days=2,
+              project=SALES),
+    repeating("r4", "Empty the fridge of the unlabelled", WEEKLY, in_days=4,
+              waits=True),
+    repeating("r5", "Submit the expenses", MONTHLY, in_days=9, time="17:00",
+              project=SALES),
+    repeating("r6", "Fire extinguisher check", QUARTERLY, in_days=24),
+    repeating("r7", "Dundies shortlist", {"everyyear": {"interval": 1}},
+              in_days=61,
+              note="The store repeats this yearly and the board has never "
+                   "seen a yearly rule, so it says so rather than guessing."),
+]
+SERIES_MADE = (
+    [made_by(f"r1-{i}", "r1", i) for i in range(1, 46)]
+    + [made_by("r2-1", "r2", 1)]
+    + [made_by(f"r3-{i}", "r3", 2 + 7 * i) for i in range(0, 12)]
+    + [made_by("r4-1", "r4", 4)]
+    + [made_by(f"r5-{i}", "r5", 9 + 30 * i) for i in range(0, 6)]
+    + [made_by(f"r6-{i}", "r6", 24 + 91 * i) for i in range(0, 3)]
+    + [made_by(f"r7-{i}", "r7", 61 + 365 * i) for i in range(0, 2)]
+)
+
 ARCHIVE_TASKS = [
     finished("a1", "Dundies venue confirmed — Chili's, again", 1, project=SALES),
     finished("a2", "Quarterly paper order signed off", 1, project=SALES, hour=16),
@@ -234,6 +301,8 @@ def settled(app, position):
     """Whether the shown view's own rows have arrived."""
     if position is ARCHIVE:
         return app.archive is not None and not app.archive_loading
+    if position is SERIES:
+        return app.series is not None and not app.series_loading
     return bool(app._fetched)
 
 
@@ -469,6 +538,9 @@ SHOTS = [
          board=lambda: stub(Bucket.INBOX, INBOX_TASKS),
          position=Bucket.INBOX, threads=THREADS,
          cursor="Fire safety training"),
+    dict(name="recurring",
+         board=lambda: stub(SERIES, SERIES_TASKS + SERIES_MADE),
+         position=SERIES, cursor="Water Kevin"),
     dict(name="archive",
          board=lambda: stub(ARCHIVE, ARCHIVE_TASKS),
          position=ARCHIVE, marks=["a1", "a2", "a3"],

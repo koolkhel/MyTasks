@@ -163,6 +163,23 @@ class StubClient:
         for i in range(0, len(rows) or 1, size):
             yield rows[i:i + size]
 
+    def iter_pages(self, page_size=None, **filters):
+        """Every live task, a page at a time, as the real client's sweep does.
+
+        What the recurring view is built from: the store has no filter for a
+        repeat, so the view reads everything and sorts it out.  Paged for the
+        same reason the archive is -- a suite has to be able to see the view
+        drawn before the last page lands.
+
+        Recorded when the pages are first drawn on rather than when the
+        generator is made, so a suite counting fetches counts requests.
+        """
+        self._record("iter_pages")
+        rows = [t for t in self.store.values() if not t.archived]
+        size = page_size or self.archive_page
+        for i in range(0, len(rows) or 1, size):
+            yield rows[i:i + size]
+
     def tasks_for_day(self, day=None, include_done=True, **filters):
         """A day's tasks, as the real client answers.
 
