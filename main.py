@@ -136,9 +136,17 @@ PACED_AT_ONCE = 5
 #: the day bar.  Chosen for width as much as for looks: every glyph here is
 #: unambiguously one terminal cell, where `◐` and `◑` are width-ambiguous
 #: and would make the bar's right edge jitter between frames in a
-#: CJK-configured terminal.  `✓` and `✗` rather than `☑` and `☒`, which are
-#: already this board's ticked and cancelled task marks and would say the
-#: wrong thing in the corner of the eye.
+#: CJK-configured terminal -- and this cell is redrawn several times a second
+#: while work is in flight, so a width that wandered would be seen moving.
+#:
+#: `✓` and `✗` were taken here over `☑` and `☒` to keep clear of the row's
+#: own marks.  That no longer separates them: the rows now draw `✓` and `✗`
+#: too, because the ballot boxes are absent from the fonts this board is used
+#: in and drew at two sizes (see MARKS in `board.py`).  The sharing is
+#: deliberate and was judged bearable -- the two never share a column, a row
+#: or a corner, and a check is the untroubled state in both places -- but it
+#: is a reversal, and a reader meeting `✓` twice should find it said here
+#: rather than work it out.
 MAIL_IDLE_MARK = "✓"
 MAIL_FAILED_MARK = "✗"
 #: A rotating arc.  Animated because a still mark cannot be told from a

@@ -24,7 +24,7 @@ in separate windows:
 
 | | mark | where it appears | what it is |
 |---|---|---|---|
-| tasks | `☐ ☑ ☒` | every view | yours, the only rows the board writes to |
+| tasks | `□ ✓ ✗` | every view | yours, the only rows the board writes to |
 | calendar | `◇` | today and any day | placed among the tasks by the hour they happen |
 | issue tracker | `▸` | today only | what is assigned to you and in progress, most urgent first in the tracker's own order |
 | mail | `@` | the inbox | messages you have not decided about, folded into threads |
@@ -185,7 +185,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 58 suites and 3,088 checks, runs against
+it needs. The self-contained tier is 58 suites and 3,102 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured — whatever the machine's default text encoding; nothing in
 the suites depends on the locale.

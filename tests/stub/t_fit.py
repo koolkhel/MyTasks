@@ -12,6 +12,9 @@ sys.path.insert(0, _REPO)
 from harness import StubClient, mk, TZ, run_parts
 from datetime import datetime as dt, timedelta
 import main as M, tracker, singularity
+# The table by name, not the module: `board` is a helper defined below and
+# importing the module under that name would shadow it.
+from board import MARKS
 from main import TaskApp
 from textual.widgets import DataTable
 from rich.text import Text
@@ -146,7 +149,9 @@ async def run():
         [t("late", "late one", late=9), t("timed", "timed one"), t("done", "done one", done=1)])
     ids = [i for i, _ in rows]
     chk("the same tasks in the same order", ids == ["late", "timed", "done"], str(ids))
-    chk("the marks are unchanged", [r[1] for _, r in rows] == ["☐", "☐", "☑"], str([r[1] for _, r in rows]))
+    want = [MARKS[singularity.EMPTY], MARKS[singularity.EMPTY],
+            MARKS[singularity.CHECKED]]
+    chk("the marks are unchanged", [r[1] for _, r in rows] == want, str([r[1] for _, r in rows]))
     chk("the when column is unchanged", rows[0][1][2] == "9d ago", repr(rows[0][1][2]))
     chk("the counts are unchanged", "3 task(s)" in status, status)
 

@@ -23,7 +23,10 @@ _REPO = _os.path.dirname(_TESTS)
 sys.path.insert(0, _TESTS)
 sys.path.insert(0, _REPO)
 from harness import *
+import unicodedata
+
 import board
+from board import MARKS
 import ical
 import mail
 import singularity
@@ -189,8 +192,78 @@ def a_marked_row_keeps_its_own_mark():
     check("and the row's own mark is still there", len(cell), 2)
 
 
+def each_state_draws_the_mark_it_always_draws():
+    print("\n2.4 one mark for each state, and nothing else decides it")
+    made, answer = painting(tasks=[
+        timed("T-open", "still to do", 9),
+        timed("T-done", "finished", 10, checked=singularity.CHECKED),
+        timed("T-cancel", "called off", 11, checked=singularity.CANCELLED),
+    ])
+    marks = [made.row_for(t)[1] for t in answer.rows]
+    check("three states, three different marks", len(set(marks)), 3)
+    check("and each row draws the one its state calls for", marks,
+          [MARKS[singularity.EMPTY], MARKS[singularity.CHECKED],
+           MARKS[singularity.CANCELLED]])
+
+    print("\n     the rest of the row does not reach the mark")
+    # The fault this suite exists to keep out was a mark that changed with
+    # what else was on the line: in one terminal the same open box came out
+    # at two sizes depending on whether the row carried a time and what
+    # script its title was written in.  The board cannot see a font, so what
+    # it can be held to is this -- one state, one mark, whatever the row.
+    made, answer = painting(
+        tasks=[mk("T-a", "a title in plain ascii", TODAY),
+               mk("T-b", "\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0434\u0440\u0443\u0433\u043e\u0439 \u0430\u0437\u0431\u0443\u043a\u043e\u0439", TODAY),
+               timed("T-c", "this one carries a time", 14),
+               mk("T-d", "this one has a project", TODAY, project="P-1")],
+        projects={"P-1": "Some project"})
+    marks = {made.row_for(t)[1] for t in answer.rows}
+    check("four open rows differing in title, script, time and project",
+          len(answer.rows), 4)
+    check("draw one mark between them", marks, {MARKS[singularity.EMPTY]})
+
+
+def no_state_mark_needs_a_substitute_font():
+    print("\n2.5 the marks are ones a terminal font has, and one cell each")
+    marks = list(MARKS.values())
+    # A character the font lacks is not refused: the terminal borrows a
+    # substitute and may borrow a different one per line, which is how one
+    # code point came out at two sizes on one screen.  The ballot boxes are
+    # the family that did it, and no font this board is used in has them.
+    check("none lies in the ballot-box block",
+          [m for m in marks if 0x2610 <= ord(m) <= 0x2612], [])
+    check("each is a single character", [len(m) for m in marks], [1, 1, 1])
+    # Ambiguous is allowed and deliberate; wide is not, being two cells in
+    # every locale including the ones this board is run in.
+    check("none is two cells wide in every locale",
+          [m for m in marks
+           if unicodedata.east_asian_width(m) in ("W", "F")], [])
+
+
+def ticking_swaps_the_mark_in_place():
+    print("\n2.6 ticking changes the mark and leaves the row's shape alone")
+    made, answer = painting(tasks=[timed("T-tick", "to be ticked", 9)])
+    before = made.row_for(answer.rows[0])
+    made, answer = painting(
+        tasks=[timed("T-tick", "to be ticked", 9, checked=singularity.CHECKED)])
+    after = made.row_for(answer.rows[0])
+    check("the mark becomes the done one", after[1], MARKS[singularity.CHECKED])
+    check("in the same single cell", (len(before[1]), len(after[1])), (1, 1))
+    check("the when column is where it was", after[2], before[2])
+    check("and so is the project column", after[4], before[4])
+
+    print("\n     a row marked for copying keeps the mark its state calls for")
+    for state in (singularity.EMPTY, singularity.CHECKED, singularity.CANCELLED):
+        made, answer = painting(
+            tasks=[timed("T-m", "taking this one", 9, checked=state)],
+            marked=["T-m"])
+        cell = made.row_for(answer.rows[0])[1]
+        check(f"copy mark first, then the state's own ({state})",
+              (cell[0], cell[1:]), (board.COPY_MARK, MARKS[state]))
+
+
 def a_long_title_says_it_was_cut():
-    print("\n2.4 a title too long for the column says so")
+    print("\n2.7 a title too long for the column says so")
     made, answer = painting(tasks=[timed("T-9", "x" * 200, 9)], width=40)
     title = made.row_for(answer.rows[0])[3]
     check("cut to the width it was given", len(title.plain), 40)
@@ -309,6 +382,9 @@ PARTS = (
     the_cells_are_text,
     a_finished_task_is_struck,
     a_marked_row_keeps_its_own_mark,
+    each_state_draws_the_mark_it_always_draws,
+    no_state_mark_needs_a_substitute_font,
+    ticking_swaps_the_mark_in_place,
     a_long_title_says_it_was_cut,
     the_line_counts_what_is_drawn,
     the_line_says_what_was_withheld,

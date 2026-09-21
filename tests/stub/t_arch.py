@@ -337,8 +337,10 @@ def the_cell_carries_the_date():
     rows = [archived("T-done", "finished", 1),
             archived("T-cancel", "cancelled", 2, checked=CANCELLED)]
     made, answer = painting(rows)
-    check("the completed row keeps its mark", answer.cells[0][1], "☑")
-    check("the cancelled row keeps its own", answer.cells[1][1], "☒")
+    check("the completed row keeps its mark",
+          answer.cells[0][1], board.MARKS[CHECKED])
+    check("the cancelled row keeps its own",
+          answer.cells[1][1], board.MARKS[CANCELLED])
     # The cell is drawn text by the time it is here, not the markup it was
     # built from, so the strike is read off the span that carries it.
     check("both are struck through",

@@ -34,7 +34,31 @@ from textual.markup import escape
 import singularity
 from singularity import ARCHIVE, CANCELLED, CHECKED, EMPTY, Bucket, Task
 
-MARKS = {EMPTY: "☐", CHECKED: "☑", CANCELLED: "☒"}
+#: What a task's row draws in its mark column, one mark for each state.
+#:
+#: Chosen by two rules, in this order, and the order is the point.
+#:
+#: First, the terminal's own font has to have the character.  A font that
+#: lacks one does not refuse it: the terminal borrows a substitute, picks the
+#: substitute per line rather than per character, and the same character then
+#: comes out at two sizes on one screen.  `☐ ☑ ☒` stood here and did
+#: exactly that.  In cool-retro-term's IBM 3278 profile the empty box drew
+#: large against a row reading `all-day` and small against a row carrying a
+#: time, and the ticked box came from a different substitute again -- so
+#: ticking a task changed the size of its box.  These three were measured in
+#: that font and drew at one size on every line.
+#:
+#: Second, the mark takes one cell.  One cell here, not the stronger "one
+#: cell in every locale" that GREEN_MARK keeps: `□` is East-Asian-Ambiguous
+#: and a terminal configured for Chinese, Japanese or Korean draws it two
+#: cells wide.  That was given up deliberately, because nothing in the font
+#: satisfies both rules and the first one fails on the screen in front of
+#: you where the second fails only in a locale this board is not run in.
+#:
+#: `✓` and `✗` are the mailbox indicator's marks too -- one glyph carrying
+#: two senses, in two corners of the screen, accepted on purpose rather than
+#: by accident.  MAIL_IDLE_MARK in `main.py` says why it was thought bearable.
+MARKS = {EMPTY: "□", CHECKED: "✓", CANCELLED: "✗"}
 #: Raw keys marking a row as the tracker's rather than the board's.  A row
 #: carrying these is drawn, hidden and opened like any other, and refuses
 #: every write.
@@ -86,13 +110,12 @@ MAIL_ROW_MARK = "@"
 #: row-mark column is two cells wide and every row draws one character in it,
 #: so this costs no width anywhere.
 #:
-#: Plain ASCII, unlike every other mark on this board.  The rest sit in a
-#: column of their own or at the end of a line; this one sits beside another
-#: glyph in a fixed two-cell box, where a character the terminal renders two
-#: cells wide would push its neighbour out.  Every likely candidate --
-#: `▪`, `•`, `▸` -- is East-Asian-Ambiguous and is drawn double
-#: width in a CJK-configured terminal.  `+` is one cell everywhere, says
-#: "added to what I am taking", and is used nowhere else.
+#: Plain ASCII, and held to a stricter rule than MARKS above, which states
+#: the general one.  This mark alone shares a fixed two-cell box with another
+#: glyph, so a character the terminal drew two cells wide would push its
+#: neighbour out rather than merely sit wide.  Every likely candidate --
+#: `▪`, `•`, `▸` -- is East-Asian-Ambiguous and would.  `+` is one cell
+#: everywhere, says "added to what I am taking", and is used nowhere else.
 COPY_MARK = "+"
 #: Raw keys marking a row as the calendar's.  The same arrangement the
 #: tracker's rows use, for the same reason: a row carrying these is drawn,
@@ -119,15 +142,18 @@ EVENT_ENDS = "_event_ends"
 EVENT_PREFIX = "cal:"
 #: The mark shown against an event, distinct from both a task's checkbox and
 #: the tracker's arrow: three rows that cannot be ticked would otherwise look
-#: like three kinds of the same thing.
+#: like three kinds of the same thing.  East-Asian-Ambiguous, like the task
+#: marks and for the same reason -- the font has it and the width rule was
+#: narrowed to the locales this board is run in.  See MARKS.
 EVENT_ROW_MARK = "◇"
 #: Drawn in the margin against a task carrying the configured tag.  A star,
 #: which says "mine" at a glance where the double rule it replaced rewarded
 #: looking twice; it stands alone on its row rather than joining the marks
 #: above and below.  Not a colour: the board must stay legible to someone who
 #: cannot tell its colours apart, and the tag's own colour is deliberately
-#: unused.  Plain ASCII, so it is one cell wide in every locale -- the only
-#: mark on the board with no width caveat at all.
+#: unused.  Plain ASCII, so it is one cell wide in every locale: the stronger
+#: rule, kept here because it costs nothing to keep and the margin it stands
+#: in has no width to spare.  MARKS says why the row marks do not keep it.
 GREEN_MARK = "*"
 #: How wide the when-column is.  It carries a tracker row's state and a
 #: task's own start time or how overdue it is, so it has to hold the widest
