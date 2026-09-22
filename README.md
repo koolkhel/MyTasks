@@ -178,11 +178,24 @@ on a feature and is ignored when absent.
 | `WORK_PROJECT` | the project `w` hides |
 | `WORK_HOURS`, `WORK_DAYS` | when work is hidden for you, e.g. `08:00-18:00`, `mon-fri` |
 | `GREEN_TAG` | the tag drawn with a star |
-| `CALENDAR_WORK`, `CALENDAR_PERSONAL` | which calendar accounts to read |
+| `CALENDAR_WORK`, `CALENDAR_PERSONAL` | which calendar accounts, or single calendars, to read |
 | `YOUTRACK_BASE_URL`, `YOUTRACK_TOKEN`, `YOUTRACK_ASSIGNEE` | the issue tracker |
 | `YOUTRACK_PROJECTS`, `YOUTRACK_STATES`, `YOUTRACK_VERSION_FIELD` | which issues count |
 | `MAIL_MAILDIR`, `MAIL_FOLDERS` | a locally mirrored mailbox to read |
 | `MAIL_EWS_URL`, `MAIL_ARCHIVE_FOLDER` | the account, for filing a message away |
+
+Each entry in those two lists names either a calendar **account** or a single
+**calendar**. An account brings in every calendar it holds; a calendar name
+brings in that one, which is what you want when the account it lives in also
+holds things you would rather not see — a shared calendar of public holidays,
+somebody else's diary. The name to use is the one the board itself shows in an
+event row's right-hand column. Matching ignores case, and ignores how the name
+is composed, so a name outside the Latin alphabet matches whichever way either
+side spells it.
+
+A name that matches nothing on the machine costs you that name and nothing
+else: the calendars that did match are still shown, and the board says which
+entry it could not find until you correct it.
 
 The calendar is granted to the **terminal**, not to the board — macOS
 attributes the request to the application that owns the process — and a
@@ -204,7 +217,7 @@ python tests/run.py t_search     # one suite, wherever it lives
 ```
 
 One directory per tier, and the directory is a suite's whole declaration of what
-it needs. The self-contained tier is 60 suites and 3,286 checks, runs against
+it needs. The self-contained tier is 61 suites and 3,332 checks, runs against
 a stubbed store and substituted sources, and passes on a fresh clone with
 nothing configured — whatever the machine's default text encoding; nothing in
 the suites depends on the locale.
@@ -234,6 +247,6 @@ refusal apart from a failure.
 | `openspec/` | what the board must do, as requirements and scenarios |
 | `docs/screenshots.py` | the pictures above, taken from the board on invented data |
 
-`openspec/specs/` is the description the code is held to — 161 requirements and
-778 scenarios about behaviour rather than implementation. Changes are proposed,
+`openspec/specs/` is the description the code is held to — 177 requirements and
+888 scenarios about behaviour rather than implementation. Changes are proposed,
 specified, applied and archived against it.

@@ -75,7 +75,8 @@ class run:
 
     async def __aenter__(self):
         self.saved = ical.fetch
-        ical.fetch = lambda cfg, day: list(self.app._pending_events)
+        ical.fetch = lambda cfg, day: ical.Reading(
+            list(self.app._pending_events), ())
         self.ctx = self.app.run_test(size=self.size)
         self.pilot = await self.ctx.__aenter__()
         await settle(self.pilot, 12)

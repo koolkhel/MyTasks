@@ -125,7 +125,7 @@ async def board(events, tasks=None, day=None):
     app.calendar_config = CFG
     app.tracker_config = None
     saved = ical.fetch
-    ical.fetch = lambda cfg, d: list(events)
+    ical.fetch = lambda cfg, d: ical.Reading(list(events), ())
     try:
         async with app.run_test(size=(120, 44)) as pilot:
             for _ in range(14): await pilot.pause()

@@ -453,7 +453,7 @@ async def refusals():
                     end=dt.datetime.combine(TODAY, dt.time(15, 0), tzinfo=TZ),
                     all_day=False, location="", notes="")
     was_fetch = ical.fetch
-    ical.fetch = lambda cfg, day: [ev]
+    ical.fetch = lambda cfg, day: ical.Reading([ev], ())
     async with board(tasks=[mk("d1", "a task", TODAY)], to_inbox=False) as (
             app, pilot, path, _o):
         app.calendar_config = ical.Config(work="work", personal=())

@@ -25,7 +25,8 @@ def ev(title, hh=None, mm=0, account="Me", cal="c"):
     return ical.Event(title=title, account=account, calendar=cal, start=start,
                       end=start + dt.timedelta(hours=1), all_day=hh is None)
 
-async def board(tasks, events, work_project="P-work", fail=None, config=CFG):
+async def board(tasks, events, work_project="P-work", fail=None, config=CFG,
+                unmatched=()):
     app = main.TaskApp()
     app.client = StubClient(tasks, reference=dt.datetime.now(TZ))
     app.work_project = work_project
@@ -36,7 +37,7 @@ async def board(tasks, events, work_project="P-work", fail=None, config=CFG):
         calls.append(day)
         if fail is not None:
             raise fail
-        return list(events)
+        return ical.Reading(list(events), tuple(unmatched))
     ical_fetch, ical.fetch = ical.fetch, fetch
     return app, calls, ical_fetch
 
@@ -247,7 +248,7 @@ async def configuration():
             said = str(app.query_one("#status").render())
             check("and the trouble is said once", "refused" in said, True)
             # recovering
-            ical.fetch = lambda cfg, day: [ev("back again", 9)]
+            ical.fetch = lambda cfg, day: ical.Reading([ev("back again", 9)], ())
             await pilot.press("r")
             for _ in range(12):
                 await pilot.pause()
@@ -282,6 +283,77 @@ async def configuration():
     finally:
         ical.fetch = saved
 
+async def work_named_by_calendar():
+    print("what counts as work may name a calendar rather than an account")
+    tasks = [mk("t1", "work task", TODAY, project="P-work"),
+             mk("t2", "own task", TODAY)]
+    # Both events come from the same account, so only the calendar tells them
+    # apart.  That is the whole of what this part checks: an account-level
+    # test would pass on both of them and prove nothing.
+    events = [ev("work meeting", 9, account="Me", cal="Дежурства"),
+              ev("my thing", 10, account="Me", cal="Семейный")]
+    app, calls, saved = await board(
+        tasks, events, config=ical.Config(work="Дежурства", personal=("Me",)))
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            for _ in range(12):
+                await pilot.pause()
+            check("all four rows", len(app.tasks), 4)
+            await pilot.press("w")
+            await pilot.pause()
+            check("the work calendar's event goes with the work task",
+                  titles(app), ["my thing", "own task"])
+            status = str(app.query_one("#status").render())
+            check("the hidden count includes it", "2 work hidden" in status, True)
+            check("nothing on screen counts as work",
+                  [t.raw.get("title") for t in app.tasks if app.is_work(t)], [])
+            check("and shown plus hidden is what there was",
+                  len(app.tasks) + app.hidden_work, 4)
+            await pilot.press("w")
+            await pilot.pause()
+            check("pressing again brings it back", len(app.tasks), 4)
+    finally:
+        ical.fetch = saved
+
+
+async def a_name_that_matched_nothing():
+    print("a name matching nothing costs that name, never the calendar")
+    tasks = [mk("t1", "own task", TODAY)]
+    app, calls, saved = await board(
+        tasks, [ev("my thing", 10)], unmatched=("Нет такого",))
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            for _ in range(12):
+                await pilot.pause()
+            check("the events that did match are still drawn",
+                  titles(app), ["my thing", "own task"])
+            said = str(app.query_one("#status").render())
+            check("and the entry that matched nothing is named",
+                  "Нет такого" in said, True)
+            check("through the calendar's own standing message",
+                  app.calendar_error, ical.unmatched_message(("Нет такого",)))
+            # It has to survive a refresh that had nothing to do with it.  The
+            # day reloads for its own reasons all the time, and a report that
+            # went down with one of those is a report nobody would see.
+            await pilot.press("r")
+            for _ in range(12):
+                await pilot.pause()
+            check("the report stands across a refresh",
+                  "Нет такого" in str(app.query_one("#status").render()), True)
+            check("and the events are still there",
+                  titles(app), ["my thing", "own task"])
+            # And it comes down of itself once the name is put right.
+            ical.fetch = lambda cfg, day: ical.Reading([ev("my thing", 10)], ())
+            await pilot.press("r")
+            for _ in range(12):
+                await pilot.pause()
+            check("it goes when every name matches",
+                  ("Нет такого" in str(app.query_one("#status").render()),
+                   app.calendar_error), (False, None))
+    finally:
+        ical.fetch = saved
+
+
 # ------------------------------------------------------------- day change
 async def day_change():
     print("the day being viewed is the day read")
@@ -292,7 +364,7 @@ async def day_change():
     app.calendar_config = CFG
     app.tracker_config = None
     saved = ical.fetch
-    ical.fetch = lambda cfg, day: list(by_day.get(day, []))
+    ical.fetch = lambda cfg, day: ical.Reading(list(by_day.get(day, [])), ())
     try:
         async with app.run_test(size=(120, 40)) as pilot:
             for _ in range(12):
@@ -320,7 +392,7 @@ async def never_waits():
     saved = ical.fetch
     def slow(cfg, day):
         gate.wait(10)
-        return [ev("late arrival", 9)]
+        return ical.Reading([ev("late arrival", 9)], ())
     ical.fetch = slow
     try:
         async with app.run_test(size=(120, 40)) as pilot:
@@ -400,7 +472,9 @@ PARTS = (
     refusals,
     the_terminal_cannot_be_asked,
     work_filter,
+    work_named_by_calendar,
     configuration,
+    a_name_that_matched_nothing,
     day_change,
 )
 

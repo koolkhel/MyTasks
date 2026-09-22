@@ -179,7 +179,7 @@ async def other_rows():
     app.tracker_config = CFG
     opened = []
     app.open_url = lambda url: opened.append(url)
-    saved = ical.fetch; ical.fetch = lambda c, d: [E]
+    saved = ical.fetch; ical.fetch = lambda c, d: ical.Reading([E], ())
     try:
         async with app.run_test(size=(120, 44)) as pilot:
             for _ in range(14): await pilot.pause()

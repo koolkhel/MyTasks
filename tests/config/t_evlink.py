@@ -39,7 +39,7 @@ async def board(events, tasks=None):
     opened = []
     app.open_url = lambda url: opened.append(url)
     saved = ical.fetch
-    ical.fetch = lambda cfg, day: list(events)
+    ical.fetch = lambda cfg, day: ical.Reading(list(events), ())
     return app, opened, saved
 
 async def select(app, pilot, predicate):

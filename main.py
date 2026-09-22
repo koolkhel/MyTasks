@@ -2150,11 +2150,11 @@ class TaskApp(App[None]):
             self.call_from_thread(self.clear_calendar)
             return
         try:
-            events = ical.fetch(config, day)
+            reading = ical.fetch(config, day)
         except ical.CalendarUnreadable as exc:
             self.call_from_thread(self.calendar_failed, day, str(exc))
             return
-        self.call_from_thread(self.calendar_loaded, day, events)
+        self.call_from_thread(self.calendar_loaded, day, reading)
 
     def clear_calendar(self) -> None:
         """Forget the events where they cannot apply to the view."""
@@ -2164,22 +2164,37 @@ class TaskApp(App[None]):
             self.calendar_error = None
             self.repaint()
 
-    def calendar_loaded(self, day, events: list[ical.Event]) -> None:
-        """Take the day's events, and stop saying the calendar was unreadable.
+    def calendar_loaded(self, day, reading: ical.Reading) -> None:
+        """Take the day's events, and say what the configuration named in vain.
 
         The day the read was for is checked against the day now shown: a
         slow read finishing after the person has moved on must not put one
         day's events under another's date.
+
+        A read can come back with events *and* with entries that named
+        nothing on this machine, and both are applied.  Keeping the events is
+        the whole of it: a name that matches nothing costs the person that
+        name, never the calendar they still have.  The report goes through
+        the same field the calendar's other trouble uses, so it stands across
+        a redraw and comes down of itself once the name is put right.
         """
         if day != self.position:
             return
         was = self.calendar_error
-        self.events = events
+        self.events = reading.events
         self.events_day = day
-        self.calendar_error = None
-        if was and self._notice and self._notice[0] == was:
+        self.calendar_error = ical.unmatched_message(reading.unmatched) or None
+        if (was and was != self.calendar_error
+                and self._notice and self._notice[0] == was):
+            # What was standing no longer describes the board.  Left alone it
+            # would sit on the bar reporting a state that has since gone.
             self._notice = None
         self.repaint()
+        if self.calendar_error and self.calendar_error != was:
+            # Said once, for the reason calendar_failed says its own once:
+            # repeating it on every refresh would bury whatever else the
+            # board has to say.
+            self.notice(self.calendar_error, True)
 
     def calendar_failed(self, day, message: str) -> None:
         """Remember that the calendar is unreadable, and say so once.

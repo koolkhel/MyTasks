@@ -77,7 +77,7 @@ async def the_table_holds_what_was_decided():
     # one: the board fetches them itself on the way up, and this shell has
     # neither a calendar grant nor a tracker to ask.
     saved_cal, saved_track = ical.fetch, tracker.fetch
-    ical.fetch = lambda cfg, day: [ev("standup", 10)]
+    ical.fetch = lambda cfg, day: ical.Reading([ev("standup", 10)], ())
     tracker.fetch = lambda cfg, **kw: [issue("ZZA-1", "an issue")]
     try:
         async with app.run_test(size=(100, 30)) as pilot:

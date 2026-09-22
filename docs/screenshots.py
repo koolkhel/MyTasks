@@ -288,7 +288,7 @@ def replace_sources(events=(), issues=()):
     real tracker out of every picture.
     """
     saved = (ical.fetch, tracker.fetch)
-    ical.fetch = lambda cfg, day: list(events)
+    ical.fetch = lambda cfg, day: ical.Reading(list(events), ())
     tracker.fetch = lambda cfg, **kw: list(issues)
     return saved
 

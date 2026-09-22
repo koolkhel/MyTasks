@@ -54,7 +54,7 @@ async def rows(tasks, events, green=None):
     app.tracker_config = None
     app.green_tag = green
     saved = ical.fetch
-    ical.fetch = lambda cfg, day: list(events)
+    ical.fetch = lambda cfg, day: ical.Reading(list(events), ())
     try:
         async with app.run_test(size=(120, 44)) as pilot:
             for _ in range(14): await pilot.pause()

@@ -484,9 +484,9 @@ def calendar_showing(title="a meeting"):
     """
     saved = ical.fetch
     at = datetime.combine(TODAY, time_of_day(9, 0))
-    ical.fetch = lambda cfg, day: [ical.Event(
+    ical.fetch = lambda cfg, day: ical.Reading([ical.Event(
         title=title, account="Me", calendar="c", start=at,
-        end=at + timedelta(hours=1), all_day=False)]
+        end=at + timedelta(hours=1), all_day=False)], ())
     try:
         yield
     finally:

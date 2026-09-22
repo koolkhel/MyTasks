@@ -173,7 +173,7 @@ async def refusals():
                    all_day=False, location="", notes="a description")
     app = await board([note_task("t1", "a task", "mine")])
     app.calendar_config = ical.Config(work="W", personal=("Me",))
-    saved = ical.fetch; ical.fetch = lambda c, d: [E]
+    saved = ical.fetch; ical.fetch = lambda c, d: ical.Reading([E], ())
     try:
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(pilot)

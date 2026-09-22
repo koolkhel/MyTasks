@@ -901,8 +901,12 @@ class Board:
                 "deferred": False,
                 "useTime": False,
                 # Belonging to the work project is what makes `w` hide it.
+                # Both names are handed over because either may be what was
+                # configured as work: an account, or a single calendar.
                 "projectId": (
-                    self.work_project if config.is_work(event.account) else None
+                    self.work_project
+                    if config.is_work(event.account, event.calendar)
+                    else None
                 ),
                 # Where a task keeps its note, so the detail area draws an
                 # event's description with no knowledge of events at all.

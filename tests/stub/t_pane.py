@@ -414,10 +414,10 @@ async def rows_from_elsewhere():
     app.calendar_config = ical.Config(work="W", personal=("Me",))
     start = dt.datetime.combine(TODAY, dt.time(9, 0))
     saved = ical.fetch
-    ical.fetch = lambda cfg, day: [ical.Event(
+    ical.fetch = lambda cfg, day: ical.Reading([ical.Event(
         title="a meeting", account="Me", calendar="c", start=start,
         end=start + dt.timedelta(hours=1), all_day=False,
-        notes="\n".join(f"line {i}" for i in range(40)))]
+        notes="\n".join(f"line {i}" for i in range(40)))], ())
     try:
         async with app.run_test(size=size) as pilot:
             await settle(pilot, 18)

@@ -1,6 +1,6 @@
 """Read-only access to the machine's own calendar.
 
-Only what a day needs: the events on it, from the accounts a person named.
+Only what a day needs: the events on it, from the calendars a person named.
 Nothing here writes.  Events are kept in the calendar's own application and
 shown here so that a day can be looked at in one place -- the meeting at two
 is the reason the task at three will not happen, and a board that cannot say
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import unicodedata
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -58,9 +59,22 @@ class CalendarUnreadable(Exception):
     """
 
 
+def _key(name: str) -> str:
+    """A name as it is compared: composed first, then case-folded.
+
+    Composed first because the system hands back what its own store holds,
+    and a title typed into the configuration composed does not equal a
+    decomposed one however either is cased.  Every name outside ASCII is
+    exposed to that, and it fails invisibly -- the entry simply matches
+    nothing, which is the one failure this module most needs not to be
+    silent about.
+    """
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 @dataclass(frozen=True)
 class Config:
-    """Which calendar accounts to read, and which of them is work."""
+    """Which calendar accounts and calendars to read, and which is work."""
 
     #: The account whose events count as work, so that the key hiding work
     #: hides them too.  Empty when none does.
@@ -73,13 +87,22 @@ class Config:
         """Every account to read, work first."""
         return ((self.work,) if self.work else ()) + self.personal
 
-    def is_work(self, account: str) -> bool:
-        """Whether events from this account count as work.
+    def is_work(self, account: str, calendar: str) -> bool:
+        """Whether an event from this account, in this calendar, counts as work.
 
-        Matched the way the accounts are matched when reading them, so an
-        account is not read under one spelling and then missed under another.
+        Both are offered because either may be what was configured: the work
+        entry names a source account or a single calendar, exactly as the
+        entries selecting calendars do.  A name good enough to read a calendar
+        by but not good enough to recognise that calendar's events as work
+        would leave the key that hides work hiding nothing, on a board that
+        looked perfectly configured.
+
+        Matched the way those entries are matched when reading them, so a
+        calendar is not read under one spelling and then missed under another.
         """
-        return bool(self.work) and account.casefold() == self.work.casefold()
+        if not self.work:
+            return False
+        return _key(self.work) in {_key(account), _key(calendar)}
 
 
 @dataclass(frozen=True)
@@ -243,51 +266,136 @@ def _request(store, callback) -> None:
         store.requestAccessToEntityType_completion_(EKEntityTypeEvent, callback)
 
 
-def fetch(config: Config, day: _dt.date) -> list[Event]:
-    """Every event on `day` from the configured accounts, in the order shown.
+@dataclass(frozen=True)
+class Selection:
+    """Which of the machine's calendars a configuration names."""
+
+    #: The machine's own names for the calendars to read, in the order it
+    #: offered them, each appearing once however many entries named it.
+    identifiers: tuple[str, ...]
+    #: The configured entries that named nothing here, in the order they were
+    #: configured -- which is the order they were typed in, and so the order
+    #: someone will look through when correcting one.
+    unmatched: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Reading:
+    """What one day's read came back with.
+
+    The events and the entries that named nothing travel together because
+    they are one answer rather than two.  A read can have both, and a caller
+    handed only the events would go on to draw a day it had just been told
+    was incomplete.
+    """
+
+    events: list[Event]
+    unmatched: tuple[str, ...]
+
+
+def select(config: Config, offered) -> Selection:
+    """Which of the calendars a machine offers the configuration names.
+
+    `offered` is what the machine holds, each calendar as `(account,
+    calendar, identifier)`: the title of the source it belongs to, its own
+    title, and the machine's own name for it.
+
+    An entry names either of the first two.  Naming a source reads every
+    calendar in it; naming a calendar reads that one alone; a name that
+    happens to be both reads both -- which needs no precedence rule, and is
+    the only answer that never silently drops something a person named.
+
+    A calendar named twice over, by its account and by itself, is read once.
+    Reading it twice asks the framework for its events twice and draws every
+    one of them as two rows.
+
+    Nothing here touches the framework and nothing here reads a file.  That
+    is the point of it: this is the whole of the rule, so it can be exercised
+    where the suites actually run -- on a machine with no calendar, no
+    permission, and no framework installed at all.
+    """
+    entries = tuple(config.accounts)
+    keys = tuple(_key(e) for e in entries)
+    matched: set[str] = set()
+    identifiers: list[str] = []
+    taken: set[str] = set()
+    for account, calendar, identifier in offered:
+        # An untitled source or calendar names nothing.  Without this an
+        # entry that was somehow empty would match every such calendar.
+        here = {_key(account), _key(calendar)} - {""}
+        hit = {k for k in keys if k in here}
+        if not hit:
+            continue
+        matched |= hit
+        if identifier not in taken:
+            taken.add(identifier)
+            identifiers.append(identifier)
+    return Selection(
+        tuple(identifiers),
+        tuple(e for e, k in zip(entries, keys) if k not in matched),
+    )
+
+
+def unmatched_message(names) -> str:
+    """What is said about entries that named nothing, or "" when none did.
+
+    Here rather than where it is drawn, so the board and the suites say the
+    same thing, and so the module that draws a day holds no opinion about
+    what a calendar account is.
+    """
+    names = tuple(names)
+    if not names:
+        return ""
+    return f"no account or calendar named {', '.join(names)} on this machine"
+
+
+def fetch(config: Config, day: _dt.date) -> Reading:
+    """Every event on `day` from the configured calendars, in the order shown.
 
     Asked afresh for each day rather than cached: a day costs a couple of
     milliseconds, so there is nothing to keep in step and nothing to go stale.
 
-    An account that names nothing on the machine is reported rather than
-    quietly contributing no events, because an empty day and a misconfigured
-    one look identical on screen and mean opposite things.
+    An entry naming nothing on the machine is reported rather than quietly
+    contributing no events, because an empty day and a misconfigured one look
+    identical on screen and mean opposite things.  It is reported *beside*
+    whatever did match, never instead of it: withdrawing a person's whole
+    calendar to report one name spends everything they had on a mistake that
+    takes a moment to correct, and presents that mistake as the calendar
+    being unreadable.
     """
     from Foundation import NSDate
 
     store = _store()
     from EventKit import EKEntityTypeEvent
 
-    wanted = {a.casefold() for a in config.accounts}
-    calendars, seen = [], set()
+    offered, by_identifier = [], {}
     for cal in store.calendarsForEntityType_(EKEntityTypeEvent) or []:
         source = cal.source()
         account = str(source.title()) if source is not None else ""
-        seen.add(account.casefold())
-        if account.casefold() in wanted:
-            calendars.append((cal, account))
-    if not seen:
-        # No accounts at all is the calendar being unreadable, not every
-        # configured account having vanished at once.  Blaming the
+        identifier = str(cal.calendarIdentifier())
+        offered.append((account, str(cal.title()), identifier))
+        by_identifier[identifier] = (cal, account)
+    if not offered:
+        # No calendars at all is the calendar being unreadable, not every
+        # configured entry having vanished at once.  Blaming the
         # configuration here would send someone to edit a correct setting.
         raise CalendarUnreadable(_ACCESS_TROUBLE[None])
-    missing = sorted(a for a in config.accounts if a.casefold() not in seen)
-    if missing:
-        raise CalendarUnreadable(
-            f"no calendar account named {', '.join(missing)} on this machine"
-        )
-    if not calendars:
-        return []
+    chosen = select(config, offered)
+    if not chosen.identifiers:
+        return Reading([], chosen.unmatched)
 
     begin = _dt.datetime.combine(day, _dt.time.min)
     finish = begin + _dt.timedelta(days=1)
     predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
         NSDate.dateWithTimeIntervalSince1970_(begin.timestamp()),
         NSDate.dateWithTimeIntervalSince1970_(finish.timestamp()),
-        [cal for cal, _ in calendars],
+        [by_identifier[i][0] for i in chosen.identifiers],
     )
-    account_of = {str(cal.calendarIdentifier()): account for cal, account in calendars}
-    return parse(store.eventsMatchingPredicate_(predicate) or [], account_of)
+    account_of = {i: by_identifier[i][1] for i in chosen.identifiers}
+    return Reading(
+        parse(store.eventsMatchingPredicate_(predicate) or [], account_of),
+        chosen.unmatched,
+    )
 
 
 def parse(raw, account_of: dict[str, str]) -> list[Event]:

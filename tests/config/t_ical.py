@@ -67,11 +67,12 @@ check("neither key set -> no calendar", ical.load_config("/nonexistent"), None)
 os.environ["CALENDAR_PERSONAL"] = "a@b.c, d@e.f"
 cfg = ical.load_config("/nonexistent")
 check("personal alone works", (cfg.work, cfg.personal), ("", ("a@b.c", "d@e.f")))
-check("no work account -> nothing is work", cfg.is_work("a@b.c"), False)
+check("no work account -> nothing is work", cfg.is_work("a@b.c", "c"), False)
 os.environ["CALENDAR_WORK"] = "W"
 cfg = ical.load_config("/nonexistent")
 check("accounts are work first", cfg.accounts, ("W", "a@b.c", "d@e.f"))
-check("work matches regardless of case", cfg.is_work("w"), True)
+check("work matches regardless of case", cfg.is_work("w", "c"), True)
+check("work matches a calendar too", cfg.is_work("a@b.c", "W"), True)
 
 print("ordering")
 def ev(title, hh=None, allday=False):
@@ -84,7 +85,7 @@ check("all-day first, then by time", [r.title for r in rows], ["all A", "all B",
 check("all-day label", ev("x", allday=True).label, "all-day")
 check("timed label", ev("x", 9).label, "09:00")
 
-print("an account that is not on the machine is reported, not passed over")
+print("a name that is not on the machine is reported beside what did match")
 import datetime as _dt
 # Alone in this file, these two need a calendar the system will really let
 # this process read.  Ask before asserting, and ask with _status(), which is
@@ -92,26 +93,35 @@ import datetime as _dt
 # timeout on a machine that has not been asked yet, and raise the permission
 # dialog at whoever is running the suites.
 #
-# Without the grant, fetch refuses inside _store() -- before the account
-# matching these two are about is reached at all.  Reading that refusal as a
+# Without the grant, fetch refuses inside _store() -- before the name
+# matching these are about is reached at all.  Reading that refusal as a
 # result would report the machine's answer as the board's.
 _skipped = 0
 if ical._status() != ical._FULL_ACCESS:
-    _skipped = 2
-    print("  skip  2 checks: the system has not granted this process access "
-          "to the calendar, so there is no account list to match against")
+    _skipped = 5
+    print(f"  skip  {_skipped} checks: the system has not granted this process "
+          "access to the calendar, so there is no list of names to match against")
 else:
-    try:
-        ical.fetch(ical.Config(work="NoSuchAccountHere", personal=()), _dt.date.today())
-        check("a missing account raises", False, True)
-    except ical.CalendarUnreadable as exc:
-        check("a missing account is named", "NoSuchAccountHere" in str(exc), True)
-    try:
-        ical.fetch(ical.Config(work=REAL.work, personal=("AlsoMissing",)), _dt.date.today())
-        check("one missing among real ones still raises", False, True)
-    except ical.CalendarUnreadable as exc:
-        check("only the missing one is named",
-              ("AlsoMissing" in str(exc), REAL.work in str(exc)), (True, False))
+    alone = ical.fetch(ical.Config(work="NoSuchAccountHere", personal=()),
+                       _dt.date.today())
+    check("a name matching nothing is reported", alone.unmatched,
+          ("NoSuchAccountHere",))
+    check("and it is reported rather than raised", alone.events, [])
+    # The one that matters: a real entry beside a broken one keeps its
+    # events.  Before this, the broken entry withdrew them all, and the day
+    # a person was looking at went from full to empty over a typo.
+    mixed = ical.fetch(ical.Config(work=REAL.work, personal=("AlsoMissing",)),
+                       _dt.date.today())
+    check("only the name that matched nothing is reported",
+          mixed.unmatched, ("AlsoMissing",))
+    check("the real account's events still came back",
+          len(mixed.events) >= len(ical.fetch(ical.Config(work=REAL.work,
+                                                          personal=()),
+                                              _dt.date.today()).events), True)
+    _said = ical.unmatched_message(mixed.unmatched)
+    check("the words the board shows name the broken entry, and not the good one",
+          ("AlsoMissing" in _said, bool(REAL.work) and REAL.work in _said),
+          (True, False))
 
 print()
 # The total counts what ran, never what was meant to run.

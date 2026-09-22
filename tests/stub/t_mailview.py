@@ -412,9 +412,9 @@ async def beside_the_other_sources():
     app.mail_config = mail.Config(SAMPLE, FOLDERS)
     start = dt.datetime.combine(TODAY, dt.time(9, 0))
     saved = ical.fetch
-    ical.fetch = lambda cfg, day: [ical.Event(
+    ical.fetch = lambda cfg, day: ical.Reading([ical.Event(
         title="a meeting", account="Me", calendar="c", start=start,
-        end=start + dt.timedelta(hours=1), all_day=False)]
+        end=start + dt.timedelta(hours=1), all_day=False)], ())
     try:
         async with app.run_test(size=(120, 44)) as pilot:
             for _ in range(16): await pilot.pause()
