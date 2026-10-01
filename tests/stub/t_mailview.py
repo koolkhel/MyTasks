@@ -137,9 +137,9 @@ async def the_view():
         # Mail follows the tasks.  It led them until the volume was
         # measured -- some 460 mail rows against 35 tasks -- which turned
         # the argument for leading with it into the argument against.
-        check("mail follows, and is contiguous", kinds, ["task"] + ["MAIL"] * 10)
+        check("mail follows, and is contiguous", kinds, ["task"] + ["MAIL"] * 9)
         check("both queues are counted",
-              ("10 thread(s)" in status(app), "19 message(s)" in status(app)),
+              ("9 thread(s)" in status(app), "17 message(s)" in status(app)),
               (True, True))
         tasks_only = sum(1 for t in app.tasks if not app.is_mail(t))
         check("and the task count counts tasks alone",
@@ -562,11 +562,14 @@ async def still_in_the_inbox():
         app.projects = {WORK: "Work"}
         app.repaint()
         await pilot.pause()
-        # Nine, the sample's threads with no tracker configured to fold them.
+        # Nine.  The sample folds to nine whether or not a tracker is
+        # configured, now that folding reads what each sender declares: it
+        # was ten here, the sample's header threads, because the old rule
+        # could not fold without a tracker to tell it which keys counted.
         check("every thread is there with the mode off",
-              sum(1 for t in app.tasks if app.is_mail(t)), 10)
+              sum(1 for t in app.tasks if app.is_mail(t)), 9)
         check("and none of them claims a project",
-              [t.project_id for t in app.tasks if app.is_mail(t)], [None] * 10)
+              [t.project_id for t in app.tasks if app.is_mail(t)], [None] * 9)
 
 
 async def legible_together():
@@ -585,7 +588,7 @@ async def legible_together():
             for _ in range(12): await pilot.pause()
             bar = str(app.query_one("#daybar", Static).render())
             check(f"at {width} columns the hidden count is whole",
-                  "work hidden (10)" in bar, True)
+                  "work hidden (9)" in bar, True)
             # The mailbox mark is padded to the right edge of the same bar.
             check(f"at {width} columns the mailbox mark is still there",
                   bar.rstrip()[-1:], main.MAIL_IDLE_MARK)

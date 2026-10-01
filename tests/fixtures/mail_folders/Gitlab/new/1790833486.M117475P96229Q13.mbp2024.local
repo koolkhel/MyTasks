@@ -3,6 +3,8 @@ To: me@corp.invalid
 Subject: Re: platform/api !63: retry the upload
 Date: Tue, 08 Sep 2026 15:30:00 -0000
 Message-ID: <gl.mr63.1@git.corp.invalid>
+X-GitLab-Project-Id: 41
+X-GitLab-MergeRequest-IID: 63
 In-Reply-To: <gl.mr63.0@git.corp.invalid>
 References: <gl.mr63.0@git.corp.invalid>
 Content-Type: text/plain; charset="utf-8"

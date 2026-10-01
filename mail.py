@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import email.header
 import email.utils
+import enum
 import os
 import re as _re
 from html.parser import HTMLParser as _HTMLParser
@@ -116,6 +117,11 @@ class Message:
     #: here.  False for every message that is not a tracker notification,
     #: which is most of them.
     issue_done: bool = False
+    #: What the sender says this message is about, or None where it says
+    #: nothing.  Read once here rather than worked out again per row: it is
+    #: what folds messages together, and what decides whether a build message
+    #: is worth showing at all.
+    about: "Declared | None" = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,22 @@ class Thread:
     def text(self) -> str:
         """Every message's text, for finding what the thread points at."""
         return "\n".join(m.text for m in self.messages)
+
+    @property
+    def about(self) -> "Declared | None":
+        """What this row is about, where every message in it agrees.
+
+        A folded row's messages share a declaration by construction.  A row
+        grouped by the headers that say which message answers which may hold
+        messages declaring different things, or nothing, and then this
+        answers None rather than picking one of them.
+        """
+        first = self.messages[0].about
+        if first is None:
+            return None
+        key = first.row_key
+        return first if all(m.about is not None and m.about.row_key == key
+                            for m in self.messages) else None
 
     def sort_key(self) -> tuple:
         """Where the thread falls among the others.
@@ -271,6 +293,117 @@ def _from_html(source: str) -> str:
     except Exception:
         return ""
     return reader.text
+
+
+#: What each notification system declares its message is about, in headers it
+#: sets for that purpose.  Reading these is the whole of how messages are
+#: folded into rows, and it replaced reading an issue key out of the message's
+#: words: 234 messages in the folders read daily name an issue in their text
+#: while carrying no tracker header, because they are review and build mail
+#: quoting an issue in passing.  Those are exactly the ones a rule over the
+#: text folded wrongly.  A sender's own declaration cannot pick them up.
+#:
+#: Two identifiers for a merge request, not one.  The number is the one shown
+#: in the interface and it restarts in every project, so the project is what
+#: makes it mean one request.  The internal id is unique by itself and is
+#: deliberately not used: a row keyed on something nobody can see is a row
+#: nobody can check when a fold looks wrong.
+ISSUE_HEADERS = ("X-YouTrack-Issue",)
+REVIEW_HEADERS = ("X-GitLab-Project-Id", "X-GitLab-MergeRequest-IID")
+BUILD_HEADERS = ("X-Jenkins-Job",)
+#: What a build server says became of a build.  Read as one of these rather
+#: than matched as words, for the reason the done-mark already follows: the
+#: wording is whatever a deployment happens to use, in whatever language, and
+#: a board matching it falls silent the day somebody changes it.
+OUTCOME_HEADER = "X-Jenkins-Result"
+
+
+class Outcome(enum.Enum):
+    """What became of a build, as far as the board needs to know.
+
+    `UNKNOWN` is a value a server declared that nobody here has seen.  It is
+    deliberately not `FAILED`: showing an unrecognised outcome is the safe
+    direction, because the alternative is silently dropping something that
+    might have needed attention.
+    """
+
+    FAILED = "failed"
+    SUCCEEDED = "succeeded"
+    STOPPED = "stopped"
+    UNKNOWN = "unknown"
+
+
+#: What a build server's words map to.  Only the three values the real
+#: folders were seen to carry, deliberately: every other word a server might
+#: use is `UNKNOWN` and is therefore shown.  Guessing that one more word meant
+#: success would hide a build on the strength of a word nobody had checked,
+#: and showing one too many costs a row.
+OUTCOMES = {"FAILURE": Outcome.FAILED,
+            "SUCCESS": Outcome.SUCCEEDED,
+            "ABORTED": Outcome.STOPPED}
+
+
+@dataclass(frozen=True)
+class Declared:
+    """What a message's sender says it is about.
+
+    `kind` names the system, `about` identifies the thing within it, and the
+    two together are what folds messages into a row.  `outcome` is carried
+    only by a build and is deliberately outside the row key: a job's failures
+    belong in one row, not one row per result.
+    """
+
+    kind: str
+    about: tuple[str, ...]
+    outcome: "Outcome | None" = None
+
+    @property
+    def row_key(self) -> tuple:
+        """What messages must share to be one row."""
+        return (self.kind, self.about)
+
+    @property
+    def is_news(self) -> bool:
+        """Whether this is worth a person's attention at all.
+
+        True for everything but a build that worked or was stopped.  Nothing
+        is asked of anybody by a build that passed, and stopping one is
+        somebody withdrawing a job they started, usually having started it
+        wrongly, which leaves nothing to fix.
+
+        Only a build is judged.  No other sender here declares an outcome the
+        board could judge, so no other message is ever held back.
+        """
+        if self.kind != "build":
+            return True
+        return self.outcome not in (Outcome.SUCCEEDED, Outcome.STOPPED)
+
+
+def declared(raw) -> "Declared | None":
+    """What the sender says this message is about, or None where it says nothing.
+
+    Checked in one order so a message carrying headers from two systems lands
+    in one row rather than two.  The order is the volume order and nothing
+    turns on it; what matters is that it is fixed.
+
+    A header present but empty is the same as absent: a declaration that
+    names nothing identifies nothing.
+    """
+    def value(name: str) -> str:
+        got = raw.get(name)
+        return str(got).strip() if got is not None else ""
+
+    issue = value(ISSUE_HEADERS[0])
+    if issue:
+        return Declared("issue", (issue,))
+    review = tuple(value(name) for name in REVIEW_HEADERS)
+    if all(review):
+        return Declared("review", review)
+    job = value(BUILD_HEADERS[0])
+    if job:
+        return Declared("build", (job,),
+                        OUTCOMES.get(value(OUTCOME_HEADER), Outcome.UNKNOWN))
+    return None
 
 
 #: The header a tracker's notification names its own issue in.  Which issue a
@@ -533,6 +666,7 @@ def _messages(box, folder: str = "") -> list[Message]:
                 key=key,
                 seen=seen,
                 issue_done=_issue_done(raw, _html_of(raw)),
+                about=declared(raw),
             ))
         except Exception:
             continue

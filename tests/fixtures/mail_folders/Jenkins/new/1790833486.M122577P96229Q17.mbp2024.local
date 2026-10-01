@@ -3,6 +3,8 @@ To: me@corp.invalid
 Subject: Build failure: deploy-prod #844
 Date: Tue, 08 Sep 2026 17:35:00 -0000
 Message-ID: <ci.deploy-prod.844@ci.corp.invalid>
+X-Jenkins-Job: deploy-prod
+X-Jenkins-Result: FAILURE
 In-Reply-To: <ci.deploy-prod.843@ci.corp.invalid>
 References: <ci.deploy-prod.843@ci.corp.invalid>
 Content-Type: text/plain; charset="utf-8"

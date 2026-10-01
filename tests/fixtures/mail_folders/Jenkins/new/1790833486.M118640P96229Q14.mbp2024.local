@@ -3,6 +3,8 @@ To: me@corp.invalid
 Subject: Build success: deploy-prod #841
 Date: Tue, 08 Sep 2026 16:20:00 -0000
 Message-ID: <ci.deploy-prod.841@ci.corp.invalid>
+X-Jenkins-Job: deploy-prod
+X-Jenkins-Result: SUCCESS
 Content-Type: text/plain; charset="utf-8"
 Content-Transfer-Encoding: 7bit
 MIME-Version: 1.0

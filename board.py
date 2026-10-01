@@ -1060,43 +1060,33 @@ class Board:
         return self.position is Bucket.INBOX
 
     def mail_fold(self, message: Any) -> object | None:
-        """What a message is about, or None where the board cannot tell.
+        """What a message is about, or None where its sender did not say.
 
-        Two things together: the issue its text names in a configured
-        tracker project, and the first address it carries.  Messages
-        agreeing on both are one row.
+        Read from the headers the sender sets for the purpose, never from the
+        message's words.  A notification system knows what it generated a
+        message about and declares it; anything recovered from the text is a
+        guess at a fact the board was handed.
 
-        Both, not either.  In one of the folders read daily, mail about a
-        merge request names the issue it mentions, so several unrelated
-        requests cite one issue -- the key alone merged 24 of 38 groups
-        wrongly.  This matters more than tidiness: reviewing a row files
-        away every message in it, so a wrong fold does not merely misdraw a
-        row, it archives mail nobody looked at.
+        The guess used to be made, and it was unsafe in a way worth keeping
+        written down.  The old rule took an issue key out of the text and
+        paired it with the first address there, the pair being necessary
+        because the key alone merged 24 of 38 groups wrongly: review and build
+        mail quotes an issue it is not about.  Measured on the folders read
+        daily, 234 messages do exactly that, and a declaration only the
+        tracker makes cannot see any of them.  So the pairing is gone with the
+        guess it defended.
 
-        A configured project's key, not a general pattern for
-        letters-dash-digits: that pattern also matches a version or a
-        standard, and the board has one place that knows which projects
-        count.
+        This is also why the fold no longer asks which tracker projects are
+        configured.  It had to, to avoid reading a version number as an issue;
+        a declaration needs no such list, and a board with no tracker
+        configured at all now folds tracker mail correctly.
 
-        A message carrying no address at all is left alone.  The rule is
-        that the first address each carries is the same, and a message with
-        none has no such address to agree about -- and where the rule cannot
-        be shown to hold, not folding is the safe direction.
-
-        This is what `mail.threads` takes as its `fold`: knowing which
-        projects are configured and how to find an address in text belongs
-        here, not in a module whose whole job is reading a maildir.
+        Messages the sender says nothing about answer None, and `mail.threads`
+        groups those by the headers that say which message answers which,
+        exactly as before.
         """
-        config = self.tracker_config
-        if config is None:
-            return None
-        keys = config.keys_in(message.text)
-        if not keys:
-            return None
-        urls = singularity.urls_in(message.text)
-        if not urls:
-            return None
-        return (keys[0], urls[0])
+        declared = getattr(message, "about", None)
+        return declared.row_key if declared is not None else None
 
     def mail_rows(self) -> list[Task]:
         """The mailbox's threads, as rows the board can draw.

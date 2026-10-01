@@ -61,8 +61,13 @@ _seq = 0
 
 
 def deliver(folder, sender, subject, body, *, minutes, thread=None,
-            seen=False, mid=None):
-    """One message into one folder of the flat fixture."""
+            seen=False, mid=None, declares=None):
+    """One message into one folder of the flat fixture.
+
+    `declares` is what the sender states the message is about, as the headers
+    it would really set.  That is what folds messages into rows now, so a
+    fixture without it exercises only the fallback.
+    """
     global _seq
     _seq += 1
     box = mailbox.Maildir(os.path.join(FOLDERS_BUILD, folder), create=True)
@@ -72,6 +77,8 @@ def deliver(folder, sender, subject, body, *, minutes, thread=None,
     m["Subject"] = subject
     m["Date"] = email.utils.format_datetime(BASE + timedelta(minutes=minutes))
     m["Message-ID"] = mid or f"<flat-{_seq}@corp.invalid>"
+    for _name, _value in (declares or {}).items():
+        m[_name] = _value
     if thread:
         m["In-Reply-To"] = thread
         m["References"] = thread
@@ -115,7 +122,8 @@ for i, (what, anchor) in enumerate([("assigned to you", None),
             f"{PROJ}-100 -- {what}.\n{issue_url(f'{PROJ}-100')}\n"
             + (f"{issue_url(f'{PROJ}-100', anchor)}\n" if anchor else ""),
             minutes=10 + i * 20, thread=_parent,
-            mid=f"<yt.{PROJ}-100.{i}@track.corp.invalid>")
+            mid=f"<yt.{PROJ}-100.{i}@track.corp.invalid>",
+            declares={"X-YouTrack-Issue": f"{PROJ}-100"})
     _chain.setdefault(i, _mid)
 
 # -- YouTrack: one issue, three updates, no anchor anywhere --------------
@@ -127,14 +135,16 @@ for i, what in enumerate(["created", "comment added", "resolved"]):
                  f"{PROJ}-200: {what}",
                  f"{PROJ}-200 -- {what}.\n{issue_url(f'{PROJ}-200')}\n",
                  minutes=200 + i * 15, thread=_first,
-                 mid=f"<yt.{PROJ}-200.{i}@track.corp.invalid>")
+                 mid=f"<yt.{PROJ}-200.{i}@track.corp.invalid>",
+                 declares={"X-YouTrack-Issue": f"{PROJ}-200"})
     _first = _first or _m
 
 # -- YouTrack: one already read, so it stays out of the queue ------------
 deliver("YouTrack", "youtrack@track.corp.invalid",
         f"{PROJ}-300: comment added",
         f"{PROJ}-300 -- comment added.\n{issue_url(f'{PROJ}-300')}\n",
-        minutes=300, seen=True, mid=f"<yt.{PROJ}-300.0@track.corp.invalid>")
+        minutes=300, seen=True, mid=f"<yt.{PROJ}-300.0@track.corp.invalid>",
+        declares={"X-YouTrack-Issue": f"{PROJ}-300"})
 
 # -- Gitlab: two merge requests that BOTH cite one issue ----------------
 # The measured trap: same key, different addresses.  Must NOT fold, or
@@ -145,7 +155,13 @@ for i, mr in enumerate((47, 51)):
             f"!{mr} mentions {OTHER}-9.\n"
             f"https://git.corp.invalid/platform/api/-/merge_requests/{mr}\n",
             minutes=400 + i * 10,
-            mid=f"<gl.mr{mr}@git.corp.invalid>")
+            mid=f"<gl.mr{mr}@git.corp.invalid>",
+            # Each declares its own merge request and neither declares an
+            # issue, which is the whole of why they cannot fold together now.
+            # The old rule had to pair the key with an address to keep them
+            # apart; nothing here names an issue the board would read.
+            declares={"X-GitLab-Project-Id": "41",
+                      "X-GitLab-MergeRequest-IID": str(mr)})
 
 # -- Gitlab: a merge request thread, no issue named ---------------------
 # Groups by header, exactly as before this change.
@@ -156,7 +172,9 @@ for i, what in enumerate(["new comment on !63", "!63 was approved"]):
                   f"{what}\n"
                   "https://git.corp.invalid/platform/api/-/merge_requests/63\n",
                   minutes=430 + i * 20, thread=_mr,
-                  mid=f"<gl.mr63.{i}@git.corp.invalid>") or _mr
+                  mid=f"<gl.mr63.{i}@git.corp.invalid>",
+                  declares={"X-GitLab-Project-Id": "41",
+                            "X-GitLab-MergeRequest-IID": "63"}) or _mr
 
 # -- Jenkins: four builds, no issue key, no anchor ----------------------
 # Folds not at all by key; the newest-address rule must survive untouched.
@@ -168,7 +186,13 @@ for i, (num, verdict) in enumerate([(841, "SUCCESS"), (842, "SUCCESS"),
                    f"deploy-prod #{num} is {verdict}.\n"
                    f"https://ci.corp.invalid/job/deploy-prod/{num}/console\n",
                    minutes=500 + i * 25, thread=_job,
-                   mid=f"<ci.deploy-prod.{num}@ci.corp.invalid>") or _job
+                   mid=f"<ci.deploy-prod.{num}@ci.corp.invalid>",
+                   # One job, four verdicts.  Two successes are left out, the
+                   # failure is kept, and UNSTABLE is a word the board does
+                   # not recognise -- so it is shown, which is the safe
+                   # direction and is what this message is here to prove.
+                   declares={"X-Jenkins-Job": "deploy-prod",
+                             "X-Jenkins-Result": verdict}) or _job
 
 # -- Jenkins: a version-like string that is NOT an issue key ------------
 # `UTF-8` and friends match a letters-dash-digits pattern.  Recognition must
@@ -177,7 +201,9 @@ deliver("Jenkins", "jenkins@ci.corp.invalid",
         "Build failure: nightly-e2e #77 (charset UTF-8, ISO-8601 dates)",
         "nightly-e2e #77 FAILURE\n"
         "https://ci.corp.invalid/job/nightly-e2e/77/console\n",
-        minutes=600)
+        minutes=600,
+        declares={"X-Jenkins-Job": "nightly-e2e",
+                  "X-Jenkins-Result": "FAILURE"})
 
 # -- a person, with nothing to open -------------------------------------
 # The spec has a scenario for a row that points at nothing; without a message

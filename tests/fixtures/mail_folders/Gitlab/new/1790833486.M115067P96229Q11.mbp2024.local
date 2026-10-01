@@ -3,6 +3,8 @@ To: me@corp.invalid
 Subject: platform/api !51: mentions ZZB-9
 Date: Tue, 08 Sep 2026 14:50:00 -0000
 Message-ID: <gl.mr51@git.corp.invalid>
+X-GitLab-Project-Id: 41
+X-GitLab-MergeRequest-IID: 51
 Content-Type: text/plain; charset="utf-8"
 Content-Transfer-Encoding: 7bit
 MIME-Version: 1.0

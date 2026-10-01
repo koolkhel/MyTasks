@@ -140,23 +140,29 @@ async def folding():
         # counts -- the line's own wording is checked below, where no
         # tracker is configured.
         check("the counts report rows and messages, not rows twice",
-              (app.shown_mail, app.shown_messages), (9, 19))
+              # Seventeen, not the fixture's nineteen: the build server's two
+              # successes are left out before anything is grouped, so they
+              # count towards no row.
+              (app.shown_mail, app.shown_messages), (9, 17))
 
-    print("nothing folds where no issue is named")
+    print("folding needs no tracker, because the senders declare")
     async with board(tracker_cfg=None) as (app, pilot, path, imap, _o):
-        check("with no project configured, the header threads stand",
-              len(rows(app)), 10)
+        # Nine with no tracker configured, where it used to be the sample's
+        # ten header threads: the old rule could not fold without a list of
+        # projects to recognise keys against, and a declaration needs none.
+        check("with no project configured, the rows still fold",
+              len(rows(app)), 9)
         check("and both queues are named on the status line",
-              ("10 thread(s)" in status(app), "19 message(s)" in status(app)),
+              ("9 thread(s)" in status(app), "17 message(s)" in status(app)),
               (True, True))
     async with board(tracker_cfg=TRK, folders=("Jenkins",)) as (
             app, pilot, path, imap, _o):
-        # The folder whose subjects name no issue of a configured project:
-        # its rows must be what the headers alone give, unchanged.
-        plain = mail.threads(mail.read(mail.Config(path, ("Jenkins",))))
-        check("a folder naming no issues is grouped by its headers alone",
-              sorted(t.raw[main.MAIL_COUNT] for t in rows(app)),
-              sorted(t.count for t in plain))
+        # The build folder declares its job, so it folds by that: one row
+        # per job, holding only what failed.  Two jobs here -- one with four
+        # builds of which two succeeded and are left out, one with a single
+        # failure.
+        check("a build folder folds by its job and keeps only the failures",
+              sorted(t.raw[main.MAIL_COUNT] for t in rows(app)), [1, 2])
         check("and a subject with letters, a dash and digits folds nothing",
               [t.raw[main.MAIL_COUNT] for t in rows(app)
                if "ISO-8601" in (t.raw.get("title") or "")], [1])
@@ -486,7 +492,7 @@ async def stays_gone():
         check("held back by identity, and only those five",
               app.reviewed, set(idents))
         check("nothing else was hidden",
-              sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 14)
+              sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 12)
 
     print("what the mailbox has caught up on is forgotten")
     path = F.copy()
@@ -578,8 +584,8 @@ async def configuration():
               sorted({m.folder for t in rows(app)
                       for m in t.raw[main.MAIL_MESSAGES]}),
               ["Gitlab", "Jenkins"])
-        check("the third folder's eight are not discovered",
-              sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 10)
+        check("the third folder's messages are not discovered",
+              sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 8)
 
     print("an unreadable mailbox is reported once")
     async with board(tracker_cfg=None,
@@ -724,13 +730,15 @@ async def undo_restores_the_flag():
     # sit in one thread, and only a built mailbox can say which messages
     # start read.  Two read, one not, all about one issue, so they fold into
     # a single row and one review covers all three.
-    # The body carries an address, because folding needs the issue key and
-    # the first address to agree -- the key alone merged unrelated mail.
+    # Each declares the issue it is about, which is what folds them.  The
+    # body still carries an address because the row has to have something to
+    # open, not because folding needs one any more.
     LINK = "see https://track.corp.invalid/issue/ZZA-500"
+    SAYS = {"X-YouTrack-Issue": "ZZA-500"}
     path = F.build({"Feed": [
-        ("ZZA-500 first", LINK, {"seen": True}),
-        ("ZZA-500 second", LINK, {"seen": True}),
-        ("ZZA-500 third", LINK, {}),
+        ("ZZA-500 first", LINK, {"seen": True, **SAYS}),
+        ("ZZA-500 second", LINK, {"seen": True, **SAYS}),
+        ("ZZA-500 third", LINK, SAYS),
     ]})
     cfg = mail.Config(path, ("Feed",))
     was = {m.ident: m.seen for m in mail.read(cfg)}
@@ -779,8 +787,9 @@ async def undo_restores_the_flag():
             raise fakemail.refused("refused")
 
     LINK7 = "see https://track.corp.invalid/issue/ZZA-700"
-    path = F.build({"Feed": [("ZZA-700 one", LINK7, {"seen": True}),
-                             ("ZZA-700 two", LINK7, {})]})
+    SAYS7 = {"X-YouTrack-Issue": "ZZA-700"}
+    path = F.build({"Feed": [("ZZA-700 one", LINK7, {"seen": True, **SAYS7}),
+                             ("ZZA-700 two", LINK7, SAYS7)]})
     cfg = mail.Config(path, ("Feed",))
     imap = server_for(path, ("Feed",), fail=refuse_the_second_move)
     async with board(tracker_cfg=TRK, mail_cfg=cfg, imap=imap) as (
@@ -799,8 +808,9 @@ async def undo_restores_the_flag():
 
     print("a thread nobody had read costs one request, not two")
     LINK6 = "see https://track.corp.invalid/issue/ZZA-600"
-    path = F.build({"Feed": [("ZZA-600 only", LINK6, {}),
-                             ("ZZA-600 also", LINK6, {})]})
+    SAYS6 = {"X-YouTrack-Issue": "ZZA-600"}
+    path = F.build({"Feed": [("ZZA-600 only", LINK6, SAYS6),
+                             ("ZZA-600 also", LINK6, SAYS6)]})
     cfg = mail.Config(path, ("Feed",))
     imap = server_for(path, ("Feed",))
     async with board(tracker_cfg=TRK, mail_cfg=cfg, imap=imap) as (

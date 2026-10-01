@@ -3,6 +3,8 @@ To: me@corp.invalid
 Subject: Build unstable: deploy-prod #843
 Date: Tue, 08 Sep 2026 17:10:00 -0000
 Message-ID: <ci.deploy-prod.843@ci.corp.invalid>
+X-Jenkins-Job: deploy-prod
+X-Jenkins-Result: UNSTABLE
 In-Reply-To: <ci.deploy-prod.842@ci.corp.invalid>
 References: <ci.deploy-prod.842@ci.corp.invalid>
 Content-Type: text/plain; charset="utf-8"

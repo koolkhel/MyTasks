@@ -3,6 +3,7 @@ To: me@corp.invalid
 Subject: ZZA-100: state changed
 Date: Tue, 08 Sep 2026 09:30:00 -0000
 Message-ID: <yt.ZZA-100.4@track.corp.invalid>
+X-YouTrack-Issue: ZZA-100
 In-Reply-To: <yt.ZZA-100.3@track.corp.invalid>
 References: <yt.ZZA-100.3@track.corp.invalid>
 Content-Type: text/plain; charset="utf-8"

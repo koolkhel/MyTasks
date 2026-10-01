@@ -2321,9 +2321,19 @@ class TaskApp(App[None]):
         # Filtered before grouping, not after: a row can hold messages from
         # a folder that has caught up and one that has not, and dropping the
         # whole row would hide mail that is still there.
+        #
+        # The second filter is the build server's own verdict.  A build that
+        # passed asks nothing of anybody and a stopped one is somebody
+        # withdrawing a job they started, so neither earns a line in a queue
+        # -- and both say so themselves, so no judgement is being made here.
+        # Before grouping for the same reason as the first: a message left
+        # out must not count towards a row, and a job with nothing but these
+        # must end up with no row at all.
         filed = self.reviewed
-        found = mail.threads([m for m in raw if m.ident not in filed],
-                             fold=self.mail_fold)
+        wanted = [m for m in raw
+                  if m.ident not in filed
+                  and (m.about is None or m.about.is_news)]
+        found = mail.threads(wanted, fold=self.mail_fold)
         self.call_from_thread(self.mail_loaded, found, held)
 
 
