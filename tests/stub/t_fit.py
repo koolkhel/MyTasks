@@ -55,18 +55,29 @@ async def board(tasks, term=(120, 30), projects=None, issues=()):
 async def run():
     print("1.1/1.2 the widths, and whether the table fits")
     app, table, rows, status, widths, fit = await board([t("a", SHORT)])
-    chk("the project column is 11", widths.get("Project") == 11, str(widths))
+    # Twenty-four: what the longest project name in use needs.  It was eleven
+    # and cut that name to a stump; the title gives up the room.
+    chk("the project column is 24", widths.get("Project") == 24, str(widths))
+    want = 120 - M._ROW_OVERHEAD - M._SCROLLBAR_ROOM
     chk("the title column takes what is left",
-        widths.get("Task") == 120 - M._ROW_OVERHEAD, f"{widths.get('Task')} vs {120-M._ROW_OVERHEAD}")
-    chk("the overhead is the measured 35", M._ROW_OVERHEAD == 35, str(M._ROW_OVERHEAD))
+        widths.get("Task") == want, f"{widths.get('Task')} vs {want}")
+    chk("the overhead is the measured 48", M._ROW_OVERHEAD == 48, str(M._ROW_OVERHEAD))
+    # The room the table keeps for its own scrollbar, which the fit must take
+    # off before the title gets the rest.  Pinned against what the widget
+    # actually reserves: the board laid out two cells more than could be shown
+    # for as long as this went uncounted, and a framework that changes the
+    # number must fail here rather than clip every row in silence.
+    reserved = table.styles.scrollbar_size_vertical
+    chk("the reserved room matches what the table keeps",
+        M._SCROLLBAR_ROOM == reserved, f"constant {M._SCROLLBAR_ROOM} vs widget {reserved}")
 
     print("\n     ...at a range of widths, does the table fit the viewport?")
     for term_w in (50, 60, 65, 80, 120, 160):
         app2, tbl, _, _st, _w, fit = await board([t("a", LONG)], term=(term_w, 30))
         virt, view = fit
-        want = max(M._TITLE_MIN, term_w - M._ROW_OVERHEAD)
+        want = max(M._TITLE_MIN, term_w - M._ROW_OVERHEAD - M._SCROLLBAR_ROOM)
         fits = virt <= view
-        expect_fit = term_w >= M._TITLE_MIN + M._ROW_OVERHEAD
+        expect_fit = term_w >= M._TITLE_MIN + M._ROW_OVERHEAD + M._SCROLLBAR_ROOM
         chk(f"terminal {term_w}: title {want}, {'fits' if fits else 'scrolls'}",
             fits == expect_fit, f"wants {virt}, has {view}")
 
@@ -125,12 +136,15 @@ async def run():
         app.load()
         for _ in range(150): await pilot.pause()
         narrow = app.title_width
-        chk("at 80 the title gets 45", narrow == 45, str(narrow))
+        # Thirty, the minimum: at eighty columns the wider project column and
+        # the scrollbar's room leave less than that, so the list scrolls.
+        chk("at 80 the title gets its minimum", narrow == M._TITLE_MIN, str(narrow))
         calls_before = len([c for c in stub.calls if c[0] == "tasks_at"])
         await pilot.resize_terminal(160, 30)
         for _ in range(60): await pilot.pause()
         wide = app.title_width
-        chk("widening gives the title more room", wide == 125, str(wide))
+        chk("widening gives the title more room",
+            wide == 160 - M._ROW_OVERHEAD - M._SCROLLBAR_ROOM, str(wide))
         chk("and a title that now fits is shown whole, with no mark",
             not app.row_for(app.tasks[0])[3].plain.endswith(M._ELLIPSIS),
             repr(app.row_for(app.tasks[0])[3].plain[-14:]))
@@ -159,8 +173,94 @@ async def run():
 #: The parts this suite is made of, in the order they run.  One list, read
 #: by the runner to report and select them one at a time, and by the file
 #: itself when it is run directly -- so both ways run the same parts.
+async def drawn_rows_fit_the_room():
+    """2.2/2.4 -- what is drawn, not what was computed.
+
+    The arithmetic was right and the rows were still cut, because the width it
+    was right about was not the width the table draws in.  So these read the
+    screen back rather than recomputing what the code under test computes: a
+    check that did the same sum would have agreed with the bug.
+    """
+    print("\n2.2 a drawn row ends inside the room the table has")
+    NAME = "P" * 24
+    for term_w in (104, 120, 160):
+        for rows in (3, 60):
+            tasks = [t(f"x{i}", SHORT, project="P-1") for i in range(rows)]
+            stub = StubClient(tasks, reference=NOW)
+            app = TaskApp(TODAY)
+            async with app.run_test(size=(term_w, 20)) as pilot:
+                app.client = stub; app.projects = {"P-1": NAME}
+                app.green_tag = None; app.green_checked = True
+                app.tracker_config = None
+                app.load()
+                for _ in range(80): await pilot.pause()
+                table = app.query_one(DataTable)
+                room = table.size.width - table.scrollbar_size_vertical
+                laid = sum(c.width for c in table.columns.values()) + 2 * len(table.columns)
+                lines = ["".join(seg.text for seg in strip)
+                         for strip in app.screen._compositor.render_strips()[3:8]]
+                whole = any(NAME in line for line in lines)
+            chk(f"{term_w} cols, {rows} rows: the columns fit the room",
+                laid <= room, f"laid {laid} into {room}")
+            chk(f"{term_w} cols, {rows} rows: a full-width name survives whole",
+                whole, f"lines ended {[len(l.rstrip()) for l in lines]}")
+
+    print("\n2.4 the fit does not depend on whether the list is scrolling")
+    widths = {}
+    for rows in (3, 60):
+        _app, _tbl, _rows, _st, w, _fit = await board(
+            [t(f"y{i}", SHORT) for i in range(rows)], term=(120, 20))
+        widths[rows] = w
+    chk("the same columns either way", widths[3] == widths[60],
+        f"{widths[3]} vs {widths[60]}")
+
+
+async def the_project_column_holds_its_names():
+    """3.1-3.4 -- the column that names a project, and who pays for it."""
+    print("\n3.1 the title is the column that gives up the room")
+    _app, _tbl, _rows, _st, w, _fit = await board([t("a", SHORT)], term=(120, 30))
+    chk("project 24, when 11, marks 1 and 2 -- only the title moved",
+        (w.get("Project"), w.get("When")) == (24, 11), str(w))
+    chk("and the title is what the rest leave",
+        w.get("Task") == 120 - M._ROW_OVERHEAD - M._SCROLLBAR_ROOM, str(w))
+
+    print("\n3.2 names of the lengths an account really holds")
+    # Display cells, not characters: every name on the account this was
+    # written for opens with an emoji, which costs two cells before a letter.
+    for name, fits in (("\U0001F9E0 \u0420\u0430\u0431\u043e\u0442\u0430", True),
+                       ("P" * 24, True),
+                       ("P" * 30, False)):
+        _a, _t, rows, _s, _w, _f = await board(
+            [t("a", SHORT, project="P-1")], term=(120, 30), projects={"P-1": name})
+        cell = rows[0][1][4].plain.strip()
+        if fits:
+            chk(f"a name of {len(name)} chars is shown whole", cell == name, repr(cell))
+        else:
+            chk("a name too long is shortened", cell != name, repr(cell))
+            chk("and says that it was", cell.endswith("\u2026"), repr(cell))
+
+    print("\n3.3 the width does not follow what is on screen")
+    short = await board([t("a", SHORT, project="P-1")], term=(120, 30),
+                        projects={"P-1": "\u041a\u043b\u0443\u0431"})
+    longer = await board([t("a", SHORT, project="P-1")], term=(120, 30),
+                         projects={"P-1": "P" * 24})
+    chk("a day of short names and a day of long ones fit alike",
+        short[4] == longer[4], f"{short[4]} vs {longer[4]}")
+
+    print("\n3.4 every kind of row shortens that column to the same width")
+    from board import _PROJECT_WIDTH
+    chk("one constant, shared", _PROJECT_WIDTH == 24, str(_PROJECT_WIDTH))
+    import board as B, inspect
+    src = inspect.getsource(B)
+    chk("and every column that names a source uses it",
+        src.count("_PROJECT_WIDTH,") + src.count("_PROJECT_WIDTH)") >= 4,
+        f"{src.count('_PROJECT_WIDTH')} mentions")
+
+
 PARTS = (
     run,
+    drawn_rows_fit_the_room,
+    the_project_column_holds_its_names,
 )
 
 if __name__ == "__main__":

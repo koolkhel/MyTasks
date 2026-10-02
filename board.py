@@ -169,10 +169,23 @@ _WHEN_WIDTH = 11
 #: marking a run of rows pays that cost once per press.  What is withheld is
 #: reported rather than silently dropped.
 ARCHIVE_ROWS = 500
-#: How wide the column naming a task's project is.  Eleven cells hold the
-#: names in use with room to spare; it was twenty-two, and the eleven given
-#: back go to the title, which is the column that runs out of room.
-_PROJECT_WIDTH = 11
+#: How wide the column naming a task's project is -- and an event's calendar,
+#: a tracker row's project and a mail row's correspondent, which share it.
+#:
+#: Twenty-four, because that is what the longest name in use needs.  It was
+#: eleven, which cut the longest of three to a stump, and the title gives up
+#: the room: it is the only column whose content has no natural length, it has
+#: the most to spare at any usable width, and a title that ends early still
+#: reads where a label does not.  Two names differing only past the cut are
+#: the same name on screen, and a person cannot tell which row they are on.
+#:
+#: Fixed rather than measured from what is on screen.  A column sized to its
+#: contents would change width as a person walks between days, and the title
+#: beside it with it, moving the rows under the hand moving through them --
+#: the objection the detail pane's fixed height is built on.  If the names
+#: ever grow long enough that this wastes real room on an ordinary day, an
+#: elastic column capped at some width is where to start.
+_PROJECT_WIDTH = 24
 
 
 def _state_label(state: str) -> str:

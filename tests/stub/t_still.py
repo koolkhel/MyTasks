@@ -249,7 +249,15 @@ async def a_new_view_begins():
                              for i in range(60)])
     async with app.run_test(size=size) as pilot:
         await settle(pilot, 18)
-        await park(app, pilot, 40, 6)
+        # Row 30 rather than 40, so the scroll this asks for is reachable
+        # whatever the table's height.  At 40 it was not: the columns used to
+        # overflow by two cells, the table showed a horizontal scrollbar and
+        # lost a row of height to it, and the scroll clamped one line short.
+        # Now that the columns fit, the table is a row taller and the old
+        # position is past the end.  What this part is about is that stepping
+        # between days starts each one at the top, and any parked position
+        # serves for that.
+        await park(app, pilot, 30, 6)
         check("parked part way down today", line(app), 6)
         await pilot.press("l")
         await settle(pilot, 24)

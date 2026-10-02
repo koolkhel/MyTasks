@@ -198,6 +198,21 @@ WORKED_TICK_SECONDS = 5
 #: derived: the padding is not declared anywhere, and assuming it would put
 #: the title a few cells too wide and leave the table scrolling after all.
 _ROW_OVERHEAD = 1 + 2 + _WHEN_WIDTH + _PROJECT_WIDTH + 2 * 5
+#: What the list keeps for a scrollbar of its own, used where the table cannot
+#: be asked -- the columns are declared before the table has a size.
+#:
+#: This is the whole of the bug this constant was added for.  The fit was
+#: computed against the application's width, the table draws in that width
+#: less whatever it reserves here, and so the board laid out more cells than
+#: could be shown and the rightmost column lost the difference.  Silently, at
+#: every width, for as long as the columns have been fitted at all: a row came
+#: out two cells short and a project name arrived a character shy of itself.
+#:
+#: Two is this widget's answer today rather than a fact about terminals, so
+#: the width below asks the table when it can and a check pins this against
+#: what the table reports.  A framework that changes it fails a suite instead
+#: of quietly clipping rows again.
+_SCROLLBAR_ROOM = 2
 #: The narrowest the title column is allowed to be.  Below this a title stops
 #: being recognisable, so the board keeps this much and lets the list scroll
 #: instead -- which is what it did at every width before.
@@ -3542,7 +3557,24 @@ class TaskApp(App[None]):
         # width it is about to stop having, and the rows come out a size
         # behind.  The table fills the app's width -- there is nothing
         # beside it -- which a test pins so this cannot drift unnoticed.
-        return max(_TITLE_MIN, self.size.width - _ROW_OVERHEAD)
+        #
+        # The room the table keeps for its own scrollbar comes off before the
+        # title takes the rest.
+        #
+        # From the constant rather than from the table, which was tried and
+        # does not work: the table answers 0 until its scrollbar is actually
+        # shown, and the columns are fitted before that -- so the first fit
+        # came out two cells too wide and only a later one was right.  A
+        # width that depended on when it was asked is the fault this is
+        # fixing, in a new disguise.
+        #
+        # Taken whether or not the scrollbar is being shown, deliberately: a
+        # fit that changed as the list grew past the window would move every
+        # column under the hand of somebody adding a task.  `_SCROLLBAR_ROOM`
+        # is pinned against what the widget reserves, so the number cannot
+        # drift away from the framework unnoticed.
+        return max(_TITLE_MIN,
+                   self.size.width - _ROW_OVERHEAD - _SCROLLBAR_ROOM)
 
     # -- what is drawn ----------------------------------------------------
     # Deciding what a row says is `board.Board`'s work; these are how the
