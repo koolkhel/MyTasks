@@ -95,7 +95,7 @@ async def run():
     print("\n2.2 shortening keeps a title readable")
     linked = "see [link='https://example.com/a-very-long-address']this page[/link] " + LONG
     app, table, rows, status, widths, fit = await board([t("a", "x")])
-    cut = app.shortened(linked, 40)
+    cut = app.shortened(Text.from_markup(linked), 40)
     chk("the link survives the cut", any("link" in str(sp.style) for sp in cut.spans),
         str([(s.start, s.end, str(s.style)[:26]) for s in cut.spans]))
     chk("the address is kept whole in the style",

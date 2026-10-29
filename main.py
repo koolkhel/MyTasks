@@ -33,7 +33,6 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.markup import escape
 from textual.message import Message
 from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
@@ -444,9 +443,9 @@ def from_markdown(line: str) -> "tuple[str, bool] | None":
 class TaskTable(DataTable):
     """The board's list, which can draw a bar on a row that is not the cursor.
 
-    The table draws a cell in two layers: a style under the cell's own markup
+    The table draws a cell in two layers: a style under the cell's own styling
     and a style over it.  A row's background comes from the first, so the
-    cell's markup paints on top of it; the selected row's colours come from
+    cell's styling paints on top of it; the selected row's colours come from
     the second, which is why they replace whatever the cell asked for.  That
     second layer is built from the cursor and hover flags and from nothing
     else, so there is no way to put an arbitrary row's style there.
@@ -639,7 +638,7 @@ class TaskInput(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self.prompt, id="dialog-title")
+            yield Label(Content(self.prompt), id="dialog-title")
             yield TitleInput(value=self.value, id="dialog-input")
             yield Label("enter to confirm · esc to cancel", id="dialog-hint")
 
@@ -750,7 +749,7 @@ class NoteInput(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self.title_text, id="dialog-title")
+            yield Label(Content(self.title_text), id="dialog-title")
             yield NoteArea(self.value, soft_wrap=True, id="dialog-note")
             yield Label(
                 "ctrl+s or f2 to save · esc to discard · empty clears the note",
@@ -791,14 +790,14 @@ class LinkPicker(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self.title_text, id="dialog-title")
+            yield Label(Content(self.title_text), id="dialog-title")
             yield OptionList(
                 # Numbered by position, not keyed: a task can hold more
                 # links than there are comfortable keys, and the list moves
                 # by arrows anyway.
-                # Escaped: a label comes from a task's title, its note or
-                # a message, and the list draws its options as markup.
-                *(Option(escape(shown), id=str(i))
+                # As text: a label comes from a task's title, its note or
+                # a message, and an option given a string is read as markup.
+                *(Option(Content(shown), id=str(i))
                   for i, (shown, _url) in enumerate(self.choices)),
                 id="link-list",
             )
@@ -829,7 +828,7 @@ class Confirm(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self.question, id="dialog-title")
+            yield Label(Content(self.question), id="dialog-title")
             yield Label("y to confirm · esc to cancel", id="dialog-hint")
 
     def action_yes(self) -> None:
@@ -866,7 +865,7 @@ class DatePicker(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self.title_text, id="dialog-title")
+            yield Label(Content(self.title_text), id="dialog-title")
             lines = []
             for key, name, label in self.CHOICES:
                 when = ""
@@ -904,7 +903,7 @@ class ProjectPicker(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self.title_text, id="dialog-title")
+            yield Label(Content(self.title_text), id="dialog-title")
             here = self.projects.get(self.current) if self.current else None
             yield Label(
                 f"now in: {here}" if here else "now in: no project",
@@ -914,8 +913,9 @@ class ProjectPicker(ModalScreen[str]):
                 # The task's own project is marked rather than left out, so
                 # the list always reads the same way and choosing it again
                 # is harmless.
-                # The name is the store's, and the list draws it as markup.
-                Option(f"{'* ' if pid == self.current else '  '}{escape(title)}",
+                # As text: the name is the store's, and an option given a
+                # string is read as markup.
+                Option(Content(f"{'* ' if pid == self.current else '  '}{title}"),
                        id=pid)
                 for pid, title in sorted(self.projects.items(), key=lambda kv: kv[1])
             ]
@@ -965,7 +965,7 @@ class TaskFocus(ModalScreen[None]):
         task = self.shown_task
         with Vertical(id="dialog"):
             yield Label("Now", id="dialog-title")
-            yield Static(escape(task.display_title), id="focus-title")
+            yield Static(Content(task.display_title), id="focus-title")
             # Only the lines the task actually has something for, so a bare
             # task does not render empty labels or stray separators.
             if board.Board.is_tracker(task):
@@ -986,17 +986,19 @@ class TaskFocus(ModalScreen[None]):
                 facts.append("recurring")
             if task.pinned:
                 facts.append("pinned")
-            yield Static("  ·  ".join(facts), id="focus-facts")
+            # Text rather than markup: a project's name and an issue's state
+            # and versions are somebody else's words.
+            yield Static(Content("  ·  ".join(facts)), id="focus-facts")
             yield Static(self.worked_line(), id="focus-since")
             note = task.note_text
             if note:
-                # Escaped, as the pane below the list escapes it and for the
-                # same reason: a note holding square brackets is a note
-                # holding square brackets, and the two places a note is
-                # shown must not disagree about that.  This card did not
-                # escape it until the pane was given a fixed height, which
-                # is when the disagreement was noticed.
-                yield Static(escape(note), id="focus-note")
+                # Text rather than markup, as in the pane below the list and
+                # for the same reason: a note holding square brackets is a
+                # note holding square brackets, and the two places a note is
+                # shown must not disagree about that.  Escaping it was not
+                # enough -- it guards only the brackets Rich reads as a tag,
+                # and `[--opt=A-B]` in a note ended the session.
+                yield Static(Content(note), id="focus-note")
             yield Label("esc to close", id="dialog-hint")
 
     def worked_line(self) -> str:
@@ -3642,23 +3644,23 @@ class TaskApp(App[None]):
         return board.Board.is_event(task)
 
     @staticmethod
-    def shortened(markup: str, width: int) -> Text:
+    def shortened(text: Text, width: int) -> Text:
         """Cell text cut to `width`, saying so, with its styling intact."""
-        return board.Board.shortened(markup, width)
+        return board.Board.shortened(text, width)
 
     @staticmethod
-    def _markup_title(task: Task) -> str:
-        """The task's title as markup: its own characters escaped, link marked."""
-        return board.Board._markup_title(task)
+    def _title_text(task: Task) -> Text:
+        """The task's title as text, its link a style on the words it stands for."""
+        return board.Board._title_text(task)
 
 
     @property
     def late_colour(self) -> str:
         """The colour a past-due title is drawn in, resolved from the theme.
 
-        Table cells are rendered with Rich markup, which does not understand
-        Textual's `$name` variables, so the value has to be resolved here and
-        embedded literally.
+        Table cells are drawn by Rich, which does not understand Textual's
+        `$name` variables, so the value has to be resolved here and given to
+        the cell as a style.
 
         `text-error` rather than `text-warning`: in the bundled themes
         `warning` and `text-warning` are the *same values* as `accent` and
@@ -3746,13 +3748,14 @@ class TaskApp(App[None]):
         A search matching nothing empties the list, and the bar is then the
         only thing on screen with anything to say.
 
-        The term is escaped because it is the first thing a person types
-        that this bar has ever had to draw, and the bar renders what it is
-        given as markup: a search for `[` would otherwise open a tag.
+        The term is the first thing a person types that this bar has ever
+        had to draw, which is why the bar is drawn as text rather than
+        markup (`with_mark`): a search for `[` would otherwise open a tag,
+        and one for `[--opt=A-B]` would end the session.
         """
         if not self.searching:
             return []
-        return [f'search "{escape(self.searching)}" · esc clears']
+        return [f'search "{self.searching}" · esc clears']
 
     def update_daybar(self) -> None:
         bar = self.query_one("#daybar", Static)
@@ -3790,7 +3793,7 @@ class TaskApp(App[None]):
                  *self.work_note(), *self.search_note()]
         bar.update(self.with_mark("  ·  ".join(parts), bar))
 
-    def with_mark(self, said: str, bar: Static) -> str:
+    def with_mark(self, said: str, bar: Static) -> Content:
         """The bar's text with the mailbox mark pushed to its right edge.
 
         Shown in every view: mailbox work outstands whichever view is being
@@ -3802,12 +3805,17 @@ class TaskApp(App[None]):
         for one cell.  Where the terminal is too narrow for both, the text
         wins and the mark is dropped: a truncated day bar reads as a fault,
         where a missing mark reads as nothing at all.
+
+        Returned as text, never markup: the bar quotes the search term, which
+        is whatever a person typed.  Measured in cells, which is what the
+        terminal gives it room in.
         """
         mark = self.mail_mark()
         room = bar.content_size.width or bar.size.width
-        if not room or len(said) + 2 > room:
-            return said
-        return said + " " * (room - len(said) - len(mark)) + mark
+        width = Content(said).cell_length
+        if not room or width + 2 > room:
+            return Content(said)
+        return Content(said + " " * (room - width - len(mark)) + mark)
 
     def update_detail(self) -> None:
         task = self.selected
@@ -3841,15 +3849,17 @@ class TaskApp(App[None]):
             bits.append(f"deadline: {deadline.astimezone(self.tz):%d %b %H:%M}")
         # A task can now have no flags at all, so drop the empty halves
         # rather than joining them into a stray blank line.
-        # This area renders its text as markup, so everything drawn in it is
-        # escaped: a calendar description because somebody else wrote it, and
+        # Drawn as text, never parsed as markup: a calendar description and
+        # an issue's state and versions because somebody else wrote them, and
         # a task's own note because a person who has just typed square
         # brackets and watched them vanish has been told the board destroyed
         # their work -- while the store holds it perfectly, which leaves them
-        # nothing to find when they go looking.
-        note = escape(task.note_text)
+        # nothing to find when they go looking.  Escaping was not enough: it
+        # guards only the brackets Rich reads as a tag, and a mail quoting
+        # `[--opt=A-B]` ended the session every time its row was selected.
+        note = task.note_text
         sections = [part for part in ("  ·  ".join(bits), note) if part]
-        detail.update("\n".join(sections))
+        detail.update(Content("\n".join(sections)))
         self.rewound(task.id)
 
     def rewound(self, task_id: str) -> None:
@@ -3884,13 +3894,14 @@ class TaskApp(App[None]):
         if status is None:
             return
         status.set_class(error, "error")
-        # Escaped here, once, rather than at each of the calls that reach
-        # this: the board's messages quote a task's title, and a title
+        # Drawn as text here, once, rather than at each of the calls that
+        # reach this: the board's messages quote a task's title, and a title
         # holding square brackets lost them on screen while remaining whole
-        # in the store.  Nothing that arrives here is markup -- every caller
-        # passes a sentence -- and the error colour is a CSS class rather
-        # than markup, so escaping the message takes nothing away.
-        status.update(escape(message))
+        # in the store -- or, shaped like `[--opt=A-B]`, ended the session.
+        # Nothing that arrives here is markup -- every caller passes a
+        # sentence -- and the error colour is a CSS class rather than markup,
+        # so drawing the message as text takes nothing away.
+        status.update(Content(message))
 
     @on(DataTable.RowHighlighted)
     def row_changed(self, event: DataTable.RowHighlighted) -> None:
@@ -4656,7 +4667,7 @@ class TaskApp(App[None]):
         # and asking per row is the twenty-questions problem the board's own
         # rule about confirmations warns against.
         about = (f"Date for {len(rows)} marked task(s)" if many
-                 else f"Date for “{escape(rows[0].title)}”")
+                 else f"Date for “{rows[0].title}”")
         choice = await self.push_screen_wait(DatePicker(about, today))
         if choice is None:
             return
@@ -5061,7 +5072,7 @@ class TaskApp(App[None]):
             return
         was = rows[0].project_id if not many else None
         about = (f"Project for {len(rows)} marked task(s)" if many
-                 else f"Project for “{escape(rows[0].title)}”")
+                 else f"Project for “{rows[0].title}”")
         chosen = await self.push_screen_wait(
             ProjectPicker(about, self.projects, was)
         )
@@ -5077,10 +5088,10 @@ class TaskApp(App[None]):
         if unfiled:
             question = (
                 f"File {len(unfiled)} task(s) with no project under "
-                f"{escape(self.projects[chosen])}? It cannot be un-filed here."
+                f"{self.projects[chosen]}? It cannot be un-filed here."
                 if many else
-                f"File “{escape(rows[0].title)}” under "
-                f"{escape(self.projects[chosen])}? It cannot be un-filed here."
+                f"File “{rows[0].title}” under "
+                f"{self.projects[chosen]}? It cannot be un-filed here."
             )
             if not await self.push_screen_wait(Confirm(question)):
                 return
@@ -5254,7 +5265,7 @@ class TaskApp(App[None]):
             return
         before = task.note_text
         written = await self.push_screen_wait(
-            NoteInput(f"Note for “{escape(task.title)}”", before)
+            NoteInput(f"Note for “{task.title}”", before)
         )
         if written is None:
             return
@@ -5296,7 +5307,7 @@ class TaskApp(App[None]):
                       if self.marks_off_screen() else "")
             question = f"Delete {len(rows)} marked task(s) for good?{unseen}"
         else:
-            question = f"Delete “{escape(rows[0].title)}” for good?"
+            question = f"Delete “{rows[0].title}” for good?"
         if not await self.push_screen_wait(Confirm(question)):
             return
         client = self.client
@@ -5368,7 +5379,7 @@ class TaskApp(App[None]):
             self.hand_over(choices[0][1] if choices else None, task)
             return
         chosen = await self.push_screen_wait(
-            LinkPicker(f"Open from “{escape(task.title)}”", choices)
+            LinkPicker(f"Open from “{task.title}”", choices)
         )
         if chosen:
             self.hand_over(chosen, task)
@@ -5419,11 +5430,10 @@ class TaskApp(App[None]):
         key = task.raw.get(TRACKER_KEY) or ""
         versions = tuple(task.raw.get(TRACKER_VERSIONS) or ())
         version = await self.push_screen_wait(
-            # Escaped: the prompt is drawn as markup, and while an issue key
-            # has never yet held a bracket, the rule this board settled is
-            # that foreign text is escaped wherever it is drawn rather than
-            # wherever somebody expects trouble.
-            TaskInput(f"Work on {escape(key)} at which version?",
+            # The key goes in as written: the prompt draws its question as
+            # text, not markup, so foreign text is safe wherever it is
+            # quoted rather than wherever somebody expects trouble.
+            TaskInput(f"Work on {key} at which version?",
                       versions[0] if versions else "")
         )
         if not version:

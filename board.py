@@ -28,8 +28,8 @@ import email.utils
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
+from rich.style import Style
 from rich.text import Text
-from textual.markup import escape
 
 import singularity
 from singularity import (ARCHIVE, CANCELLED, CHECKED, EMPTY, SERIES,
@@ -699,24 +699,24 @@ class Board:
         return bool(task is not None and task.raw.get(TRACKER_MARK))
 
     @staticmethod
-    def _markup_title(task: Task) -> str:
-        """The task's title as markup: its own characters escaped, link marked.
+    def _title_text(task: Task) -> Text:
+        """The task's title as text, its link a style on the words it stands for.
 
-        Escaping happens before anything is added, and only to the task's own
-        text.  The other order would neuter the span just inserted, and
-        neither order would let a title's own brackets survive -- titles are
-        already rendered as markup, so `Plan [urgent] thing` would otherwise
-        lose the bracketed part.
+        Text rather than markup, so that nothing in a title is ever read as
+        styling.  Escaping was tried first and is not enough: it guards only
+        the brackets one parser reads as a tag, and a title is drawn by more
+        than one.  `Plan [urgent] thing` survived it; `[A]` and a trailing
+        backslash did not.
 
-        The address is quoted because Textual requires it: `[link=https://x]`
-        raises a markup error, `[link='https://x']` does not.
+        The link is placed by position in the words a person reads, so the
+        title itself never has to be rewritten to carry it.
         """
-        text = escape(task.display_title)
+        text = Text(task.display_title)
         url, shown = task.link, task.link_text
         if url and shown:
-            marked = escape(shown)
-            if marked in text:
-                text = text.replace(marked, f"[link='{url}']{marked}[/link]", 1)
+            start = text.plain.find(shown)
+            if start >= 0:
+                text.stylize(Style(link=url), start, start + len(shown))
         return text
 
     def is_green(self, task: Task | None) -> bool:
@@ -728,15 +728,14 @@ class Board:
         return task is not None and task.has_tag(self.green_tag)
 
     @staticmethod
-    def shortened(markup: str, width: int) -> Text:
+    def shortened(text: Text, width: int) -> Text:
         """Cell text cut to `width`, saying so, with its styling intact.
 
-        Built as text that carries its own styling rather than as markup,
-        because the cut has to fall in the words and not in the middle of a
-        link.  The column would cut it too, but silently -- the whole point
-        is that a shortened title looks shortened.
+        Text that carries its own styling rather than markup, because the
+        cut has to fall in the words and not in the middle of a link.  The
+        column would cut it too, but silently -- the whole point is that a
+        shortened title looks shortened.
         """
-        text = Text.from_markup(markup)
         if len(text) > width:
             text.truncate(width, overflow="ellipsis")
         return text
@@ -773,9 +772,9 @@ class Board:
                                  task.raw.get(TRACKER_PRIORITY_VALUE) or ""),
                 self.marked_cell(task, TRACKER_ROW_MARK),
                 _state_label(task.raw.get(TRACKER_STATE) or ""),
-                self.shortened(escape(task.raw.get("title") or ""), self.title_width),
+                self.shortened(Text(task.raw.get("title") or ""), self.title_width),
                 self.shortened(
-                    f"[dim]{escape(task.raw.get(TRACKER_PROJECT) or '')}[/dim]",
+                    Text(task.raw.get(TRACKER_PROJECT) or "", style="dim"),
                     _PROJECT_WIDTH,
                 ),
             )
@@ -785,9 +784,9 @@ class Board:
             # behind the thread goes with the subject, being about the
             # subject rather than a column of its own.
             count = task.raw.get(MAIL_COUNT) or 1
-            subject = escape(task.raw.get("title") or "")
+            subject = Text(task.raw.get("title") or "")
             if count > 1:
-                subject = f"{subject} [dim]({count})[/dim]"
+                subject.append(f" ({count})", style="dim")
             if task.raw.get(MAIL_DONE):
                 # Struck, which is how the board already draws a task that is
                 # finished and how the notification itself draws the issue's
@@ -797,15 +796,15 @@ class Board:
                 # The dimming goes while the row is marked, for the reason
                 # the same drop is made on a task below: dimmed text on the
                 # bar cannot be read.  The strike stays, being a style.
-                subject = (f"[strike]{subject}[/]" if task.id in self.marked
-                           else f"[strike dim]{subject}[/]")
+                subject.stylize("strike" if task.id in self.marked
+                                else "strike dim")
             return (
                 "",
                 self.marked_cell(task, MAIL_ROW_MARK),
                 self._mail_when(task.raw.get(MAIL_WHEN) or 0),
                 self.shortened(subject, self.title_width),
                 self.shortened(
-                    f"[dim]{escape(_mail_who(task.raw.get(MAIL_SENDER) or ''))}[/dim]",
+                    Text(_mail_who(task.raw.get(MAIL_SENDER) or ""), style="dim"),
                     _PROJECT_WIDTH,
                 ),
             )
@@ -822,25 +821,24 @@ class Board:
             # survives being the selected row.  Not struck out: nothing about
             # an event was completed.
             over = self.has_ended(task)
-            name = escape(task.raw.get("title") or "")
+            name = Text(task.raw.get("title") or "")
+            if over and task.id not in self.marked:
+                name.stylize("dim")
             return (
                 "",
                 self.marked_cell(task, EVENT_ROW_MARK),
                 _event_label(task.raw.get(EVENT_MINUTES)),
+                self.shortened(name, self.title_width),
                 self.shortened(
-                    f"[dim]{name}[/dim]" if over and task.id not in self.marked
-                    else name,
-                    self.title_width),
-                self.shortened(
-                    f"[dim]{escape(task.raw.get(EVENT_CALENDAR) or '')}[/dim]",
+                    Text(task.raw.get(EVENT_CALENDAR) or "", style="dim"),
                     _PROJECT_WIDTH,
                 ),
             )
-        title = self._markup_title(task)
+        title = self._title_text(task)
         if task.recurring:
-            title = f"↻ {title}"
+            title = Text.assemble("↻ ", title)
         if task.is_note:
-            title = f"≡ {title}"
+            title = Text.assemble("≡ ", title)
         late = task.past_due_since(self.reference, self.tz) if self.reference else None
         when = (
             # In the archive the column carries the date the store archived
@@ -873,16 +871,16 @@ class Board:
         # legible on the bar as off it.
         marked = task.id in self.marked
         if task.done or task.cancelled:
-            title = f"[strike]{title}[/]" if marked else f"[strike dim]{title}[/]"
+            title.stylize("strike" if marked else "strike dim")
         elif late and not marked:
-            title = f"[{self.late_colour}]{title}[/]"
+            title.stylize(self.late_colour)
         project = self.projects.get(task.project_id or "", "")
         return (
             mark,
             self.marked_cell(task, MARKS[task.checked]),
             when,
             self.shortened(title, self.title_width),
-            self.shortened(f"[dim]{project}[/dim]", _PROJECT_WIDTH) if project else "",
+            self.shortened(Text(project, style="dim"), _PROJECT_WIDTH) if project else "",
         )
 
     def event_rows(self) -> list[Task]:
@@ -1411,14 +1409,8 @@ class Board:
         gains ` (3)` for the messages folded behind it, and `shortened` cuts
         it to the width of the column.  Searching what is drawn would mean a
         search for a number matching thread counts, and a long subject
-        findable only by its first few words.
-
-        A third thing happens and then unhappens, which is the trap: the
-        cell is built as markup, so a `[` is escaped to `\\[` -- and
-        `shortened` then parses that markup back into text, leaving the
-        bracket as itself.  Matching the half-built markup string would
-        therefore break a search for a bracket while the finished cell looks
-        innocent.  Taking the title from the row settles all three.
+        findable only by its first few words.  Taking the title from the
+        row settles both.
 
         One function, read by the search alone, so that what is drawn and
         what is searched cannot drift apart as the row format changes.

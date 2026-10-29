@@ -411,7 +411,7 @@ async def the_cell():
                 # Not `bar`: this suite has a module-level `bar(app)` helper,
                 # and a local of that name shadows it for the whole function.
                 widget = app.query_one("#daybar", Static)
-                got = app.with_mark(said, widget).rstrip()
+                got = app.with_mark(said, widget).plain.rstrip()
                 check(f"{len(said)} chars at {width} cols: the mark is "
                       f"{'shown' if expect else 'dropped'}",
                       got.endswith(main.MAIL_IDLE_MARK), expect)

@@ -36,6 +36,24 @@ PROJ = {WORK: "[held] later", "P-mark-0002": "Plain"}
 #: Two addresses, the first holding a bracket -- which the board's own reader
 #: keeps, so a picker really is asked to draw one.
 NOTE = "see https://e.invalid/a[1]/b and also https://e.invalid/z"
+#: Text shaped the way the two parsers disagree about.  `escape` guards a
+#: bracket followed by a lowercase letter, `#`, `/` or `@`, which is Rich's
+#: idea of a tag; Textual reads more than that as one.  The first raised and
+#: ended the session, the middle ones vanished without a word, the backslashes
+#: came back doubled, and the last is the board's own styling written by
+#: somebody else.  Every word is meaningless on purpose.
+SHAPES = (
+    "usage [--opt=A-B] x",
+    "[A]",
+    "[Ab] text",
+    "[ABC=1]",
+    "[$var]",
+    "[_x]",
+    "[--k=SECS] [--v=path] S D",
+    "a\\[b]",
+    "end\\",
+    "[b]one[/b]",
+)
 
 ok = []
 def check(name, got, want):
@@ -216,6 +234,206 @@ async def things_to_choose():
                    and "[dim]" in d], drawn_list[:1])
 
 
+# ----------------------------------------------------- shapes the escape missed
+def shaped(note=None):
+    """One task per shape, titled with it, each holding `note` or its shape."""
+    tasks = [mk(f"T-shape-{i:02}", shape, D) for i, shape in enumerate(SHAPES)]
+    for task, shape in zip(tasks, SHAPES):
+        task.raw["note"] = singularity.note_document(note if note is not None else shape)
+    return tasks
+
+async def stays_open(site, body):
+    """Run one site's checks; a failure to draw is reported, not raised.
+
+    The failure this suite was extended for ended the session, and a part
+    that raised would say only that something did -- not which site, and not
+    what the other sites made of the same shapes.
+    """
+    try:
+        await body()
+    except Exception as error:
+        check(f"{site}: the board stays open",
+              f"{type(error).__name__}: {str(error)[:90]}", None)
+
+async def select(app, pilot, i):
+    from textual.widgets import DataTable
+    app.query_one(DataTable).move_cursor(row=i)
+    await settle(pilot, 4)
+
+async def shapes_in_the_detail_and_focus():
+    print("the detail area and the focus card draw every shape as written")
+    async def body():
+        async with board(tasks=shaped()) as (app, pilot):
+            for i in range(len(app.tasks)):
+                await select(app, pilot, i)
+                task = app.tasks[i]
+                check(f"the detail area shows {task.note_text!r}",
+                      task.note_text in drawn(app.query_one("#detail")), True)
+                await pilot.press("enter")
+                await until(pilot, lambda: bool(app.screen.query("#focus-title")))
+                check(f"the focus card's title is {task.display_title!r}",
+                      drawn(app.screen.query_one("#focus-title")), task.display_title)
+                check("and its note is the note as written",
+                      task.note_text in drawn(app.screen.query_one("#focus-note")), True)
+                await pilot.press("escape")
+                await until(pilot, lambda: not app.screen.query("#focus-title"))
+    await stays_open("detail and focus", body)
+
+async def shapes_in_the_status_line():
+    print("the status line draws every shape as written")
+    async def body():
+        async with board() as (app, pilot):
+            for shape in SHAPES:
+                for error in (False, True):
+                    said = f"moved “{shape}” to tomorrow"
+                    app.set_status(said, error)
+                    await settle(pilot, 3)
+                    check(f"{'an error' if error else 'a message'} quoting {shape!r}",
+                          drawn(app.query_one("#status")), said)
+    await stays_open("status line", body)
+
+async def shapes_in_the_prompts():
+    for key, kind, name in [("d", DatePicker, "the date picker"),
+                            ("p", ProjectPicker, "the project picker"),
+                            ("n", NoteInput, "the note editor"),
+                            ("backspace", Confirm, "the delete confirmation"),
+                            ("o", LinkPicker, "the link picker")]:
+        print(f"{name} shows every shape of title as written")
+        async def body():
+            async with board(tasks=shaped(note=NOTE)) as (app, pilot):
+                for i in range(len(app.tasks)):
+                    await select(app, pilot, i)
+                    title = app.tasks[i].display_title
+                    await pilot.press(key)
+                    if not await until(pilot, lambda: isinstance(app.screen, kind)):
+                        check(f"{name} opens on {title!r}", False, True)
+                        continue
+                    check(f"{name} names {title!r}", title in prompt_text(app), True)
+                    await pilot.press("escape")
+                    await until(pilot, lambda: not isinstance(app.screen, kind))
+        await stays_open(name, body)
+
+async def shapes_among_things_to_choose():
+    print("a project named in every shape is listed as written")
+    async def body():
+        names = {f"P-shape-{i:02}": shape for i, shape in enumerate(SHAPES)}
+        async with board(projects=names) as (app, pilot):
+            await pilot.press("p")
+            if not await until(pilot, lambda: isinstance(app.screen, ProjectPicker)):
+                check("the picker opens", False, True)
+                return
+            drawn_list = drawn_options(app.screen.query_one(OptionList))
+            check("every name is drawn in full",
+                  [n for n in names.values() if not any(n in d for d in drawn_list)], [])
+    await stays_open("project picker options", body)
+
+async def shapes_searched_for():
+    print("the bar names a search term of every shape as typed")
+    async def body():
+        from textual.widgets import Input
+        async with board() as (app, pilot):
+            for shape in SHAPES:
+                await pilot.press("slash")
+                await settle(pilot)
+                app.screen.query_one(Input).value = shape
+                await pilot.press("enter")
+                await settle(pilot)
+                check(f"the bar names {shape!r}",
+                      f'search "{shape}"' in drawn(app.query_one("#daybar")), True)
+    await stays_open("search bar", body)
+
+# ------------------------------------------------------------------- the rows
+def cell(value):
+    """A row cell as the table draws it: a string is parsed, text is not."""
+    from textual.widgets._data_table import default_cell_formatter
+    return default_cell_formatter(value)
+
+def cut(text, width):
+    """What a column of `width` shows of `text`, by the board's own rule."""
+    from rich.text import Text
+    shown = Text(text)
+    if len(shown) > width:
+        shown.truncate(width, overflow="ellipsis")
+    return shown.plain
+
+def styles(text):
+    """Every style a cell carries, its own and its spans', as one string."""
+    return " ".join([str(text.style)] + [str(span.style) for span in text.spans])
+
+async def shapes_in_the_rows():
+    print("every kind of row draws every shape as written")
+    import board as B
+    from board import (MAIL_MARK, MAIL_SENDER, MAIL_COUNT, MAIL_WHEN, MAIL_DONE,
+                      TRACKER_MARK, TRACKER_PROJECT, TRACKER_STATE,
+                      EVENT_MARK, EVENT_CALENDAR, EVENT_ENDS, EVENT_MINUTES)
+    def other(tid, title, **marks):
+        return singularity.Task({"id": tid, "title": title, "checked": 0,
+                                 "deferred": False, "useTime": False, **marks})
+    names = {f"P-shape-{i:02}": shape for i, shape in enumerate(SHAPES)}
+    async with board(projects=names) as (app, pilot):
+        drawn_board = app.board()
+        drawn_board.projects = names
+        wide, narrow = drawn_board.title_width, B._PROJECT_WIDTH
+        for i, shape in enumerate(SHAPES):
+            pid = f"P-shape-{i:02}"
+            row = [cell(c) for c in drawn_board.row_for(mk("T-r", shape, D, project=pid))]
+            check(f"a task titled {shape!r}", row[3].plain, cut(shape, wide))
+            check("  and its project's name", row[4].plain, cut(shape, narrow))
+            done = [cell(c) for c in drawn_board.row_for(mk("T-d", shape, D, checked=1))]
+            check("  finished, still as written", done[3].plain, cut(shape, wide))
+            check("  and struck", "strike" in styles(done[3]), True)
+            mail = [cell(c) for c in drawn_board.row_for(other(
+                "mail:r", shape, **{MAIL_MARK: True, MAIL_SENDER: shape,
+                                    MAIL_WHEN: 0, MAIL_COUNT: 2}))]
+            check("  a mail subject, with its count", mail[3].plain, cut(f"{shape} (2)", wide))
+            check("  and its sender", mail[4].plain, cut(B._mail_who(shape), narrow))
+            gone = [cell(c) for c in drawn_board.row_for(other(
+                "mail:d", shape, **{MAIL_MARK: True, MAIL_SENDER: "x@e.invalid",
+                                    MAIL_WHEN: 0, MAIL_DONE: True}))]
+            check("  a finished mail subject", gone[3].plain, cut(shape, wide))
+            check("  and struck", "strike" in styles(gone[3]), True)
+            issue = [cell(c) for c in drawn_board.row_for(other(
+                "yt:r", shape, **{TRACKER_MARK: True, TRACKER_PROJECT: shape,
+                                  TRACKER_STATE: "Open"}))]
+            check("  an issue's title", issue[3].plain, cut(shape, wide))
+            check("  and its project", issue[4].plain, cut(shape, narrow))
+            event = [cell(c) for c in drawn_board.row_for(other(
+                "cal:r", shape, **{EVENT_MARK: True, EVENT_CALENDAR: shape,
+                                   EVENT_ENDS: 0, EVENT_MINUTES: 600}))]
+            check("  an event that is over", event[3].plain, cut(shape, wide))
+            check("  and dimmed", "dim" in styles(event[3]), True)
+            check("  and its calendar", event[4].plain, cut(shape, narrow))
+        bold = [cell(c) for c in drawn_board.row_for(mk("T-b", "[b]one[/b]", D))]
+        check("a title naming the board's styling makes nothing bold",
+              "bold" in styles(bold[3]), False)
+        linked = mk("T-l", '<a href="https://e.invalid/x">[A] log</a> after', D)
+        row = [cell(c) for c in drawn_board.row_for(linked)]
+        check("a linked title reads as its words", row[3].plain, "[A] log after")
+        check("  and the link is still on them",
+              any("e.invalid/x" in str(s.style) and row[3].plain[s.start:s.end] == "[A] log"
+                  for s in row[3].spans), True)
+
+
+# -------------------------------------------------------------- the guard
+def escapes_imported(path):
+    """Every `escape` the file imports from a markup module, as `module.name`."""
+    import ast
+    found = []
+    for node in ast.walk(ast.parse(open(path, encoding="utf-8").read())):
+        if isinstance(node, ast.ImportFrom) and node.module in ("textual.markup", "rich.markup"):
+            found += [f"{node.module}.{a.name}" for a in node.names if a.name == "escape"]
+    return found
+
+async def nothing_escapes():
+    print("the board draws foreign text as text, so nothing imports escape")
+    # Escaping is what failed: it guards the brackets one parser reads as a
+    # tag, and the board is drawn by two.  Once nothing escapes, the next
+    # site to reach for it is a site about to be written the old way.
+    for name in ("main.py", "board.py"):
+        check(f"{name} imports no markup escape",
+              escapes_imported(_os.path.join(_REPO, name)), [])
+
+
 #: The parts this suite is made of, in the order they run.  One list, read
 #: by the runner to report and select them one at a time, and by the file
 #: itself when it is run directly -- so both ways run the same parts.
@@ -224,6 +442,13 @@ PARTS = (
     the_status_line,
     the_prompts,
     things_to_choose,
+    shapes_in_the_detail_and_focus,
+    shapes_in_the_status_line,
+    shapes_in_the_prompts,
+    shapes_among_things_to_choose,
+    shapes_searched_for,
+    shapes_in_the_rows,
+    nothing_escapes,
 )
 
 if __name__ == "__main__":

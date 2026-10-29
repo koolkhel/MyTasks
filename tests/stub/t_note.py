@@ -105,6 +105,28 @@ async def contents():
         check("and applies no styling from it",
               list(getattr(app.query_one("#detail", main.Static).render(), "spans", [])), [])
 
+async def usage_line():
+    print("a note quoting a command's usage line")
+    # The shape that ended the session: an option in brackets with a value
+    # holding a dash.  Selecting the row drew the note, and drawing it raised.
+    usage = "usage: tool [--opt=A-B] [--k=SECS] SOURCE"
+    app = await board([note_task("t1", "before", "plain"),
+                       note_task("t2", "the usage", usage),
+                       note_task("t3", "after", "plain")])
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            for step in ("the usage", "after", "the usage"):
+                await select(app, pilot, lambda t, s=step: t.title == s)
+                await settle(pilot, 4)
+            check("the board is still open after selecting it twice",
+                  app.is_running, True)
+            check("and the detail area shows the note as written",
+                  str(app.query_one("#detail", main.Static).render()), usage)
+    except Exception as error:
+        check("selecting the row leaves the board open",
+              f"{type(error).__name__}: {str(error)[:90]}", None)
+
 # ------------------------------------------------ discard, unchanged, clear
 async def leaving():
     print("leaving, changing nothing, and clearing")
@@ -246,6 +268,7 @@ async def optimistic():
 PARTS = (
     editing,
     contents,
+    usage_line,
     leaving,
     undo_first,
     refusals,
