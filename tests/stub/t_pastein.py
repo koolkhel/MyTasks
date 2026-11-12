@@ -329,6 +329,34 @@ async def group_5_7():
               screen.query_one(Input).value, "just one line")
 
 
+# ------------------------------------------------------------------ 5.8
+
+async def group_5_8():
+    print("\n5.8 a paste still being sent is not refused by a view change")
+    # Each line is judged when it is pasted, not when its turn to be sent
+    # comes.  Judged late, opening the recurring view refused the lines still
+    # waiting, and each refusal kept its place in flight for good -- so once
+    # five had, nothing paced was ever sent again.
+    app = make(position=TODAY)
+    async with run(app) as pilot:
+        app.client.gate = threading.Event()      # hold every write open
+        app.post_message(events.Paste(
+            "\n".join(f"- line {n:02d}" for n in range(20))))
+        await settle(pilot, 20)
+        await pilot.press("R")
+        await settle(pilot, 12)
+        app.client.gate.set()
+        await settle(pilot, 120)
+        check("every line was created in the end", len(created(app)), 20)
+        check("nothing is left waiting", (len(app._paced), len(app._paced_out)),
+              (0, 0))
+        await pilot.press("t")
+        await settle(pilot, 20)
+        app.post_message(events.Paste("- one more"))
+        await settle(pilot, 25)
+        check("and a later paste is sent too", "one more" in created(app), True)
+
+
 #: The parts this suite is made of, in the order they run.  One list, read
 #: by the runner to report and select them one at a time, and by the file
 #: itself when it is run directly -- so both ways run the same parts.
@@ -340,6 +368,7 @@ PARTS = (
     group_5_5,
     group_5_6,
     group_5_7,
+    group_5_8,
 )
 
 if __name__ == "__main__":

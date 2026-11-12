@@ -197,7 +197,12 @@ def _decoded(raw: str | None) -> str:
     out = []
     for part, charset in email.header.decode_header(raw):
         if isinstance(part, bytes):
-            out.append(part.decode(charset or "utf-8", "replace"))
+            try:
+                out.append(part.decode(charset or "utf-8", "replace"))
+            except LookupError:
+                # Raw 8-bit bytes come back as "unknown-8bit", which names
+                # no codec; they are nearly always UTF-8.
+                out.append(part.decode("utf-8", "replace"))
         else:
             out.append(part)
     return "".join(out).strip()
@@ -467,7 +472,7 @@ def _issue_done(message, html: str) -> bool:
     no link to the issue, or a link that is not struck.  None of those is a
     fault and none is reported as one -- most mail is not about an issue.
     """
-    key = (message.get(ISSUE_HEADER) or "").strip()
+    key = str(message.get(ISSUE_HEADER) or "").strip()
     if not key or not html:
         return False
     # Nothing to find, so nothing to parse.  The styling has to be somewhere
@@ -658,8 +663,9 @@ def _messages(box, folder: str = "") -> list[Message]:
                 # A message with no identity of its own is given the mailbox
                 # key, which is unique within the mailbox -- enough for it to
                 # be a thread of its own and to be told from its neighbours.
-                ident=(raw.get("Message-ID") or f"<key:{key}>").strip(),
-                answers=(raw.get("In-Reply-To") or "").strip() or None,
+                # str(): a header holding raw 8-bit bytes is a Header, not a str.
+                ident=str(raw.get("Message-ID") or f"<key:{key}>").strip(),
+                answers=str(raw.get("In-Reply-To") or "").strip() or None,
                 body=body,
                 text=f"{subject}\n{body}",
                 folder=folder,

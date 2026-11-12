@@ -494,6 +494,37 @@ async def stays_gone():
         check("nothing else was hidden",
               sum(t.raw[main.MAIL_COUNT] for t in rows(app)), 12)
 
+    print("a row still being filed does not come back on a view change")
+    # Confirming takes seconds a row, and leaving the inbox re-reads the
+    # mirror, which still holds the row's messages.  Held back only once
+    # confirmed, they came back for exactly that wait.
+    hold = threading.Event()
+
+    def wait_once(name, args):
+        if name == "SEARCH":
+            hold.wait(10)
+        return None
+
+    path = F.copy()
+    imap = server_for(path, fail=wait_once)
+    async with board(tracker_cfg=TRK, mail_cfg=mail.Config(path, F.FOLDERS),
+                     imap=imap) as (app, pilot, _p, _i, _o):
+        was = len(rows(app))
+        row = await select(app, pilot, lambda t: "ZZA-100" in (t.raw.get("title") or ""))
+        await pilot.press("space")
+        await settle(pilot, 14)
+        await pilot.press("t")
+        await settle(pilot, 26)
+        await pilot.press("i")
+        await settle(pilot, 30)
+        check("it is still gone while the server is being asked",
+              [t.id for t in rows(app) if t.id == row.id], [])
+        check("and nothing else went with it", len(rows(app)), was - 1)
+        hold.set()
+        await settle(pilot, 30)
+        check("and it stays gone once the move is confirmed",
+              [t.id for t in rows(app) if t.id == row.id], [])
+
     print("what the mailbox has caught up on is forgotten")
     path = F.copy()
     imap = server_for(path)

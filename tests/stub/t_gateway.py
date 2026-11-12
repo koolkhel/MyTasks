@@ -807,10 +807,54 @@ def the_account():
           (srv.mailbox, srv.archive), (None, None))
 
 
+def per_message_refusals():
+    """A message refused inside a bulk request is reported, not counted done.
+
+    The library answers a move or a flag with one result per message and
+    hands a refused one back as an exception in that list rather than
+    raising it.  The substituted account cannot show this, so the real
+    `move` and `mark` are driven unbound against an account that answers as
+    the library does.
+    """
+    print("a message the account refuses inside one request is reported")
+    from types import SimpleNamespace
+    from exchangelib.errors import ErrorItemNotFound
+
+    class Account:
+        def __init__(self, answer):
+            self.answer = answer
+
+        def bulk_move(self, ids, to_folder):
+            return list(self.answer)
+
+        def bulk_update(self, items):
+            return list(self.answer)
+
+    class Item:
+        is_read = False
+
+    refused = SimpleNamespace(account=Account([("i1", "c1"),
+                                               ErrorItemNotFound("gone")]))
+    accepted = SimpleNamespace(account=Account([("i1", "c1"), ("i2", "c2")]))
+    for name, act in (
+            ("a move", lambda mb: gateway.Mailbox.move(mb, [Item(), Item()],
+                                                       "Archive")),
+            ("a flag", lambda mb: gateway.Mailbox.mark(mb, [Item(), Item()],
+                                                       True))):
+        try:
+            gateway.Server._talk(None, "X", lambda: act(refused))
+            check(f"{name} with one message refused is reported",
+                  "no error raised", "MoveFailed")
+        except gateway.MoveFailed:
+            check(f"{name} with one message refused is reported", True)
+        check(f"{name} the account took whole raises nothing",
+              act(accepted), None)
+
+
 #: The parts this suite is made of, in the order they run.  One list,
 #: read by the runner to report and select them one at a time, and by
 #: the file itself when it is run directly.
-PARTS = (the_account,)
+PARTS = (the_account, per_message_refusals)
 
 if __name__ == "__main__":
     raise SystemExit(run_parts(PARTS, ok))

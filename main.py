@@ -1648,6 +1648,7 @@ class TaskApp(App[None]):
         #: slowed by it.
         self._paced: "deque[Callable[[], str | None]]" = deque()
         self._paced_out: set[str] = set()
+        self._sending_queued = False
         # What the working window last said, and whether a press is
         # overruling it.  The mode stays a plain boolean because `repaint`
         # reads it three times and must see one answer; a property reading
@@ -1717,9 +1718,10 @@ class TaskApp(App[None]):
         #: server, so a suite can drive every path of a review -- including
         #: the ones that must fail -- without an account.
         self.gateway_connect = None
-        #: Identities the gateway has confirmed are in the archive, for this
-        #: session only.  The folders are a mirror, refreshed on a timer of
-        #: its own, so for up to one sync interval a read still returns a
+        #: Identities being filed away or confirmed in the archive, for this
+        #: session only -- held from the moment the row leaves, and let go
+        #: again if nothing confirms them.  The folders are a mirror,
+        #: refreshed on a timer of its own, so for up to one sync interval a read still returns a
         #: message that has already been filed away -- and every view change
         #: re-reads.  Without this the queue would not drain: a person who
         #: reviewed ten rows and pressed `i` would meet them all again, which
@@ -2403,11 +2405,15 @@ class TaskApp(App[None]):
             if thread.newest.ident == ident:
                 self.mail_threads = (self.mail_threads[:where]
                                      + self.mail_threads[where + 1:])
+                # Held back from now, not from the confirmation: a view
+                # change re-reads the mirror, which still holds them.
+                self.reviewed |= {m.ident for m in thread.messages}
                 return thread, where
         return None
 
     def restore_thread(self, thread: Any, where: int | None) -> None:
         """Put a thread back in the queue, where it was."""
+        self.reviewed -= {m.ident for m in thread.messages}
         if any(t.newest.ident == thread.newest.ident for t in self.mail_threads):
             return
         at = len(self.mail_threads) if where is None else where
@@ -2613,10 +2619,9 @@ class TaskApp(App[None]):
             # moved that message, and saying which is more use than either.
             parts.append(
                 f"{len(outcome.missing)} in neither the folder nor the archive")
-        # Both count as in the archive, and both must stay out of the queue
-        # until the mirror agrees: one was just moved, the other was already
-        # there when we looked.
-        self.reviewed |= set(outcome.archived) | set(outcome.already)
+        # Held back since the row left; nothing confirmed these, so their
+        # row returns at the next read rather than being quietly retired.
+        self.reviewed -= set(outcome.missing)
         said = " · ".join(parts) or "nothing to file away"
         if outcome.missing:
             # Not the move failing, but not nothing either: something else
@@ -3009,7 +3014,8 @@ class TaskApp(App[None]):
         Textual's own binding dispatcher, and shadowing it silently breaks
         every key in the app.
         """
-        if self.refuse_series() or self.refuse_foreign(task):
+        if ((not self._sending_queued and self.refuse_series())
+                or self.refuse_foreign(task)):
             return
         patch = patch or {}
         # Acting again supersedes whatever was last said, so it stops
@@ -4199,6 +4205,9 @@ class TaskApp(App[None]):
         if not self._undo:
             self.set_status("Nothing left to undo")
             return
+        # Before the pop: a refused undo must stay on the stack to be used.
+        if self.refuse_series():
+            return
         entry = self._undo.pop()
         if not entry.reversible:
             self.set_status(entry.reason, True)
@@ -4373,8 +4382,16 @@ class TaskApp(App[None]):
     def send_paced(self) -> None:
         """Start as many waiting writes as there is room for.  UI thread only."""
         while self._paced and len(self._paced_out) < PACED_AT_ONCE:
-            ident = self._paced.popleft()()
-            if ident is not None:
+            # Judged when it was made, not now: opening the recurring view
+            # must not refuse a paste or a set already accepted on a day.
+            self._sending_queued = True
+            try:
+                ident = self._paced.popleft()()
+            finally:
+                self._sending_queued = False
+            # A write refused on the way queued nothing, so nothing will
+            # ever settle it and give its place back.
+            if ident is not None and self._pending.get(ident):
                 self._paced_out.add(ident)
 
     def settled(self, key: str) -> None:
@@ -4807,6 +4824,8 @@ class TaskApp(App[None]):
 
         One group, so one press of the undo key takes the whole paste back.
         """
+        if self.refuse_series():
+            return
         if self.position is ARCHIVE:
             # A paste is an addition, and lands where what is added lands --
             # so in the one view that takes no addition it lands nowhere.

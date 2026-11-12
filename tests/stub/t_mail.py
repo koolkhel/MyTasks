@@ -460,10 +460,41 @@ def the_mailbox():
     check("and the thread holds all three", mail.threads(mail.read(c))[0].count, 3)
 
 
+def eight_bit_headers():
+    """Headers sent as raw UTF-8 bytes rather than encoded.
+
+    Python names their charset "unknown-8bit", which no codec answers to, and
+    hands such a header back as a Header rather than a str.  Either used to
+    drop the whole message from the queue without a word.
+    """
+    print("\nheaders sent as raw 8-bit bytes")
+    root = tempfile.mkdtemp()
+    path = os.path.join(root, "mail_folders")
+    os.makedirs(path)
+    box = mailbox.Maildir(os.path.join(path, FEED), create=True)
+    box.add(mailbox.MaildirMessage(
+        b"From: Ren\xc3\xa9 <r@example.invalid>\r\n"
+        b"Subject: Caf\xc3\xa9 menu\r\n"
+        b"Message-ID: <caf\xc3\xa9@example.invalid>\r\n"
+        b"In-Reply-To: <\xc3\xa9t\xc3\xa9@example.invalid>\r\n"
+        + mail.ISSUE_HEADER.encode() + b": ZZA-\xc3\xa9\r\n"
+        b"Date: Tue, 08 Sep 2026 08:00:00 +0000\r\n\r\nbody\r\n"))
+    box.add(mailbox.MaildirMessage(
+        b"From: plain@example.invalid\r\nSubject: plain\r\n"
+        b"Message-ID: <plain@example.invalid>\r\n"
+        b"Date: Tue, 08 Sep 2026 09:00:00 +0000\r\n\r\nbody\r\n"))
+    box.flush()
+    got = mail.read(mail.Config(path, (FEED,)))
+    check("neither message is dropped", len(got), 2)
+    odd = [m for m in got if m.subject != "plain"]
+    check("the subject is read as UTF-8", [m.subject for m in odd], ["Café menu"])
+    check("and so is the sender", [("René" in m.sender) for m in odd], [True])
+
+
 #: The parts this suite is made of, in the order they run.  One list,
 #: read by the runner to report and select them one at a time, and by
 #: the file itself when it is run directly.
-PARTS = (the_mailbox,)
+PARTS = (the_mailbox, eight_bit_headers)
 
 if __name__ == "__main__":
     raise SystemExit(run_parts(PARTS, ok))

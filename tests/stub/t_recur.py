@@ -29,6 +29,7 @@ import singularity
 import tracker
 from singularity import SERIES, Task
 from main import TaskApp
+from textual import events
 from textual.widgets import Static
 
 TZ = local_tz()
@@ -369,6 +370,70 @@ def nothing_is_written_from_the_view():
     check("outside the view nothing is refused", asyncio.run(on_its_day()), False)
 
 
+# ------------------------------------------- 4.7 a paste and an undo
+
+def a_paste_and_an_undo_are_refused_in_the_view():
+    print("\n4.7 a paste and an undo are refused too, and the undo is kept")
+    # Neither is a key in the list above: a paste is an event, and an undo
+    # writes what an earlier action recorded.  A paste here used to end the
+    # board, by reading the view as a day to date the new tasks with.
+    WROTE = ("set_", "create", "complete", "cancel", "delete", "restore",
+             "update")
+
+    async def paste(marks):
+        app = app_with(series("S-a", "weekly one"), series("S-b", "weekly two"))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("R")
+            for _ in range(10):
+                await pilot.pause()
+            for _ in range(marks):
+                await pilot.press("v")
+            app.post_message(events.Paste("- one\n- two"))
+            for _ in range(6):
+                await pilot.pause()
+            said = str(app.query_one("#status").render())
+            wrote = [c[0] for c in app.client.calls if c[0].startswith(WROTE)]
+            return said, wrote, sorted(t.id for t in app.tasks)
+
+    for marks in (0, 2):
+        said, wrote, rows = asyncio.run(paste(marks))
+        check(f"a paste, {marks} marked: nothing was written", wrote, [])
+        check(f"a paste, {marks} marked: the board says the view is a reading",
+              "read here" in said)
+        check(f"a paste, {marks} marked: the rows are untouched",
+              rows, ["S-a", "S-b"])
+
+    async def undo():
+        app = app_with(mk("P-1", "a plain task", TODAY))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            for _ in range(8):
+                await pilot.pause()
+            await pilot.press("R")
+            for _ in range(10):
+                await pilot.pause()
+            await pilot.press("u")
+            for _ in range(6):
+                await pilot.pause()
+            said = str(app.query_one("#status").render())
+            in_view = app.client.count("restore"), len(app._undo)
+            await pilot.press("t")
+            for _ in range(10):
+                await pilot.pause()
+            await pilot.press("u")
+            for _ in range(8):
+                await pilot.pause()
+            return said, in_view, app.client.count("restore")
+
+    said, (restored, kept), later = asyncio.run(undo())
+    check("an undo in the view writes nothing", restored, 0)
+    check("and says the view is a reading", "read here" in said)
+    check("the undo is still there to use", kept, 1)
+    check("and works once back on the day", later, 1)
+
+
 #: The parts this suite is made of, in the order they run.  One list, read
 #: by the runner to report and select them one at a time, and by the file
 #: itself when it is run directly -- so both ways run the same parts.
@@ -379,6 +444,7 @@ PARTS = (
     the_key_reaches_the_view,
     the_sweep_happens_once_until_a_reload,
     nothing_is_written_from_the_view,
+    a_paste_and_an_undo_are_refused_in_the_view,
 )
 
 if __name__ == "__main__":

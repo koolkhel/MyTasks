@@ -304,13 +304,25 @@ class Mailbox:
 
     def move(self, items, target) -> None:
         """Move these items to that folder, in one request."""
-        self.account.bulk_move(ids=items, to_folder=target)
+        _raise_refusal(self.account.bulk_move(ids=items, to_folder=target))
 
     def mark(self, items, seen: bool) -> None:
         """Mark these items read, or unread again, in one request."""
         for item in items:
             item.is_read = seen
-        self.account.bulk_update([(item, ("is_read",)) for item in items])
+        _raise_refusal(
+            self.account.bulk_update([(item, ("is_read",)) for item in items]))
+
+
+def _raise_refusal(answers) -> None:
+    """Raise the first message the account refused inside a bulk request.
+
+    The library hands a refused message back as an exception in the answer
+    rather than raising it, so unread it would count as done.
+    """
+    for answer in answers:
+        if isinstance(answer, Exception):
+            raise answer
 
 
 class Server:
